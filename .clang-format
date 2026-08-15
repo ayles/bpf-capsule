@@ -1,0 +1,53 @@
+---
+Language: Cpp
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 160
+DerivePointerAlignment: false
+PointerAlignment: Left
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: None
+BreakConstructorInitializers: BeforeComma
+KeepEmptyLines:
+  AtEndOfFile: true
+  AtStartOfBlock: false
+ConstructorInitializerIndentWidth: 4
+PackConstructorInitializers: Never
+BreakBeforeBraces: Attach
+InsertBraces: true
+NamespaceIndentation: None
+FixNamespaceComments: true
+ShortNamespaceLines: 0
+IndentCaseLabels: true
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+BreakTemplateDeclarations: Yes
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+Cpp11BracedListStyle: true
+Standard: c++20
+SortIncludes: false
+MaxEmptyLinesToKeep: 1
+SpaceBeforeParens: ControlStatements
+SpacesBeforeTrailingComments: 1
+SpacesInLineCommentPrefix:
+  Minimum: 1
+  Maximum: -1
+ContinuationIndentWidth: 4
+AlignEscapedNewlines: DontAlign
+AlignAfterOpenBracket: false
+BreakAfterOpenBracketBracedList: true
+BreakAfterOpenBracketFunction: true
+BreakAfterOpenBracketIf: true
+BreakAfterOpenBracketLoop: true
+BreakAfterOpenBracketSwitch: true
+BreakBeforeCloseBracketBracedList: true
+BreakBeforeCloseBracketFunction: true
+BreakBeforeCloseBracketIf: true
+BreakBeforeCloseBracketLoop: true
+BreakBeforeCloseBracketSwitch: true
+AlignOperands: DontAlign
+IndentExternBlock: NoIndent
+...

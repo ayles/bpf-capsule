@@ -1,0 +1,17 @@
+diff --git a/PureDOOM.h b/PureDOOM.h
+--- a/PureDOOM.h
++++ b/PureDOOM.h
+@@ -11,6 +11,13 @@
+ // for more details.
+ //
+ //-----------------------------------------------------------------------------
++/*
++ * Modified by the BPF Capsule contributors in 2026. The build applies this
++ * notice and the separately recorded framebuffer and cached-lump fixes to
++ * PureDOOM revision 355cfbd16fac119718879239336ee2ea408886bd. The original
++ * header, every patch, and the build sources are distributed together under
++ * the GPL-2.0 terms supplied with that PureDOOM revision.
++ */
+ /* Pure DOOM usage
+    Do this:
+       #define DOOM_IMPLEMENTATION

@@ -1,0 +1,7 @@
+BPF Capsule compiler and runtime
+Copyright 2025-2026 BPF Capsule contributors
+
+The core project is licensed under Apache-2.0 with the LLVM exception as
+described by LICENSE. The GPL-2.0-only Doom example and other in-tree
+third-party or generated material retain the notices recorded in
+docs/THIRD_PARTY.md and in their respective directories.

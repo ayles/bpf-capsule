@@ -1,0 +1,17 @@
+.envrc
+.direnv/
+.cache/
+.deps/
+__pycache__/
+*.py[cod]
+compile_commands.json
+build*/
+target/
+benchmark-results/
+result
+result-*
+*.qcow2
+*.wad
+.DS_Store
+.idea/
+.vscode

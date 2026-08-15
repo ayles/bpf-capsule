@@ -1,0 +1,16 @@
+diff --git a/PureDOOM.h b/PureDOOM.h
+--- a/PureDOOM.h
++++ b/PureDOOM.h
+@@ -46324,1 +46324,2 @@ void* W_CacheLumpNum(int lump, int tag)
+     byte* ptr;
++    int length;
+@@ -46340,1 +46341,8 @@ void* W_CacheLumpNum(int lump, int tag)
+-        ptr = Z_Malloc(W_LumpLength(lump), tag, &lumpcache[lump]);
++        // The vanilla column drawer indexes up to 127 bytes from a post's
++        // pixel start. Sparse single-patch textures can end sooner, making
++        // that historical over-read depend on neighboring allocator data.
++        // Keep the compatibility bytes inside the cache allocation and make
++        // them deterministic without adding work to the renderer hot path.
++        length = W_LumpLength(lump);
++        ptr = Z_Malloc(length + 128, tag, &lumpcache[lump]);
++        doom_memset(ptr + length, 0, 128);

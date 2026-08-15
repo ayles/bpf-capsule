@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+[package]
+name = "bpf-capsule-rt"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 WITH LLVM-exception"
+publish = false
+
+[features]
+default = []
+alloc = []
+
+[lib]
+path = "src/lib.rs"

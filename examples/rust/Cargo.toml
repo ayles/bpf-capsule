@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+[package]
+name = "bpf-capsule-rust-example"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 WITH LLVM-exception"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+bpf-capsule-rt = { path = "../../src/rust/bpf-capsule-rt", features = ["alloc"] }
+
+[profile.release]
+panic = "abort"
+opt-level = 2
+codegen-units = 1

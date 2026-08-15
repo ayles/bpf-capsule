@@ -1,0 +1,1199 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// The C library, for a machine with no operating system under it.
+//
+// Every program compiled into the kernel needs some of this, and none of it
+// is program-specific, so it lives here rather than being retyped per port.
+// Three groups:
+//   - real implementations (string and memory routines),
+//   - a synchronized TLSF allocator over the configured Capsule heap (or
+//     null-returning allocator symbols for a library that owns the heap),
+//   - honest failures for everything that would need an OS (files, time,
+//     processes) — they return errors rather than pretending to work.
+// Only the guest ABI is needed here; the single-include runtime header that
+// owns maps and globals remains in the program's sectioned translation unit.
+#include "bpf_capsule.h"
+
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <sys/time.h>
+#include <time.h>
+#include <ctype.h>
+#include <errno.h>
+#include <locale.h>
+#include <signal.h>
+#include <setjmp.h>
+
+#include <linux/bpf.h>
+#include <bpf/bpf_helpers.h>
+
+// ------------------------------------------------------------ memory, strings
+// Ordinary out-of-line functions. A single shared copy is reached with arena
+// pointers from the program and map pointers from the driver; the verifier
+// rejects one instruction serving both ("same insn cannot be used with
+// different pointers"). That collision came from codegen tail merging, which
+// is disabled globally, so these need no per-call-site duplication.
+void* memcpy(void* d, const void* s, unsigned long n) {
+    char* dp = d;
+    const char* sp = s;
+    for (unsigned long i = 0; i < n; i++) {
+        dp[i] = sp[i];
+    }
+    return d;
+}
+void* memmove(void* d, const void* s, unsigned long n) {
+    char* dp = d;
+    const char* sp = s;
+    if (dp < sp) {
+        for (unsigned long i = 0; i < n; i++) {
+            dp[i] = sp[i];
+        }
+    } else {
+        for (unsigned long i = n; i > 0; i--) {
+            dp[i - 1] = sp[i - 1];
+        }
+    }
+    return d;
+}
+void* memset(void* d, int c, unsigned long n) {
+    char* dp = d;
+    for (unsigned long i = 0; i < n; i++) {
+        dp[i] = (char)c;
+    }
+    return d;
+}
+int memcmp(const void* a, const void* b, unsigned long n) {
+    const unsigned char* x = a;
+    const unsigned char* y = b;
+    for (unsigned long i = 0; i < n; i++) {
+        if (x[i] != y[i]) {
+            return x[i] < y[i] ? -1 : 1;
+        }
+    }
+    return 0;
+}
+void* memchr(const void* s, int c, unsigned long n) {
+    const unsigned char* p = s;
+    for (unsigned long i = 0; i < n; i++) {
+        if (p[i] == (unsigned char)c) {
+            return (void*)&p[i];
+        }
+    }
+    return 0;
+}
+unsigned long strlen(const char* s) {
+    unsigned long n = 0;
+    while (s[n]) {
+        n++;
+    }
+    return n;
+}
+int strcmp(const char* a, const char* b) {
+    unsigned long i = 0;
+    for (; a[i] && a[i] == b[i]; i++) {
+    }
+    return (unsigned char)a[i] - (unsigned char)b[i];
+}
+int strcoll(const char* a, const char* b) {
+    return strcmp(a, b);
+}
+int strncmp(const char* a, const char* b, unsigned long n) {
+    for (unsigned long i = 0; i < n; i++) {
+        if (a[i] != b[i]) {
+            return (unsigned char)a[i] - (unsigned char)b[i];
+        }
+        if (!a[i]) {
+            return 0;
+        }
+    }
+    return 0;
+}
+char* strcpy(char* d, const char* s) {
+    unsigned long i = 0;
+    for (; s[i]; i++) {
+        d[i] = s[i];
+    }
+    d[i] = 0;
+    return d;
+}
+char* strncpy(char* d, const char* s, unsigned long n) {
+    unsigned long i = 0;
+    for (; i < n && s[i]; i++) {
+        d[i] = s[i];
+    }
+    for (; i < n; i++) {
+        d[i] = 0;
+    }
+    return d;
+}
+char* strcat(char* d, const char* s) {
+    unsigned long n = strlen(d), i = 0;
+    for (; s[i]; i++) {
+        d[n + i] = s[i];
+    }
+    d[n + i] = 0;
+    return d;
+}
+char* strchr(const char* s, int c) {
+    for (unsigned long i = 0;; i++) {
+        if (s[i] == (char)c) {
+            return (char*)&s[i];
+        }
+        if (!s[i]) {
+            return 0;
+        }
+    }
+}
+char* strrchr(const char* s, int c) {
+    char* last = 0;
+    for (unsigned long i = 0;; i++) {
+        if (s[i] == (char)c) {
+            last = (char*)&s[i];
+        }
+        if (!s[i]) {
+            return last;
+        }
+    }
+}
+unsigned long strspn(const char* s, const char* accept) {
+    unsigned long n = 0;
+    for (; s[n]; n++) {
+        const char* a = accept;
+        for (; *a && *a != s[n]; a++) {
+        }
+        if (!*a) {
+            break;
+        }
+    }
+    return n;
+}
+unsigned long strcspn(const char* s, const char* reject) {
+    unsigned long n = 0;
+    for (; s[n]; n++) {
+        for (const char* r = reject; *r; r++) {
+            if (*r == s[n]) {
+                return n;
+            }
+        }
+    }
+    return n;
+}
+char* strpbrk(const char* s, const char* accept) {
+    for (unsigned long i = 0; s[i]; i++) {
+        for (const char* a = accept; *a; a++) {
+            if (*a == s[i]) {
+                return (char*)&s[i];
+            }
+        }
+    }
+    return 0;
+}
+char* strstr(const char* h, const char* n) {
+    unsigned long ln = strlen(n);
+    if (!ln) {
+        return (char*)h;
+    }
+    for (unsigned long i = 0; h[i]; i++) {
+        if (!strncmp(h + i, n, ln)) {
+            return (char*)&h[i];
+        }
+    }
+    return 0;
+}
+char* strerror(int e) {
+    return "error";
+}
+
+// ------------------------------------------------------------------ allocator
+//
+// Allocation is TLSF (see src/libc/tlsf.c): two-level segregated
+// fit and O(1) malloc/free over the load-time-sized Capsule heap.
+#ifndef BPF_CAPSULE_FREESTANDING_NULL_ALLOCATOR
+#include "tlsf.h"
+
+static tlsf_t fs_tlsf;
+
+// A HASH insertion with BPF_NOEXIST is the portable kernel-wide compare and
+// exchange available to every program type on both supported tiers. It is a
+// better allocator mutex than bpf_spin_lock here: Linux 5.15 rejects spin
+// locks in the sleepable syscall programs used by BPF_PROG_TEST_RUN.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1);
+    __type(key, unsigned int);
+    __type(value, unsigned int);
+} fs_allocator_lease SEC(".maps");
+
+// BPF helpers require key/value arguments with verifier-native provenance;
+// managed-frame pointers are deliberately rejected. This fixed word lives in
+// libbpf-managed read-only storage and supplies both arguments. Its contents
+// are irrelevant: BPF_NOEXIST insertion is the linearization point.
+static const unsigned int fs_allocator_token SEC(".rodata.fs_allocator") = 0;
+
+#define FS_ALLOCATOR_BUSY (~0ull)
+#define FS_ALLOCATOR_ERROR (~1ull)
+
+static __attribute__((always_inline)) int fs_try_lock(void) {
+    return bpf_map_update_elem(&fs_allocator_lease, &fs_allocator_token, &fs_allocator_token, BPF_NOEXIST) == 0;
+}
+
+static __attribute__((always_inline)) int fs_unlock(void) {
+    return bpf_map_delete_elem(&fs_allocator_lease, &fs_allocator_token) == 0;
+}
+
+static int fs_setup(void) {
+    unsigned long heap_size = capsule_heap_size();
+    unsigned long minimum = tlsf_size() + tlsf_pool_overhead() + tlsf_block_size_min();
+    if (heap_size < minimum) {
+        return 0;
+    }
+    fs_tlsf = tlsf_create_with_pool(capsule_heap_start(), heap_size);
+    return fs_tlsf != 0;
+}
+
+// These four scalar-ABI operations are compiler-enforced no-suspend islands.
+// A busy lease returns without touching TLSF; the ordinary managed wrapper
+// retries and may suspend there. Once an island acquires the lease it performs
+// the complete metadata operation and releases it in the same BPF invocation.
+// The compiler rejects any virtualized backedge or managed call that survives
+// inside a __bpf_capsule_nosuspend_ function.
+__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_malloc(unsigned long n) {
+    if (!fs_try_lock()) {
+        return FS_ALLOCATOR_BUSY;
+    }
+    if (!fs_tlsf && !fs_setup()) {
+        return fs_unlock() ? 0 : FS_ALLOCATOR_ERROR;
+    }
+    void* result = tlsf_malloc(fs_tlsf, n);
+    return fs_unlock() ? (unsigned long long)(unsigned long)result : FS_ALLOCATOR_ERROR;
+}
+
+__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_free(unsigned long address) {
+    if (!fs_try_lock()) {
+        return FS_ALLOCATOR_BUSY;
+    }
+    if (fs_tlsf) {
+        tlsf_free(fs_tlsf, (void*)address);
+    }
+    return fs_unlock() ? 0 : FS_ALLOCATOR_ERROR;
+}
+
+__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_size(unsigned long address) {
+    if (!fs_try_lock()) {
+        return FS_ALLOCATOR_BUSY;
+    }
+    unsigned long result = fs_tlsf ? tlsf_block_size((void*)address) : 0;
+    return fs_unlock() ? result : FS_ALLOCATOR_ERROR;
+}
+
+__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_memalign(unsigned long align, unsigned long n) {
+    if (!fs_try_lock()) {
+        return FS_ALLOCATOR_BUSY;
+    }
+    if (!fs_tlsf && !fs_setup()) {
+        return fs_unlock() ? 0 : FS_ALLOCATOR_ERROR;
+    }
+    void* result = tlsf_memalign(fs_tlsf, align, n);
+    return fs_unlock() ? (unsigned long long)(unsigned long)result : FS_ALLOCATOR_ERROR;
+}
+
+void* malloc(unsigned long n) {
+    unsigned long long result;
+    do {
+        result = __bpf_capsule_nosuspend_allocator_malloc(n);
+    } while (result == FS_ALLOCATOR_BUSY);
+    if (result == FS_ALLOCATOR_ERROR) {
+        __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
+    }
+    if (!result) {
+        errno = ENOMEM;
+    }
+    return (void*)(unsigned long)result;
+}
+
+void free(void* p) {
+    if (!p) {
+        return;
+    }
+    unsigned long long result;
+    do {
+        result = __bpf_capsule_nosuspend_allocator_free((unsigned long)p);
+    } while (result == FS_ALLOCATOR_BUSY);
+    if (result == FS_ALLOCATOR_ERROR) {
+        __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
+    }
+}
+
+void* calloc(unsigned long n, unsigned long sz) {
+    if (sz && n > ~0ul / sz) {
+        errno = ENOMEM;
+        return 0;
+    }
+    unsigned long total = n * sz;
+    void* p = malloc(total);
+    if (p) {
+        memset(p, 0, total);
+    }
+    return p;
+}
+
+unsigned long malloc_usable_size(void* p) {
+    if (!p) {
+        return 0;
+    }
+    unsigned long long result;
+    do {
+        result = __bpf_capsule_nosuspend_allocator_size((unsigned long)p);
+    } while (result == FS_ALLOCATOR_BUSY);
+    if (result == FS_ALLOCATOR_ERROR) {
+        __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
+    }
+    return result;
+}
+
+void* realloc(void* p, unsigned long n) {
+    if (!p) {
+        return malloc(n);
+    }
+    if (!n) {
+        free(p);
+        return 0;
+    }
+    unsigned long old_size = malloc_usable_size(p);
+    if (old_size >= n) {
+        return p;
+    }
+    void* replacement = malloc(n);
+    if (!replacement) {
+        return 0;
+    }
+    memcpy(replacement, p, old_size);
+    free(p);
+    return replacement;
+}
+
+// malloc's blocks are 8-byte aligned; callers with stricter needs (Rust's
+// GlobalAlloc contract, for one) go through TLSF's aligned path. The result
+// is an ordinary block, so free() takes it back like any other.
+void* memalign(unsigned long align, unsigned long n) {
+    unsigned long long result;
+    do {
+        result = __bpf_capsule_nosuspend_allocator_memalign(align, n);
+    } while (result == FS_ALLOCATOR_BUSY);
+    if (result == FS_ALLOCATOR_ERROR) {
+        __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
+    }
+    if (!result) {
+        errno = ENOMEM;
+    }
+    return (void*)(unsigned long)result;
+}
+#else
+// Some libraries retain unreachable libc allocation references even when
+// configured to use their own heap. Resolve those references without creating
+// a second allocator over the same Capsule memory.
+void* malloc(unsigned long n) {
+    (void)n;
+    return 0;
+}
+
+void free(void* p) {
+    (void)p;
+}
+
+void* calloc(unsigned long n, unsigned long sz) {
+    (void)n;
+    (void)sz;
+    return 0;
+}
+
+unsigned long malloc_usable_size(void* p) {
+    (void)p;
+    return 0;
+}
+
+void* realloc(void* p, unsigned long n) {
+    (void)p;
+    (void)n;
+    return 0;
+}
+
+void* memalign(unsigned long align, unsigned long n) {
+    (void)align;
+    (void)n;
+    return 0;
+}
+#endif
+
+// -------------------------------------------------------------- conversions
+int abs(int v) {
+    return v < 0 ? -v : v;
+}
+
+static int fs_digit(int c, int base) {
+    int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'z' ? c - 'a' + 10 : c >= 'A' && c <= 'Z' ? c - 'A' + 10 : 99;
+    return v < base ? v : -1;
+}
+
+struct fs_integer_parse {
+    const char* end;
+    unsigned long long value;
+    int negative;
+    int any;
+    int overflow;
+};
+
+static struct fs_integer_parse fs_parse_integer(const char* s, int base, unsigned long long limit) {
+    struct fs_integer_parse result = {.end = s};
+    const char* p = s;
+    while (isspace((unsigned char)*p)) {
+        p++;
+    }
+    result.negative = *p == '-';
+    if (*p == '-' || *p == '+') {
+        p++;
+    }
+    if (base != 0 && (base < 2 || base > 36)) {
+        errno = EINVAL;
+        return result;
+    }
+    if (base == 0) {
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && fs_digit(p[2], 16) >= 0) {
+            base = 16;
+            p += 2;
+        } else if (p[0] == '0') {
+            base = 8;
+        } else {
+            base = 10;
+        }
+    } else if (base == 16 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && fs_digit(p[2], 16) >= 0) {
+        p += 2;
+    }
+
+    unsigned long long cutoff = limit / (unsigned)base;
+    unsigned int cutlim = (unsigned int)(limit % (unsigned)base);
+    for (int digit; (digit = fs_digit((unsigned char)*p, base)) >= 0; p++) {
+        result.any = 1;
+        if (result.value > cutoff || (result.value == cutoff && (unsigned int)digit > cutlim)) {
+            result.overflow = 1;
+            result.value = limit;
+        } else if (!result.overflow) {
+            result.value = result.value * (unsigned)base + (unsigned)digit;
+        }
+    }
+    result.end = result.any ? p : s;
+    return result;
+}
+
+long strtol(const char* s, char** end, int base) {
+    const unsigned long long positive_limit = (unsigned long long)(~0ul >> 1);
+    struct fs_integer_parse parsed = fs_parse_integer(s, base, positive_limit + 1u);
+    if (end) {
+        *end = (char*)parsed.end;
+    }
+    if (!parsed.any) {
+        return 0;
+    }
+    unsigned long long limit = parsed.negative ? positive_limit + 1u : positive_limit;
+    if (parsed.overflow || parsed.value > limit) {
+        errno = ERANGE;
+        return parsed.negative ? (long)(~0ul << (sizeof(unsigned long) * 8u - 1u)) : (long)positive_limit;
+    }
+    if (!parsed.negative) {
+        return (long)parsed.value;
+    }
+    return parsed.value == positive_limit + 1u ? (long)(~0ul << (sizeof(unsigned long) * 8u - 1u)) : -(long)parsed.value;
+}
+unsigned long strtoul(const char* s, char** end, int base) {
+    struct fs_integer_parse parsed = fs_parse_integer(s, base, ~0ull);
+    if (end) {
+        *end = (char*)parsed.end;
+    }
+    if (parsed.overflow) {
+        errno = ERANGE;
+        return ~0ul;
+    }
+    unsigned long value = (unsigned long)parsed.value;
+    return parsed.negative ? 0ul - value : value;
+}
+
+void qsort(void* base, unsigned long n, unsigned long sz, int (*cmp)(const void*, const void*)) {
+    // Insertion sort: the call sites here sort small arrays, and a simple
+    // algorithm keeps the managed call graph shallow.
+    unsigned char* a = base;
+    for (unsigned long i = 1; i < n; i++) {
+        for (unsigned long j = i; j > 0 && cmp(a + (j - 1) * sz, a + j * sz) > 0; j--) {
+            for (unsigned long k = 0; k < sz; k++) {
+                unsigned char t = a[(j - 1) * sz + k];
+                a[(j - 1) * sz + k] = a[j * sz + k];
+                a[j * sz + k] = t;
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------------- ctype
+int isdigit(int c) {
+    return c >= '0' && c <= '9';
+}
+int isupper(int c) {
+    return c >= 'A' && c <= 'Z';
+}
+int islower(int c) {
+    return c >= 'a' && c <= 'z';
+}
+int isalpha(int c) {
+    return isupper(c) || islower(c);
+}
+int isalnum(int c) {
+    return isalpha(c) || isdigit(c);
+}
+int isspace(int c) {
+    return c == ' ' || (c >= '\t' && c <= '\r');
+}
+int iscntrl(int c) {
+    return (unsigned)c < 32 || c == 127;
+}
+int isgraph(int c) {
+    return c > 32 && c < 127;
+}
+int isprint(int c) {
+    return c >= 32 && c < 127;
+}
+int ispunct(int c) {
+    return isgraph(c) && !isalnum(c);
+}
+int isxdigit(int c) {
+    return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+int toupper(int c) {
+    return islower(c) ? c - 'a' + 'A' : c;
+}
+int tolower(int c) {
+    return isupper(c) ? c - 'A' + 'a' : c;
+}
+
+// ------------------------------------------------- no operating system here
+// A continuation belongs to a Capsule fiber, not to the CPU on which one
+// physical step happens to execute. Keep errno with that fiber so concurrent
+// calls and cross-CPU resumes cannot observe each other's library failures.
+static int fs_errno[BPF_CAPSULE_MAX_FIBERS];
+
+int* __bpf_capsule_errno_location(void) {
+    unsigned int fiber = capsule_fiber_index();
+    if (fiber >= BPF_CAPSULE_MAX_FIBERS) {
+        __bpf_capsule_exit(CAPSULE_ERROR_TRAP);
+    }
+    return &fs_errno[fiber];
+}
+
+struct _FILE {
+    int dummy;
+};
+static struct _FILE fs_null;
+FILE* stdin = &fs_null;
+FILE* stdout = &fs_null;
+FILE* stderr = &fs_null;
+
+FILE* fopen(const char* p, const char* m) {
+    errno = ENOSYS;
+    return 0;
+}
+FILE* freopen(const char* p, const char* m, FILE* f) {
+    errno = ENOSYS;
+    return 0;
+}
+FILE* tmpfile(void) {
+    errno = ENOSYS;
+    return 0;
+}
+int fclose(FILE* f) {
+    (void)f;
+    errno = EBADF;
+    return EOF;
+}
+int fflush(FILE* f) {
+    (void)f;
+    errno = EBADF;
+    return EOF;
+}
+unsigned long fread(void* p, unsigned long sz, unsigned long n, FILE* f) {
+    errno = EBADF;
+    return 0;
+}
+unsigned long fwrite(const void* p, unsigned long sz, unsigned long n, FILE* f) {
+    errno = EBADF;
+    return 0;
+}
+int fputs(const char* s, FILE* f) {
+    (void)s;
+    (void)f;
+    errno = EBADF;
+    return EOF;
+}
+int fputc(int c, FILE* f) {
+    (void)c;
+    (void)f;
+    errno = EBADF;
+    return EOF;
+}
+char* fgets(char* s, int n, FILE* f) {
+    errno = EBADF;
+    return 0;
+}
+int getc(FILE* f) {
+    errno = EBADF;
+    return EOF;
+}
+int ungetc(int c, FILE* f) {
+    (void)c;
+    (void)f;
+    errno = EBADF;
+    return EOF;
+}
+int ferror(FILE* f) {
+    return 1;
+}
+int feof(FILE* f) {
+    return 0;
+}
+void clearerr(FILE* f) {
+}
+int setvbuf(FILE* f, char* b, int m, unsigned long s) {
+    errno = EBADF;
+    return -1;
+}
+int fseek(FILE* f, long o, int w) {
+    errno = EBADF;
+    return -1;
+}
+long ftell(FILE* f) {
+    errno = EBADF;
+    return -1;
+}
+int remove(const char* p) {
+    errno = ENOSYS;
+    return -1;
+}
+int rename(const char* a, const char* b) {
+    errno = ENOSYS;
+    return -1;
+}
+char* tmpnam(char* s) {
+    errno = ENOSYS;
+    return 0;
+}
+
+// The code a shell observes after SIGABRT kills a process: 128 + 6.
+__attribute__((noreturn)) void abort(void) {
+    capsule_exit(134);
+}
+__attribute__((noreturn)) void exit(int code) {
+    capsule_exit(code);
+}
+char* getenv(const char* n) {
+    return 0;
+}
+int system(const char* c) {
+    errno = ENOSYS;
+    return -1;
+}
+
+time_t time(time_t* t) {
+    if (t) {
+        *t = (time_t)-1;
+    }
+    errno = ENOSYS;
+    return (time_t)-1;
+}
+clock_t clock(void) {
+    errno = ENOSYS;
+    return (clock_t)-1;
+}
+struct tm* localtime(const time_t* t) {
+    errno = ENOSYS;
+    return 0;
+}
+struct tm* gmtime(const time_t* t) {
+    errno = ENOSYS;
+    return 0;
+}
+time_t mktime(struct tm* tm) {
+    errno = ENOSYS;
+    return -1;
+}
+unsigned long strftime(char* s, unsigned long m, const char* f, const struct tm* tm) {
+    if (m) {
+        s[0] = 0;
+    }
+    errno = ENOSYS;
+    return 0;
+}
+
+static struct lconv fs_lconv = {".", ""};
+char* setlocale(int c, const char* l) {
+    if (c < LC_ALL || c > LC_TIME || (l && *l && strcmp(l, "C"))) {
+        return 0;
+    }
+    return "C";
+}
+struct lconv* localeconv(void) {
+    return &fs_lconv;
+}
+
+sighandler_t signal(int sig, sighandler_t h) {
+    errno = ENOSYS;
+    return SIG_ERR;
+}
+int raise(int sig) {
+    errno = ENOSYS;
+    return -1;
+}
+
+// setjmp/longjmp cannot be honoured: the machine stack this would unwind is
+// not where execution lives. A program that needs error recovery overrides
+// its own mechanism; reaching these means it did not.
+int setjmp(jmp_buf b) {
+    (void)b;
+    __bpf_capsule_exit(CAPSULE_ERROR_UNSUPPORTED_LIBC);
+    __builtin_unreachable();
+}
+__attribute__((noreturn)) void longjmp(jmp_buf b, int v) {
+    (void)b;
+    (void)v;
+    __bpf_capsule_exit(CAPSULE_ERROR_UNSUPPORTED_LIBC);
+    __builtin_unreachable();
+}
+
+// ------------------------------------------------------------- formatting
+//
+// Enough of printf for programs that turn numbers into strings: integer
+// conversions (including the standard length modifiers), strings,
+// characters, pointers, width and precision. Floating point cannot yet be
+// rendered here, so those conversions consume the required double argument
+// and produce an explicit marker rather than plausible-looking wrong output.
+// Output is emitted directly under the caller's bound; there is no hidden
+// fixed-size staging buffer whose numeric writes can run past its end.
+struct fs_format_output {
+    char* bytes;
+    unsigned long capacity;
+    unsigned long length;
+};
+
+static void fs_format_char(struct fs_format_output* output, char value) {
+    if (output->bytes && output->capacity && output->length < output->capacity - 1u) {
+        output->bytes[output->length] = value;
+    }
+    if (output->length != ~0ul) {
+        output->length++;
+    }
+}
+
+static void fs_format_repeat(struct fs_format_output* output, char value, unsigned long count) {
+    for (unsigned long index = 0; index < count; ++index) {
+        fs_format_char(output, value);
+    }
+}
+
+static void fs_format_bytes(struct fs_format_output* output, const char* bytes, unsigned long length) {
+    for (unsigned long index = 0; index < length; ++index) {
+        fs_format_char(output, bytes[index]);
+    }
+}
+
+static unsigned int fs_utoa_reverse(char* digits, unsigned long long value, unsigned int base, int upper) {
+    unsigned int length = 0;
+    do {
+        unsigned int digit = (unsigned int)(value % base);
+        digits[length++] = (char)(digit < 10 ? '0' + digit : (upper ? 'A' : 'a') + (digit - 10));
+        value /= base;
+    } while (value);
+    return length;
+}
+
+enum fs_format_length {
+    FS_LENGTH_DEFAULT,
+    FS_LENGTH_HH,
+    FS_LENGTH_H,
+    FS_LENGTH_L,
+    FS_LENGTH_LL,
+    FS_LENGTH_Z,
+    FS_LENGTH_J,
+    FS_LENGTH_T,
+};
+
+static long long fs_format_signed_arg(va_list* ap, enum fs_format_length length) {
+    switch (length) {
+        case FS_LENGTH_HH:
+            return (signed char)va_arg(*ap, int);
+        case FS_LENGTH_H:
+            return (short)va_arg(*ap, int);
+        case FS_LENGTH_L:
+        case FS_LENGTH_Z:
+        case FS_LENGTH_T:
+            return va_arg(*ap, long);
+        case FS_LENGTH_LL:
+        case FS_LENGTH_J:
+            return va_arg(*ap, long long);
+        default:
+            return va_arg(*ap, int);
+    }
+}
+
+static unsigned long long fs_format_unsigned_arg(va_list* ap, enum fs_format_length length) {
+    switch (length) {
+        case FS_LENGTH_HH:
+            return (unsigned char)va_arg(*ap, unsigned int);
+        case FS_LENGTH_H:
+            return (unsigned short)va_arg(*ap, unsigned int);
+        case FS_LENGTH_L:
+        case FS_LENGTH_Z:
+        case FS_LENGTH_T:
+            return va_arg(*ap, unsigned long);
+        case FS_LENGTH_LL:
+        case FS_LENGTH_J:
+            return va_arg(*ap, unsigned long long);
+        default:
+            return va_arg(*ap, unsigned int);
+    }
+}
+
+static void fs_format_field(
+    struct fs_format_output* output, const char* prefix, unsigned int prefix_length, const char* reversed_digits, unsigned int digit_length,
+    unsigned long precision_zeroes, unsigned long width, int left, int zero_pad
+) {
+    unsigned long content = (unsigned long)prefix_length + precision_zeroes + digit_length;
+    unsigned long padding = width > content ? width - content : 0;
+    if (!left && !zero_pad) {
+        fs_format_repeat(output, ' ', padding);
+    }
+    fs_format_bytes(output, prefix, prefix_length);
+    if (!left && zero_pad) {
+        fs_format_repeat(output, '0', padding);
+    }
+    fs_format_repeat(output, '0', precision_zeroes);
+    for (unsigned int index = digit_length; index > 0; --index) {
+        fs_format_char(output, reversed_digits[index - 1]);
+    }
+    if (left) {
+        fs_format_repeat(output, ' ', padding);
+    }
+}
+
+int vsnprintf(char* out, unsigned long cap, const char* fmt, va_list ap) {
+    struct fs_format_output output = {.bytes = out, .capacity = cap};
+    for (const char* f = fmt; *f; ++f) {
+        if (*f != '%') {
+            fs_format_char(&output, *f);
+            continue;
+        }
+
+        ++f;
+        int left = 0;
+        int plus = 0;
+        int space = 0;
+        int alternate = 0;
+        int zero_pad = 0;
+        for (;; ++f) {
+            if (*f == '-') {
+                left = 1;
+            } else if (*f == '+') {
+                plus = 1;
+            } else if (*f == ' ') {
+                space = 1;
+            } else if (*f == '#') {
+                alternate = 1;
+            } else if (*f == '0') {
+                zero_pad = 1;
+            } else {
+                break;
+            }
+        }
+
+        unsigned long width = 0;
+        if (*f == '*') {
+            int dynamic_width = va_arg(ap, int);
+            if (dynamic_width < 0) {
+                left = 1;
+                width = (unsigned long)(0u - (unsigned int)dynamic_width);
+            } else {
+                width = (unsigned long)dynamic_width;
+            }
+            ++f;
+        } else {
+            while (*f >= '0' && *f <= '9') {
+                unsigned int digit = (unsigned int)(*f++ - '0');
+                width = width > (~0ul - digit) / 10u ? ~0ul : width * 10u + digit;
+            }
+        }
+
+        long precision = -1;
+        if (*f == '.') {
+            ++f;
+            precision = 0;
+            if (*f == '*') {
+                int dynamic_precision = va_arg(ap, int);
+                precision = dynamic_precision >= 0 ? dynamic_precision : -1;
+                ++f;
+            } else {
+                while (*f >= '0' && *f <= '9') {
+                    unsigned int digit = (unsigned int)(*f++ - '0');
+                    precision = precision > (0x7fffffff - (long)digit) / 10 ? 0x7fffffff : precision * 10 + digit;
+                }
+            }
+        }
+
+        enum fs_format_length length = FS_LENGTH_DEFAULT;
+        if (*f == 'h') {
+            length = *++f == 'h' ? (++f, FS_LENGTH_HH) : FS_LENGTH_H;
+        } else if (*f == 'l') {
+            length = *++f == 'l' ? (++f, FS_LENGTH_LL) : FS_LENGTH_L;
+        } else if (*f == 'z') {
+            length = FS_LENGTH_Z;
+            ++f;
+        } else if (*f == 'j') {
+            length = FS_LENGTH_J;
+            ++f;
+        } else if (*f == 't') {
+            length = FS_LENGTH_T;
+            ++f;
+        }
+
+        switch (*f) {
+            case 'd':
+            case 'i': {
+                long long signed_value = fs_format_signed_arg(&ap, length);
+                unsigned long long value = signed_value < 0 ? 0ull - (unsigned long long)signed_value : (unsigned long long)signed_value;
+                char digits[24];
+                unsigned int digit_length = precision == 0 && value == 0 ? 0 : fs_utoa_reverse(digits, value, 10, 0);
+                char prefix = signed_value < 0 ? '-' : plus ? '+' : space ? ' ' : 0;
+                unsigned long precision_zeroes = precision > (long)digit_length ? (unsigned long)precision - digit_length : 0;
+                fs_format_field(&output, &prefix, prefix != 0, digits, digit_length, precision_zeroes, width, left, zero_pad && precision < 0);
+                break;
+            }
+            case 'u':
+            case 'x':
+            case 'X': {
+                unsigned long long value = fs_format_unsigned_arg(&ap, length);
+                unsigned int base = *f == 'u' ? 10 : 16;
+                char digits[24];
+                unsigned int digit_length = precision == 0 && value == 0 ? 0 : fs_utoa_reverse(digits, value, base, *f == 'X');
+                char prefix[2] = {'0', *f};
+                unsigned int prefix_length = alternate && value && base == 16 ? 2 : 0;
+                unsigned long precision_zeroes = precision > (long)digit_length ? (unsigned long)precision - digit_length : 0;
+                fs_format_field(&output, prefix, prefix_length, digits, digit_length, precision_zeroes, width, left, zero_pad && precision < 0);
+                break;
+            }
+            case 'c': {
+                char value = (char)va_arg(ap, int);
+                unsigned long padding = width > 1 ? width - 1 : 0;
+                if (!left) {
+                    fs_format_repeat(&output, ' ', padding);
+                }
+                fs_format_char(&output, value);
+                if (left) {
+                    fs_format_repeat(&output, ' ', padding);
+                }
+                break;
+            }
+            case 's': {
+                const char* s = va_arg(ap, const char*);
+                if (!s) {
+                    s = "(null)";
+                }
+                unsigned long length = strlen(s);
+                if (precision >= 0 && length > (unsigned long)precision) {
+                    length = (unsigned long)precision;
+                }
+                unsigned long padding = width > length ? width - length : 0;
+                if (!left) {
+                    fs_format_repeat(&output, ' ', padding);
+                }
+                fs_format_bytes(&output, s, length);
+                if (left) {
+                    fs_format_repeat(&output, ' ', padding);
+                }
+                break;
+            }
+            case 'p': {
+                unsigned long long value = (unsigned long)(va_arg(ap, void*));
+                char digits[24];
+                unsigned int digit_length = fs_utoa_reverse(digits, value, 16, 0);
+                fs_format_field(&output, "0x", 2, digits, digit_length, 0, width, left, zero_pad);
+                break;
+            }
+            case 'g':
+            case 'f':
+            case 'e':
+            case 'G':
+            case 'E':
+            case 'a':
+            case 'A': {
+                (void)va_arg(ap, double);
+                const char* s = "<float>";
+                unsigned long length = 7;
+                unsigned long padding = width > length ? width - length : 0;
+                if (!left) {
+                    fs_format_repeat(&output, ' ', padding);
+                }
+                fs_format_bytes(&output, s, length);
+                if (left) {
+                    fs_format_repeat(&output, ' ', padding);
+                }
+                break;
+            }
+            case '%':
+                fs_format_char(&output, '%');
+                break;
+            default:
+                fs_format_char(&output, '%');
+                if (*f) {
+                    fs_format_char(&output, *f);
+                }
+                break;
+        }
+    }
+
+    if (out && cap) {
+        unsigned long terminator = output.length < cap ? output.length : cap - 1u;
+        out[terminator] = 0;
+    }
+    if (output.length > 0x7ffffffful) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    return (int)output.length;
+}
+int snprintf(char* s, unsigned long n, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(s, n, fmt, ap);
+    va_end(ap);
+    return r;
+}
+int sprintf(char* s, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(s, ~0ul, fmt, ap);
+    va_end(ap);
+    return r;
+}
+int fprintf(FILE* f, const char* fmt, ...) {
+    (void)f;
+    (void)fmt;
+    errno = EBADF;
+    return EOF;
+}
+int printf(const char* fmt, ...) {
+    (void)fmt;
+    errno = EBADF;
+    return EOF;
+}
+
+unsigned long strnlen(const char* s, unsigned long max) {
+    unsigned long n = 0;
+    while (n < max && s[n]) {
+        n++;
+    }
+    return n;
+}
+
+unsigned long long strtoull(const char* s, char** end, int base) {
+    struct fs_integer_parse parsed = fs_parse_integer(s, base, ~0ull);
+    if (end) {
+        *end = (char*)parsed.end;
+    }
+    if (parsed.overflow) {
+        errno = ERANGE;
+        return ~0ull;
+    }
+    return parsed.negative ? 0ull - parsed.value : parsed.value;
+}
+int putc(int c, FILE* f) {
+    return fputc(c, f);
+}
+
+// File-backed mapping has no meaning without an operating system; programs
+// that reach for it are given a clean failure, and the ports stage their data
+// through a map instead.
+int open(const char* path, int flags, ...) {
+    errno = ENOSYS;
+    return -1;
+}
+int close(int fd) {
+    (void)fd;
+    errno = EBADF;
+    return -1;
+}
+void* mmap(void* addr, unsigned long len, int prot, int flags, int fd, long off) {
+    (void)addr;
+    (void)len;
+    (void)prot;
+    (void)flags;
+    (void)fd;
+    (void)off;
+    errno = ENOSYS;
+    return (void*)-1;
+}
+int munmap(void* addr, unsigned long len) {
+    (void)addr;
+    (void)len;
+    errno = ENOSYS;
+    return -1;
+}
+
+int clock_gettime(int clk, struct timespec* ts) {
+    (void)clk;
+    (void)ts;
+    errno = ENOSYS;
+    return -1;
+}
+
+void* bsearch(const void* key, const void* base, unsigned long n, unsigned long sz, int (*cmp)(const void*, const void*)) {
+    const char* a = base;
+    unsigned long lo = 0, hi = n;
+    while (lo < hi) {
+        unsigned long mid = lo + (hi - lo) / 2;
+        int r = cmp(key, a + mid * sz);
+        if (r == 0) {
+            return (void*)(a + mid * sz);
+        }
+        if (r < 0) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    return 0;
+}
+
+// Text-to-float parsing needs the float formatting this environment does not
+// have; nothing on a tested path calls it.
+double atof(const char* s) {
+    return 0.0;
+}
+int atoi(const char* s) {
+    return (int)strtol(s, 0, 10);
+}
+
+// Scanning text into values needs float parsing this environment lacks; the
+// declaration exists so callers compile, and it reports that it matched
+// nothing.
+int sscanf(const char* s, const char* fmt, ...) {
+    return 0;
+}
+
+int gettimeofday(struct timeval* tv, struct timezone* tz) {
+    (void)tv;
+    (void)tz;
+    errno = ENOSYS;
+    return -1;
+}
+
+struct tm* localtime_r(const time_t* t, struct tm* out) {
+    (void)t;
+    (void)out;
+    errno = ENOSYS;
+    return 0;
+}
