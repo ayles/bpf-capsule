@@ -3,6 +3,7 @@
 #include <bpf/bpf_helpers.h>
 
 #include "bpf_capsule.h"
+#include "bpf_capsule_abi.h"
 
 // White-box probe: the runtime owns this table; the test inspects a
 // control word directly to prove release semantics.
@@ -45,7 +46,7 @@ int fiber_scale_count(void) {
 SEC("syscall")
 int fiber_scale_high(void) {
     fiber_scale_output.call_status = __bpf_capsule_call(FIBER_SCALE_LAST, (void*)0, 0, 1, (void*)fiber_scale_body, FIBER_SCALE_SEED);
-    fiber_scale_output.stack_cursor_zero = bpf_capsule_fibers[FIBER_SCALE_LAST].stack_cursor == 0;
+    fiber_scale_output.stack_cursor_zero = bpf_capsule_fibers[FIBER_SCALE_LAST].pc == 0;
     return 0;
 }
 

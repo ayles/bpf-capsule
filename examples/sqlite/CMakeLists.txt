@@ -18,10 +18,6 @@ if(NOT SQLITE_BPF_SOURCE_DIR OR NOT EXISTS "${SQLITE_BPF_SOURCE_DIR}/sqlite3.c")
         MARKER
         sqlite3.c
     )
-    if(NOT fetched_sqlite)
-        message(STATUS "SQLite example: upstream source unavailable, skipping")
-        return()
-    endif()
     set(SQLITE_BPF_SOURCE_DIR "${fetched_sqlite}")
 endif()
 
@@ -49,14 +45,11 @@ set(SQLITE_DEFS
     -Dfabs=__builtin_fabs
 )
 
-# softfloat.c satisfies the handful of double ops SQLite keeps even under
-# SQLITE_OMIT_FLOATING_POINT (int<->double conversions in a few conversion
-# paths surface as __bpf_i2d/__bpf_dcmp after bpf-soft-float); without it the
-# object has unresolved soft-float symbols and will not load.
-# Full `-g` on the 9 MiB amalgamation bloats IR, BTF and every later compiler
-# data structure. It formerly made textual MIR parsing take minutes. Our driver
-# still supplies the compile unit/BTF needed for programs and maps; upstream
-# SQLite needs no line information in the BPF object.
+# SQLite retains a handful of double operations even with floating-point SQL
+# disabled. softfloat.c implements their arithmetic and mathfns.c supplies
+# scalar operations such as fabs which the soft-float pass lowers explicitly.
+# Full debug information on the amalgamation needlessly bloats every compiler
+# stage. The driver still supplies the BTF needed for programs and maps.
 set(SQLITE_BPF_INCLUDE_DIRECTORIES ${SQLITE_BPF_SOURCE_DIR} ${BPF_CAPSULE_LIBC_DIR}
                                    ${BPF_CAPSULE_LIBC_DIR}/include
 )
@@ -71,6 +64,14 @@ bpf_capsule_bitcode(
     COMPILE_DEFINITIONS ${SQLITE_DEFS} BPF_CAPSULE_FREESTANDING_NULL_ALLOCATOR
     COMPILE_OPTIONS ${SQLITE_BPF_OPTIONS} -g
 )
+# Do not expose SQLite's source-compatibility `fabs=__builtin_fabs` define to
+# the implementation of fabs itself.
+bpf_capsule_bitcode(
+    SQLITE_MATH_BC
+    SOURCES ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
+    INCLUDE_DIRECTORIES ${SQLITE_BPF_INCLUDE_DIRECTORIES}
+    COMPILE_OPTIONS ${SQLITE_BPF_OPTIONS} -g
+)
 bpf_capsule_bitcode(
     SQLITE_UPSTREAM_BC
     SOURCES ${SQLITE_BPF_SOURCE_DIR}/sqlite3.c
@@ -82,7 +83,7 @@ bpf_capsule_bitcode(
 bpf_capsule_object(
     sqlite_bpf_lib_output
     OUTPUT sqlite_bpf_lib.o
-    BITCODE ${SQLITE_DRIVER_BC} ${SQLITE_UPSTREAM_BC}
+    BITCODE ${SQLITE_DRIVER_BC} ${SQLITE_MATH_BC} ${SQLITE_UPSTREAM_BC}
 )
 bpf_capsule_skeleton(
     sqlite_skeleton
@@ -92,19 +93,12 @@ bpf_capsule_skeleton(
     DEPENDS sqlite_bpf_lib_output
 )
 
-# The host reference is the same amalgamation compiled natively, so the test
-# needs no system sqlite and both sides run identical code.
-add_executable(
-    sqlite sqlite_host.c ${SQLITE_BPF_SOURCE_DIR}/sqlite3.c
-           "${CMAKE_CURRENT_BINARY_DIR}/sqlite.skel.h"
-)
-set_source_files_properties(${SQLITE_BPF_SOURCE_DIR}/sqlite3.c PROPERTIES COMPILE_OPTIONS -w)
+add_executable(sqlite sqlite_host.c "${CMAKE_CURRENT_BINARY_DIR}/sqlite.skel.h")
 target_include_directories(
     sqlite PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS}
-                   ${SQLITE_BPF_SOURCE_DIR}
 )
-target_compile_options(sqlite PRIVATE -Wall -Wextra -DSQLITE_THREADSAFE=0)
-target_link_libraries(sqlite PkgConfig::LibBpf)
+target_compile_options(sqlite PRIVATE -Wall -Wextra)
+target_link_libraries(sqlite PRIVATE ${BPF_CAPSULE_HOST_TARGET})
 add_dependencies(sqlite sqlite_skeleton)
 
 install(TARGETS sqlite RUNTIME DESTINATION libexec/bpf-capsule/examples/sqlite)

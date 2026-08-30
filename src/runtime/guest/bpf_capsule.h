@@ -21,18 +21,26 @@
 //   capsule_yield()                     suspend back to the native caller
 //   capsule_borrowed_ctx()              the entry's borrowed verifier context
 //
-// Either side:
-//
-//   capsule_memory_pointer(type, addr)  cast a Capsule address for access
-//   BPF_CAPSULE_MAX_FIBERS               compile-time active-fiber ceiling
+// BPF_CAPSULE_MAX_FIBERS is the compile-time active-fiber ceiling.
 //
 // Statuses, error codes, and struct capsule_result are in
-// bpf_capsule_abi.h; the host-side API is bpf_capsule_host.h. Names under
+// bpf_capsule_types.h; the host-side API is bpf_capsule_host.h. Names under
 // `bpf_capsule_*`, `__bpf_capsule_*`, and `bpf_heap_*` belong to the runtime
 // and compiler; everything `capsule_*` here is the public API.
 #pragma once
 
-#include "bpf_capsule_abi.h"
+#include "bpf_capsule_types.h"
+
+// Prove this function and everything it calls suspension-free, and compile
+// it as one ordinary BPF subprogram: no fiber, no dispatch regions, plain
+// call cost from managed code, and the whole call completes within a
+// single BPF invocation (safe to hold a lock across it - this is how the
+// runtime allocator takes its lease). The proof is enforced, not assumed:
+// loops need exact constant trip counts, calls must be direct and
+// resolved, and the body and native frame must fit their budgets; a
+// function that cannot be proven fails the build naming the reason.
+// Implies noinline so the proven body is the one that executes.
+#define CAPSULE_NOSUSPEND __attribute__((annotate("capsule.nosuspend"), noinline))
 
 // Compile-time verifier/control bound. One portable object chooses its actual
 // fiber count after open and before load; unused fiber stacks are not backed.
@@ -42,7 +50,7 @@
 #if BPF_CAPSULE_MAX_FIBERS < 1
 #error "BPF_CAPSULE_MAX_FIBERS must be at least one"
 #endif
-#if BPF_CAPSULE_MAX_FIBERS > 65535
+#if BPF_CAPSULE_MAX_FIBERS > BPF_CAPSULE_MAX_FIBERS_LIMIT
 #error "BPF_CAPSULE_MAX_FIBERS must fit in the continuation's 16-bit fiber field"
 #endif
 
@@ -71,11 +79,10 @@ static __attribute__((always_inline)) inline uint32_t capsule_fiber_count(void) 
 
 // One load-time-sized allocation pool in Capsule's unified address space.
 // Freestanding support libraries use this to initialize their allocator;
-// applications may use it to install another allocator without depending on
-// the arena or fixed-map representation. If the host reserved a staging
-// prefix, these accessors expose only the suffix after that aligned prefix;
-// pointers into the reserved prefix remain valid Capsule memory but are not
-// part of the managed allocation pool.
+// applications may use it to install another allocator. If the host reserved
+// a staging prefix, these accessors expose only the suffix after that aligned
+// prefix; pointers into the reserved prefix remain valid Capsule memory but
+// are not part of the managed allocation pool.
 extern void* __bpf_capsule_heap_start(void);
 extern uint64_t __bpf_capsule_heap_size(void);
 static __attribute__((always_inline)) inline void* capsule_heap_start(void) {
@@ -84,13 +91,6 @@ static __attribute__((always_inline)) inline void* capsule_heap_start(void) {
 static __attribute__((always_inline)) inline uint64_t capsule_heap_size(void) {
     return __bpf_capsule_heap_size();
 }
-
-// Reconstitute a Capsule virtual address for an ordinary native-BPF load,
-// store, or bulk copy. The memory pass translates each dereference to the
-// selected arena/map tier while leaving ctx, packet, map, helper and native
-// stack pointers untouched. This is program memory, not a verifier pointer:
-// do not pass it to helpers which require a particular kernel pointer type.
-#define capsule_memory_pointer(type, address) ((type*)(uintptr_t)(address))
 
 // The single termination primitive. The compiler lowers it to a nonlocal
 // stop that publishes the code and unwinds the software stack; the caller
@@ -197,8 +197,7 @@ static __attribute__((always_inline, warn_unused_result)) inline struct capsule_
 #define __BPF_CAPSULE_ALIGNOF(type) _Alignof(type)
 #define __BPF_CAPSULE_CHECK_RETURN(output, function, ...) \
     _Static_assert( \
-        __builtin_types_compatible_p(__typeof__(*(output)), __typeof__((function)(__VA_ARGS__))), "capsule_call output must match the function return type" \
-    )
+        __builtin_types_compatible_p(__typeof__(*(output)), __typeof__((function)(__VA_ARGS__))), "capsule_call output must match the function return type")
 #define __BPF_CAPSULE_CHECK_VOID(function, ...) \
     _Static_assert(__builtin_types_compatible_p(__typeof__((function)(__VA_ARGS__)), void), "capsule_call_void requires a void function")
 #endif
@@ -208,8 +207,7 @@ static __attribute__((always_inline, warn_unused_result)) inline struct capsule_
         int __capsule_broken = __bpf_capsule_plan_broken(); \
         uint32_t __capsule_fiber = __capsule_broken ? __BPF_CAPSULE_NO_FIBER : __bpf_capsule_fiber_acquire(); \
         struct capsule_result __capsule_result = { \
-            __capsule_broken ? CAPSULE_ERROR_BAD_PLAN : CAPSULE_ERROR_POOL_EXHAUSTED, CAPSULE_EXITED, 0, BPF_CAPSULE_NO_CONTINUATION \
-        }; \
+            __capsule_broken ? CAPSULE_ERROR_BAD_PLAN : CAPSULE_ERROR_POOL_EXHAUSTED, CAPSULE_EXITED, BPF_CAPSULE_NO_CONTINUATION}; \
         if (__capsule_fiber != __BPF_CAPSULE_NO_FIBER) { \
             __capsule_result.code = 0; \
             __capsule_result.status = \

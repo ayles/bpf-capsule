@@ -1,0 +1,1 @@
+stackify: value %output derived from a verifier pointer in sectioned_pointer_across_call is passed through a Capsule suspension point

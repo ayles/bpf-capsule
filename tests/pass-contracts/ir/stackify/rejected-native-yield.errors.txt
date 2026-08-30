@@ -1,0 +1,1 @@
+stackify: capsule_yield may only be called from Capsule code, not native_yield

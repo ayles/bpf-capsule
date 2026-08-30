@@ -7,40 +7,36 @@
 // to.
 //
 // Reserved names. The runtime owns the maps `arena`, `bpf_heap_array`, and
-// `bpf_capsule_*`, the program `bpf_capsule_init`, the ELF sections
-// `.rodata.bpfconfig`, `.bss.bpfctrl`, `.data.bpfctrl`, and
-// `.data.heapN`/`.bss.heapN`, and every `__bpf_capsule_*` and `bpf_heap_*`
-// symbol. Do not declare, resize, or write these from application code.
+// `bpf_capsule_*`, the
+// program `bpf_capsule_init`, the ELF sections `.rodata.bpfconfig`,
+// `.rodata.bpffix`, `.bss.bpfctrl`, `.data.bpfctrl`, and `.data.bpfrdy`,
+// and every `__bpf_capsule_*` symbol. Do not declare, resize, or write
+// these from application code.
 //
-//   BPF_CAPSULE_TARGET_KERNEL
-//                       the oldest kernel the object must load on. Everything
-//                       below follows from it, and it has to match the
-//                       -bpf-target given to opt.
+//   BPF_CAPSULE_FEATURE_*
+//                       target capabilities, defined by bpf-capsule-cc from
+//                       its --kernel flag. This source gates on features,
+//                       never on kernel versions.
 //   __arena             qualifier for objects the memory model relocates.
-//   bpf_heap_*          the accessors the memory pass routes loads and stores
-//                       through when there is no bpf_arena.
 //
 // A program supplies its own sectioned native entry points and crosses into a
-// compiler-managed closure explicitly with capsule_call(). On the arena tier
-// the memory pass inserts a once-only initialization prologue in every entry.
-// The map tier's image is complete in the ELF and needs no run-time hook.
-// Application source calls neither initialization mechanism.
+// compiler-managed closure explicitly with capsule_call(). The memory pass
+// inserts a once-only arena initialization prologue in every entry;
+// application source calls no initialization mechanism itself.
 
 #include "bpf_capsule.h"
 #include "bpf_capsule_abi.h"
+#include "bpf_capsule_arithmetic.h"
+#include "bpf_capsule_names.h"
 
 #include <linux/bpf.h>
 #include <linux/errno.h>
 #include <bpf/bpf_helpers.h>
 
-#ifndef BPF_CAPSULE_TARGET_KERNEL
-#define BPF_CAPSULE_TARGET_KERNEL 5015
-#endif
+#define __BPF_CAPSULE_FN_CLASS(class_name) __attribute__((annotate(class_name)))
 
-// The memory tier follows the selected kernel floor. The continuation driver
-// is shared by both tiers, so control-flow semantics do not change with it.
-#ifndef BPF_HAS_ARENA
-#define BPF_HAS_ARENA (BPF_CAPSULE_TARGET_KERNEL >= 6009)
+#ifndef BPF_CAPSULE_FEATURE_ARENA
+#define BPF_CAPSULE_FEATURE_ARENA 0
 #endif
 
 // Bytes of software stack per fiber. Must be a power of two, at most 2 MiB,
@@ -70,7 +66,7 @@
 // resolves an access's region at compile time (one mask, one add) or routes it
 // through the accessors here.
 
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARENA);
@@ -78,7 +74,7 @@ struct {
     // Compiler placeholder: the arena pass replaces this with the exact page
     // capacity required by initialized data plus sparse program storage.
     __uint(max_entries, 1);
-} arena SEC(".maps");
+} BPF_CAPSULE_ARENA_MAP SEC(BPF_CAPSULE_SECTION_MAPS);
 
 #ifndef __arena
 #define __arena __attribute__((address_space(1)))
@@ -95,11 +91,12 @@ extern void __arena* bpf_arena_alloc_pages(void* map, void __arena* address, uin
 // ready. The compiler emits the atomic transitions; keeping the word in an
 // ordinary sectioned map makes them native BPF atomics rather than managed
 // memory operations.
-// Low 32 bits of the sparse allocation returned by bpf_arena_alloc_pages,
-// together with its 0 -> 1 -> 2 initialization state. The compiler adds
-// per-object offsets to virtual_base and casts the result back to address
-// space 1 only when memory is accessed.
-struct __bpf_capsule_arena_control bpf_capsule_arena_control SEC(".data.bpfctrl") = {0};
+// The sparse allocation returned by bpf_arena_alloc_pages, verbatim (a full
+// user virtual address), together with its 0 -> 1 -> 2 initialization
+// state. The compiler adds per-object offsets to virtual_base; the result
+// is already the pointer value, and only memory accesses convert it to
+// address space 1.
+struct __bpf_capsule_arena_control BPF_CAPSULE_ARENA_CONTROL_GLOBAL SEC(BPF_CAPSULE_SECTION_ARENA_CONTROL) = {0};
 
 #else
 
@@ -107,30 +104,27 @@ struct __bpf_capsule_arena_control bpf_capsule_arena_control SEC(".data.bpfctrl"
 #define __arena
 #endif
 
-// The compiler lays out ordinary globals, generates the fast directly
-// relocatable 2 MiB maps selected by policy, and places any zero-filled
-// overflow in this multi-entry ARRAY map. It also synthesizes the width-
-// specific dynamic accessors and boundary-shadow maintenance. The ARRAY map
-// removes the former 64 MiB heap ceiling; direct maps remain the default hot
-// path because they avoid a lookup at each dynamically addressed access.
 struct bpf_heap_array_value {
-    uint8_t bytes[BPF_CAPSULE_MEMORY_REGION_SIZE + 8u];
+    uint8_t bytes[BPF_CAPSULE_MEMORY_REGION_SIZE + BPF_CAPSULE_MEMORY_REGION_PAD];
 };
 struct bpf_capsule_stack_value {
     uint8_t bytes[BPF_CAPSULE_FIBER_STACK_BYTES];
 };
-// max_entries is a compiler placeholder. The fixed-map layout pass replaces
-// its BTF array bound with the exact number of zero-filled overflow regions;
-// the kernel then allocates precisely the heap requested by the program.
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(map_flags, BPF_F_MMAPABLE);
     __uint(max_entries, 1);
     __type(key, uint32_t);
     __type(value, struct bpf_heap_array_value);
-} bpf_heap_array SEC(".maps");
+} BPF_CAPSULE_HEAP_ARRAY_MAP SEC(BPF_CAPSULE_SECTION_MAPS);
 
-#endif /* BPF_HAS_ARENA */
+// Set to 1 by bpf_capsule_initialize() once it has applied the
+// baked-pointer fixups; capsule_call fails closed with BAD_PLAN before
+// then. The arena tier gates through its own arena-control ready word and
+// does not define this.
+uint32_t __bpf_capsule_host_ready SEC(BPF_CAPSULE_SECTION_READY) = 0;
+
+#endif
 
 // ---------------------------------------------------------------- driver
 //
@@ -139,9 +133,9 @@ struct {
 // verification cost adds while their iteration counts multiply.
 extern int __bpf_capsule_trampoline(uint32_t fiber);
 
-struct __bpf_capsule_fiber_control bpf_capsule_fibers[BPF_CAPSULE_MAX_FIBERS] SEC(".bss.bpfctrl");
+struct __bpf_capsule_fiber_control BPF_CAPSULE_FIBER_CONTROLS_GLOBAL[BPF_CAPSULE_MAX_FIBERS] SEC(BPF_CAPSULE_SECTION_FIBER_CONTROLS);
 
-const volatile struct __bpf_capsule_object_config bpf_capsule_config SEC(".rodata.bpfconfig") = {
+const volatile struct __bpf_capsule_object_config BPF_CAPSULE_CONFIG_GLOBAL SEC(BPF_CAPSULE_SECTION_CONFIG) = {
     .heap_base = 0,
     .heap_bytes = BPF_CAPSULE_DEFAULT_HEAP_BYTES,
     .stack_base = 0,
@@ -150,10 +144,11 @@ const volatile struct __bpf_capsule_object_config bpf_capsule_config SEC(".rodat
     .stack_bytes_per_fiber = BPF_CAPSULE_FIBER_STACK_BYTES,
     .max_fibers = BPF_CAPSULE_MAX_FIBERS,
     .arena_image_pages = 0,
-    .uses_arena = BPF_HAS_ARENA ? 1u : 0u,
+    .memory_backend = BPF_CAPSULE_FEATURE_ARENA ? BPF_CAPSULE_MEMORY_ARENA : BPF_CAPSULE_MEMORY_FIXED,
     .heap_reserved = 0,
     .abi_magic = BPF_CAPSULE_ABI_MAGIC,
     .abi_version = BPF_CAPSULE_ABI_VERSION,
+    .memory_view_base = 0,
 };
 
 static __attribute__((always_inline)) uint32_t __bpf_capsule_fiber_count(void) {
@@ -163,73 +158,56 @@ static __attribute__((always_inline)) uint32_t __bpf_capsule_fiber_count(void) {
 
 static __attribute__((always_inline)) struct __bpf_capsule_fiber_control* __bpf_capsule_fiber_control(uint32_t fiber);
 
-// One encoded word carries both the terminal tag and the signed code; see
-// the layout comment in bpf_capsule_abi.h.
-static __attribute__((always_inline)) uint64_t __bpf_capsule_exit_encode(int32_t code) {
-    return ((uint64_t)(int64_t)code << 32) | CAPSULE_EXITED;
+// Publish a terminal event: the adjacent {status, code} pair is the whole
+// protocol (see the record's comment in the private object ABI); every legal
+// reader is ordered after these stores.
+static __attribute__((always_inline)) void __bpf_capsule_stop(struct __bpf_capsule_fiber_control* control, int32_t code) {
+    control->status = CAPSULE_EXITED;
+    control->code = code;
 }
 
-// Released fibers are recycled in O(1) on the modern tier. A LIFO stack keeps
-// sequential calls on the same warm fiber whenever possible. Stack maps are
-// born empty, and libbpf cannot currently describe their initial contents, so
-// a second, permanent set records which IDs have ever been issued. The first
-// BPF_CAPSULE_MAX_FIBERS acquisitions claim a new ID with BPF_NOEXIST; after that
-// the issued set is read only and every successful acquire is one stack pop.
-//
-// Linux 5.15 forbids stack maps in sleepable programs (including the syscall
-// programs used by BPF_PROG_TEST_RUN), so its portable representation is the
-// exact active-lease set. It scans only at acquisition, never needs a JIT
-// atomic, and keeps arbitrary loaders initializer-free. Keep both lease hashes
-// preallocated: Linux 5.15 rejects BPF_F_NO_PREALLOC maps referenced by a
-// sleepable program. bpf_capsule_configure() resizes these maps to the active
-// count before load; even an unconfigured 512-entry map is only a small
-// control-plane allocation. Stack backing also follows the runtime-active
-// fiber count, subject to the fixed tier's 2 MiB map-value granularity.
-#if BPF_HAS_ARENA
+// Arena targets recycle fibers through a LIFO stack after one-time issuance.
+// Linux 5.15 rejects stack maps from the sleepable syscall programs used by
+// BPF_PROG_TEST_RUN, so fixed-memory objects instead keep the exact active
+// lease set in one preallocated hash.
+#if BPF_CAPSULE_FEATURE_ARENA
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, BPF_CAPSULE_MAX_FIBERS);
     __type(key, uint32_t);
     __type(value, uint32_t);
-} bpf_capsule_issued_fibers SEC(".maps");
+} BPF_CAPSULE_ISSUED_FIBERS_MAP SEC(BPF_CAPSULE_SECTION_MAPS);
 
 struct {
     __uint(type, BPF_MAP_TYPE_STACK);
     __uint(max_entries, BPF_CAPSULE_MAX_FIBERS);
     __type(value, uint32_t);
-} bpf_capsule_free_fibers SEC(".maps");
+} BPF_CAPSULE_FREE_FIBERS_MAP SEC(BPF_CAPSULE_SECTION_MAPS);
 #else
-// Linux 5.15 cannot use a stack map from the sleepable syscall programs used
-// by BPF_PROG_TEST_RUN, so the active lease itself is the complete set.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, BPF_CAPSULE_MAX_FIBERS);
     __type(key, uint32_t);
     __type(value, uint64_t);
-} bpf_capsule_fiber_leases SEC(".maps");
+} BPF_CAPSULE_FIBER_LEASES_MAP SEC(BPF_CAPSULE_SECTION_MAPS);
 #endif
 
 // A continuation is consumed by claiming its complete generation-tagged
 // token with BPF_NOEXIST. The claim exists only for the duration of one
 // continue/reset entry; the helper operation is the cross-CPU linearization
-// point. This avoids BPF_CMPXCHG, which the Linux 5.15 arm64 verifier accepts
-// but its JIT cannot emit.
+// point, portable to every loader without relying on ISA atomics.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, BPF_CAPSULE_MAX_FIBERS);
     __type(key, uint64_t);
     __type(value, uint32_t);
-} bpf_capsule_continuation_claims SEC(".maps");
+} BPF_CAPSULE_CONTINUATION_CLAIMS_MAP SEC(BPF_CAPSULE_SECTION_MAPS);
 
 // Generated by bpf-stackify: one dispatch of the top frame, non-zero once the
 // stack is empty.
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
 extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control);
 #else
-// Compiler intrinsic: bpf-memory replaces this with the one ARRAY lookup that
-// obtains the bpf_heap_array region containing the current fiber stack. The
-// resulting pointer is valid only during this outer drive and is never stored
-// in Capsule memory. This is not a separate stack map or address space.
 extern struct bpf_heap_array_value* __bpf_capsule_stack_region(uint32_t fiber);
 extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, struct bpf_capsule_stack_value* stack_base);
 #endif
@@ -239,12 +217,11 @@ extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fi
 // in BPF registers/native spills through every global subprogram call. The
 // compiler supplies the step definition and selects this driver only for a
 // capsule_call whose root has a pointer argument.
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
 extern int __bpf_capsule_trampoline_ctx_step(struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control);
 #else
 extern int __bpf_capsule_trampoline_ctx_step(
-    struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, struct bpf_capsule_stack_value* stack_base
-);
+    struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, struct bpf_capsule_stack_value* stack_base);
 #endif
 
 // Iteration out of nothing but a bounded loop and a global function.
@@ -294,7 +271,7 @@ extern int __bpf_capsule_trampoline_ctx_step(
 #ifndef BPF_CAPSULE_DRIVE_LEVEL
 #define BPF_CAPSULE_DRIVE_LEVEL 2048
 #endif
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
 #define __BPF_CAPSULE_STACK_PARAMETER
 #define __BPF_CAPSULE_STACK_ARGUMENT
 #else
@@ -304,6 +281,19 @@ extern int __bpf_capsule_trampoline_ctx_step(
 #define __BPF_CAPSULE_CONTROL_PARAMETER , struct __bpf_capsule_fiber_control* fiber_control
 #define __BPF_CAPSULE_CONTROL_ARGUMENT , fiber_control
 
+#if !BPF_CAPSULE_FEATURE_ARENA
+static __attribute__((always_inline)) struct bpf_capsule_stack_value* __bpf_capsule_stack_base(uint32_t fiber, struct __bpf_capsule_fiber_control* control) {
+    struct bpf_heap_array_value* region = __bpf_capsule_stack_region(fiber);
+    if (!region) {
+        __bpf_capsule_stop(control, CAPSULE_ERROR_MEMORY_FAULT);
+        return 0;
+    }
+    uint32_t offset = (fiber * BPF_CAPSULE_FIBER_STACK_BYTES) & (BPF_CAPSULE_MEMORY_REGION_SIZE - 1u);
+    return (struct bpf_capsule_stack_value*)(region->bytes + offset);
+}
+#endif
+
+__BPF_CAPSULE_FN_CLASS("capsule.trampoline")
 __attribute__((noinline)) int __bpf_capsule_trampoline_l1(uint32_t fiber __BPF_CAPSULE_CONTROL_PARAMETER __BPF_CAPSULE_STACK_PARAMETER) {
     for (int i = 0; i < BPF_CAPSULE_DRIVE_LEVEL; i++) {
         int status = __bpf_capsule_trampoline_step(fiber __BPF_CAPSULE_CONTROL_ARGUMENT __BPF_CAPSULE_STACK_ARGUMENT);
@@ -314,16 +304,13 @@ __attribute__((noinline)) int __bpf_capsule_trampoline_l1(uint32_t fiber __BPF_C
     return 0;
 }
 
-int __bpf_capsule_trampoline(uint32_t fiber) {
+__BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((always_inline)) int __bpf_capsule_trampoline(uint32_t fiber) {
     struct __bpf_capsule_fiber_control* fiber_control = __bpf_capsule_fiber_control(fiber);
-#if !BPF_HAS_ARENA
-    struct bpf_heap_array_value* stack_region = __bpf_capsule_stack_region(fiber);
-    if (!stack_region) {
-        __bpf_capsule_fiber_control(fiber)->exit_word = __bpf_capsule_exit_encode(CAPSULE_ERROR_MEMORY_FAULT);
+#if !BPF_CAPSULE_FEATURE_ARENA
+    struct bpf_capsule_stack_value* stack_base = __bpf_capsule_stack_base(fiber, fiber_control);
+    if (!stack_base) {
         return 1;
     }
-    uint32_t stack_region_offset = (fiber * BPF_CAPSULE_FIBER_STACK_BYTES) & (BPF_CAPSULE_MEMORY_REGION_SIZE - 1u);
-    struct bpf_capsule_stack_value* stack_base = (struct bpf_capsule_stack_value*)(stack_region->bytes + stack_region_offset);
 #endif
     for (int i = 0; i < BPF_CAPSULE_DRIVE_LEVEL; i++) {
         int status = __bpf_capsule_trampoline_l1(fiber __BPF_CAPSULE_CONTROL_ARGUMENT __BPF_CAPSULE_STACK_ARGUMENT);
@@ -341,8 +328,9 @@ int __bpf_capsule_trampoline(uint32_t fiber) {
 // Stackify decides whether the typed or scalar driver is needed only after
 // the ordinary optimizer and global DCE have run. Pin the typed pair until
 // that decision; Stackify removes the unused pair from the final object.
-__attribute__((used, noinline)) int
-__bpf_capsule_trampoline_ctx_l1(struct xdp_md* ctx, uint32_t fiber __BPF_CAPSULE_CONTROL_PARAMETER __BPF_CAPSULE_STACK_PARAMETER) {
+__BPF_CAPSULE_FN_CLASS("capsule.trampoline")
+__attribute__((used, noinline)) int __bpf_capsule_trampoline_ctx_l1(
+    struct xdp_md* ctx, uint32_t fiber __BPF_CAPSULE_CONTROL_PARAMETER __BPF_CAPSULE_STACK_PARAMETER) {
     for (int i = 0; i < BPF_CAPSULE_DRIVE_LEVEL; i++) {
         int status = __bpf_capsule_trampoline_ctx_step(ctx, fiber __BPF_CAPSULE_CONTROL_ARGUMENT __BPF_CAPSULE_STACK_ARGUMENT);
         if (status) {
@@ -352,16 +340,13 @@ __bpf_capsule_trampoline_ctx_l1(struct xdp_md* ctx, uint32_t fiber __BPF_CAPSULE
     return 0;
 }
 
-__attribute__((used)) int __bpf_capsule_trampoline_ctx(struct xdp_md* ctx, uint32_t fiber) {
+__BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((used, always_inline)) int __bpf_capsule_trampoline_ctx(struct xdp_md* ctx, uint32_t fiber) {
     struct __bpf_capsule_fiber_control* fiber_control = __bpf_capsule_fiber_control(fiber);
-#if !BPF_HAS_ARENA
-    struct bpf_heap_array_value* stack_region = __bpf_capsule_stack_region(fiber);
-    if (!stack_region) {
-        __bpf_capsule_fiber_control(fiber)->exit_word = __bpf_capsule_exit_encode(CAPSULE_ERROR_MEMORY_FAULT);
+#if !BPF_CAPSULE_FEATURE_ARENA
+    struct bpf_capsule_stack_value* stack_base = __bpf_capsule_stack_base(fiber, fiber_control);
+    if (!stack_base) {
         return 1;
     }
-    uint32_t stack_region_offset = (fiber * BPF_CAPSULE_FIBER_STACK_BYTES) & (BPF_CAPSULE_MEMORY_REGION_SIZE - 1u);
-    struct bpf_capsule_stack_value* stack_base = (struct bpf_capsule_stack_value*)(stack_region->bytes + stack_region_offset);
 #endif
     for (int i = 0; i < BPF_CAPSULE_DRIVE_LEVEL; i++) {
         int status = __bpf_capsule_trampoline_ctx_l1(ctx, fiber __BPF_CAPSULE_CONTROL_ARGUMENT __BPF_CAPSULE_STACK_ARGUMENT);
@@ -394,13 +379,6 @@ static __attribute__((always_inline)) struct __bpf_capsule_fiber_control* __bpf_
         fiber = 0;
     }
     return &bpf_capsule_fibers[fiber];
-}
-
-static __attribute__((always_inline)) uint64_t __bpf_capsule_exit_word(uint32_t fiber) {
-    if (fiber >= BPF_CAPSULE_MAX_FIBERS) {
-        return 0;
-    }
-    return __bpf_capsule_fiber_control(fiber)->exit_word;
 }
 
 // --------------------------------------------------------------- fiber pool
@@ -445,7 +423,7 @@ __attribute__((used, noinline)) uint64_t __bpf_capsule_make_continuation(uint32_
     if (fiber >= __bpf_capsule_fiber_count()) {
         return BPF_CAPSULE_NO_CONTINUATION;
     }
-    return __bpf_capsule_continuation_value(fiber, bpf_capsule_fibers[fiber].generation);
+    return __bpf_capsule_continuation_value(fiber, __bpf_capsule_fiber_control(fiber)->generation);
 }
 
 __attribute__((used, noinline)) uint32_t __bpf_capsule_fiber_acquire_chunk(uint32_t start, uint32_t first) {
@@ -454,7 +432,7 @@ __attribute__((used, noinline)) uint32_t __bpf_capsule_fiber_acquire_chunk(uint3
         return __BPF_CAPSULE_NO_FIBER;
     }
 
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
     uint32_t one = 1;
 #endif
 #pragma clang loop unroll(disable)
@@ -467,7 +445,7 @@ __attribute__((used, noinline)) uint32_t __bpf_capsule_fiber_acquire_chunk(uint3
         if (fiber >= count) {
             fiber -= count;
         }
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
         if (bpf_map_update_elem(&bpf_capsule_issued_fibers, &fiber, &one, BPF_NOEXIST) == 0) {
 #else
         uint64_t generation = __bpf_capsule_next_generation(bpf_capsule_fibers[fiber].generation);
@@ -500,14 +478,21 @@ __attribute__((used, noinline)) uint32_t __bpf_capsule_fiber_acquire_page(uint32
     return __BPF_CAPSULE_NO_FIBER;
 }
 
+static __attribute__((always_inline)) void __bpf_capsule_clear_fiber(struct __bpf_capsule_fiber_control* control) {
+    control->status = CAPSULE_OK;
+    control->code = 0;
+    control->pc = 0;
+    control->sp = 0;
+    control->fp = 0;
+    control->return_size = 0;
+}
+
 static __attribute__((always_inline)) void __bpf_capsule_prepare_fiber(uint32_t fiber) {
     struct __bpf_capsule_fiber_control* control = &bpf_capsule_fibers[fiber];
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
     control->generation = __bpf_capsule_next_generation(control->generation);
 #endif
-    control->exit_word = 0;
-    control->stack_cursor = 0;
-    control->return_size = 0;
+    __bpf_capsule_clear_fiber(control);
 }
 
 __attribute__((used, noinline)) uint32_t __bpf_capsule_fiber_acquire(void) {
@@ -516,7 +501,7 @@ __attribute__((used, noinline)) uint32_t __bpf_capsule_fiber_acquire(void) {
     if (!count) {
         return __BPF_CAPSULE_NO_FIBER;
     }
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
     if (bpf_map_pop_elem(&bpf_capsule_free_fibers, &fiber) == 0) {
         if (fiber >= count) {
             return __BPF_CAPSULE_NO_FIBER;
@@ -557,9 +542,9 @@ static __attribute__((always_inline)) int __bpf_capsule_consume_continuation(uin
     }
     uint64_t next = __bpf_capsule_next_generation(generation);
     int consumed = 0;
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
     struct __bpf_capsule_fiber_control* control = &bpf_capsule_fibers[fiber];
-    if ((control->stack_cursor || (uint32_t)control->exit_word == CAPSULE_EXITED) && control->generation == generation) {
+    if ((control->pc || control->status == CAPSULE_EXITED) && control->generation == generation) {
         control->generation = next;
         consumed = 1;
     }
@@ -582,7 +567,7 @@ static __attribute__((always_inline)) int __bpf_capsule_consume_continuation(uin
         // runtime-map invariant violation. Stop an otherwise valid owner
         // instead of continuing with a claim slot that can never be reused.
         if (consumed) {
-            __bpf_capsule_fiber_control(fiber)->exit_word = __bpf_capsule_exit_encode(CAPSULE_ERROR_POOL_CORRUPT);
+            __bpf_capsule_stop(__bpf_capsule_fiber_control(fiber), CAPSULE_ERROR_POOL_CORRUPT);
         }
         return consumed ? __BPF_CAPSULE_CLAIM_CONSUMED : __BPF_CAPSULE_CLAIM_MAP_CORRUPT;
     }
@@ -593,16 +578,16 @@ __attribute__((used, noinline)) int __bpf_capsule_fiber_release(uint32_t fiber) 
     if (fiber >= __bpf_capsule_fiber_count()) {
         return -1;
     }
-#if BPF_HAS_ARENA
+#if BPF_CAPSULE_FEATURE_ARENA
     if (bpf_map_push_elem(&bpf_capsule_free_fibers, &fiber, 0) != 0) {
         // A full stack means a duplicate release or damaged pool. Keep the
         // slot visibly unavailable instead of risking concurrent reuse.
-        bpf_capsule_fibers[fiber].exit_word = __bpf_capsule_exit_encode(CAPSULE_ERROR_POOL_CORRUPT);
+        __bpf_capsule_stop(&bpf_capsule_fibers[fiber], CAPSULE_ERROR_POOL_CORRUPT);
         return -1;
     }
 #else
     if (bpf_map_delete_elem(&bpf_capsule_fiber_leases, &fiber) != 0) {
-        bpf_capsule_fibers[fiber].exit_word = __bpf_capsule_exit_encode(CAPSULE_ERROR_POOL_CORRUPT);
+        __bpf_capsule_stop(&bpf_capsule_fibers[fiber], CAPSULE_ERROR_POOL_CORRUPT);
         return -1;
     }
 #endif
@@ -611,15 +596,12 @@ __attribute__((used, noinline)) int __bpf_capsule_fiber_release(uint32_t fiber) 
 
 static __attribute__((always_inline)) int __bpf_capsule_fiber_cancel(uint32_t fiber) {
     struct __bpf_capsule_fiber_control* control = __bpf_capsule_fiber_control(fiber);
-    control->exit_word = 0;
-    control->stack_cursor = 0;
-    control->return_size = 0;
+    __bpf_capsule_clear_fiber(control);
     return __bpf_capsule_fiber_release(fiber);
 }
 
-__attribute__((always_inline)) void __bpf_capsule_finish_exited(struct capsule_result* result, uint32_t fiber) {
-    uint64_t word = __bpf_capsule_exit_word(fiber);
-    result->code = (int64_t)word >> 32;
+__BPF_CAPSULE_FN_CLASS("capsule.entry-glue") __attribute__((always_inline)) void __bpf_capsule_finish_exited(struct capsule_result* result, uint32_t fiber) {
+    result->code = __bpf_capsule_fiber_control(fiber)->code;
     result->status = CAPSULE_EXITED;
     if (__bpf_capsule_fiber_cancel(fiber)) {
         result->code = CAPSULE_ERROR_POOL_CORRUPT;
@@ -637,32 +619,43 @@ int __bpf_capsule_plan_broken(void) {
     uint64_t heap_end = bpf_capsule_config.heap_base + bpf_capsule_config.heap_bytes;
     uint64_t stack_bytes = (uint64_t)bpf_capsule_config.stack_bytes_per_fiber * bpf_capsule_config.fiber_count;
     if (!bpf_capsule_config.fiber_count || bpf_capsule_config.fiber_count > BPF_CAPSULE_MAX_FIBERS || bpf_capsule_config.max_fibers != BPF_CAPSULE_MAX_FIBERS ||
-        bpf_capsule_config.uses_arena != (BPF_HAS_ARENA ? 1u : 0u) || !bpf_capsule_config.stack_bytes_per_fiber || heap_end < bpf_capsule_config.heap_base ||
-        bpf_capsule_config.stack_base < heap_end || bpf_capsule_config.memory_end != bpf_capsule_config.stack_base + stack_bytes ||
-        bpf_capsule_config.heap_reserved > bpf_capsule_config.heap_bytes || bpf_capsule_config.abi_magic != BPF_CAPSULE_ABI_MAGIC ||
-        bpf_capsule_config.abi_version != BPF_CAPSULE_ABI_VERSION || bpf_capsule_config.memory_end > BPF_CAPSULE_FUNCTION_TOKEN_BASE) {
+        bpf_capsule_config.memory_backend != (BPF_CAPSULE_FEATURE_ARENA ? BPF_CAPSULE_MEMORY_ARENA : BPF_CAPSULE_MEMORY_FIXED) ||
+        !bpf_capsule_config.stack_bytes_per_fiber || heap_end < bpf_capsule_config.heap_base || bpf_capsule_config.stack_base < heap_end ||
+        bpf_capsule_config.memory_end != bpf_capsule_config.stack_base + stack_bytes || bpf_capsule_config.heap_reserved > bpf_capsule_config.heap_bytes ||
+        bpf_capsule_config.abi_magic != BPF_CAPSULE_ABI_MAGIC || bpf_capsule_config.abi_version != BPF_CAPSULE_ABI_VERSION ||
+        // bpf_capsule_configure() is mandatory on every tier: it reserves
+        // the object's 4GiB-aligned memory window and bakes its base here
+        // before the config freezes (on the arena tier the window becomes
+        // the arena's pinned user_vm_start). Base zero means no
+        // capsule-aware host prepared this object; refuse to run rather
+        // than degrade to unbased offsets.
+        !bpf_capsule_config.memory_view_base || (bpf_capsule_config.memory_view_base & 0xffffffffull)) {
         return 1;
     }
-#if !BPF_HAS_ARENA
-    // The overflow array must reach the last planned region; a stale
-    // max_entries would otherwise fault only when a deep access lands there.
-    uint32_t last_region = (uint32_t)((bpf_capsule_config.memory_end - 1u) >> BPF_CAPSULE_MEMORY_REGION_SHIFT);
+#if !BPF_CAPSULE_FEATURE_ARENA
+    uint32_t last_region = (bpf_capsule_config.memory_end - 1u) >> BPF_CAPSULE_MEMORY_REGION_SHIFT;
     if (last_region >= BPF_CAPSULE_DIRECT_MEMORY_REGIONS) {
         uint32_t key = last_region - BPF_CAPSULE_DIRECT_MEMORY_REGIONS;
         if (!bpf_map_lookup_elem(&bpf_heap_array, &key)) {
             return 1;
         }
     }
+    // bpf_capsule_initialize() has not applied the baked-pointer fixups
+    // yet: function tokens and initializer pointers are still bare window
+    // displacements. Fail closed, mirroring the arena tier's ready gate.
+    if (!__bpf_capsule_host_ready) {
+        return 1;
+    }
 #endif
     return 0;
 }
 
-__attribute__((always_inline)) struct capsule_result
-__bpf_capsule_continue(void* output, uint64_t output_size, uint64_t output_alignment, uint64_t continuation) {
+__BPF_CAPSULE_FN_CLASS("capsule.entry-glue")
+__attribute__((always_inline)) struct capsule_result __bpf_capsule_continue(
+    void* output, uint64_t output_size, uint64_t output_alignment, uint64_t continuation) {
     struct capsule_result result = {
         .code = CAPSULE_ERROR_INVALID_CONTINUATION,
         .status = CAPSULE_EXITED,
-        .reserved = 0,
         .continuation = BPF_CAPSULE_NO_CONTINUATION,
     };
     uint32_t fiber = __BPF_CAPSULE_NO_FIBER;
@@ -680,11 +673,11 @@ __bpf_capsule_continue(void* output, uint64_t output_size, uint64_t output_align
     result.code = 0;
     struct __bpf_capsule_fiber_control* control = __bpf_capsule_fiber_control(fiber);
     result.continuation = __bpf_capsule_make_continuation(fiber);
-    if ((uint32_t)control->exit_word == CAPSULE_EXITED) {
+    if (control->status == CAPSULE_EXITED) {
         __bpf_capsule_finish_exited(&result, fiber);
         return result;
     }
-    if (!control->stack_cursor) {
+    if (!control->pc) {
         result.code = CAPSULE_ERROR_NOT_PENDING;
         result.status = CAPSULE_EXITED;
         result.continuation = BPF_CAPSULE_NO_CONTINUATION;
@@ -693,14 +686,15 @@ __bpf_capsule_continue(void* output, uint64_t output_size, uint64_t output_align
         }
         return result;
     }
-    control->exit_word = 0;
+    control->status = CAPSULE_OK;
+    control->code = 0;
     (void)__bpf_capsule_trampoline(fiber);
-    if ((uint32_t)control->exit_word == CAPSULE_EXITED) {
+    if (control->status == CAPSULE_EXITED) {
         __bpf_capsule_finish_exited(&result, fiber);
-    } else if ((uint32_t)control->exit_word == CAPSULE_YIELD) {
+    } else if (control->status == CAPSULE_YIELD) {
         result.status = CAPSULE_YIELD;
         result.continuation = __bpf_capsule_make_continuation(fiber);
-    } else if (control->stack_cursor) {
+    } else if (control->pc) {
         result.status = CAPSULE_PENDING;
         result.continuation = __bpf_capsule_make_continuation(fiber);
     } else {
@@ -730,11 +724,10 @@ __bpf_capsule_continue(void* output, uint64_t output_size, uint64_t output_align
 }
 
 // Cancel a computation and release its fiber; contract in bpf_capsule.h.
-__attribute__((always_inline)) struct capsule_result __bpf_capsule_reset(uint64_t continuation) {
+__BPF_CAPSULE_FN_CLASS("capsule.entry-glue") __attribute__((always_inline)) struct capsule_result __bpf_capsule_reset(uint64_t continuation) {
     struct capsule_result result = {
         .code = CAPSULE_ERROR_INVALID_CONTINUATION,
         .status = CAPSULE_EXITED,
-        .reserved = 0,
         .continuation = BPF_CAPSULE_NO_CONTINUATION,
     };
     uint32_t fiber = __BPF_CAPSULE_NO_FIBER;
@@ -749,7 +742,7 @@ __attribute__((always_inline)) struct capsule_result __bpf_capsule_reset(uint64_
         result.code = CAPSULE_ERROR_STALE_CONTINUATION;
         return result;
     }
-    if ((uint32_t)__bpf_capsule_fiber_control(fiber)->exit_word == CAPSULE_EXITED) {
+    if (__bpf_capsule_fiber_control(fiber)->status == CAPSULE_EXITED) {
         __bpf_capsule_finish_exited(&result, fiber);
         return result;
     }
@@ -760,4 +753,48 @@ __attribute__((always_inline)) struct capsule_result __bpf_capsule_reset(uint64_
         result.status = CAPSULE_OK;
     }
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// Wide multiplication, here rather than int128.c because the overflow
+// intrinsics appear in ordinary 64-bit code (TLSF's allocator math), so the
+// helpers must be present whenever the runtime is. bpf-expand-i128 routes
+// llvm.umul/smul.with.overflow here; always_inline folds them back into each
+// site after the whole-program link.
+// ---------------------------------------------------------------------------
+
+// 64x64 -> 128 as {lo, hi}, in 64-bit arithmetic only.
+__attribute__((always_inline)) struct bpf_u128_pair __bpf_mul64_wide(unsigned long long a, unsigned long long b) {
+    unsigned long long a0 = a & 0xffffffffull, a1 = a >> 32;
+    unsigned long long b0 = b & 0xffffffffull, b1 = b >> 32;
+    unsigned long long p00 = a0 * b0, p01 = a0 * b1;
+    unsigned long long p10 = a1 * b0, p11 = a1 * b1;
+    unsigned long long lo1 = p00 + ((p01 & 0xffffffffull) << 32);
+    unsigned long long c1 = lo1 < p00;
+    unsigned long long lo2 = lo1 + ((p10 & 0xffffffffull) << 32);
+    unsigned long long c2 = lo2 < lo1;
+    struct bpf_u128_pair r;
+    r.lo = lo2;
+    r.hi = p11 + (p01 >> 32) + (p10 >> 32) + c1 + c2;
+    return r;
+}
+
+// {value, overflowed} for the 64-bit overflow-multiply intrinsics.
+__attribute__((always_inline)) struct bpf_u128_pair __bpf_umul64_overflow(unsigned long long a, unsigned long long b) {
+    struct bpf_u128_pair p = __bpf_mul64_wide(a, b);
+    struct bpf_u128_pair r;
+    r.lo = p.lo;
+    r.hi = p.hi != 0;
+    return r;
+}
+
+__attribute__((always_inline)) struct bpf_u128_pair __bpf_smul64_overflow(unsigned long long a, unsigned long long b) {
+    struct bpf_u128_pair p = __bpf_mul64_wide(a, b);
+    // Signed high half: adjust the unsigned one, then the product fits iff
+    // it equals the sign-extension of the low half.
+    unsigned long long shi = p.hi - (((long long)a < 0) ? b : 0) - (((long long)b < 0) ? a : 0);
+    struct bpf_u128_pair r;
+    r.lo = p.lo;
+    r.hi = shi != (unsigned long long)((long long)p.lo >> 63);
+    return r;
 }

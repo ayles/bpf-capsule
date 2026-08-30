@@ -2,13 +2,28 @@
 // The parts of <math.h> a program can actually get here.
 //
 // These are written as ordinary double arithmetic and lowered by
-// bpf-soft-float like everything else, so they are exact where the algorithm
-// is exact. The transcendentals that ports have needed — exp, log, sin, cos,
-// tan, pow, and everything below built from them — are implemented by series,
-// accurate to a few ulp. The inverse trigonometric functions (asin, acos,
-// atan, atan2) have no implementation: rather than return a plausible wrong
-// number they terminate the Capsule call with a named error.
+// bpf-soft-float like everything else. Basic operations and IEEE special
+// cases are explicit; the transcendental family uses compact range-reduced
+// series intended for inference workloads, not a correctly-rounded libm. A
+// math function this file does not define fails at build time at its call
+// site, never as a runtime surprise.
 #include "bpf_capsule.h"
+
+double copysign(double x, double y) {
+    unsigned long long xb;
+    unsigned long long yb;
+    __builtin_memcpy(&xb, &x, sizeof(xb));
+    __builtin_memcpy(&yb, &y, sizeof(yb));
+    xb = (xb & 0x7fffffffffffffffull) | (yb & 0x8000000000000000ull);
+    __builtin_memcpy(&x, &xb, sizeof(x));
+    return x;
+}
+
+// Unfused (double-rounding) like the rest of this file; llvm.fmuladd permits
+// exactly this.
+double fma(double a, double b, double c) {
+    return a * b + c;
+}
 
 double fabs(double x) {
     unsigned long long bits;
@@ -51,6 +66,13 @@ static double quiet_nan(void) {
     return x;
 }
 
+static double positive_infinity(void) {
+    unsigned long long bits = 0x7ff0000000000000ull;
+    double x;
+    __builtin_memcpy(&x, &bits, sizeof(x));
+    return x;
+}
+
 static unsigned long long double_bits(double x) {
     unsigned long long bits;
     __builtin_memcpy(&bits, &x, sizeof(bits));
@@ -79,16 +101,26 @@ double sqrt(double x) {
     if (x == 0.0 || x != x || infinite(x)) {
         return x;
     }
-    // Newton's method converges quadratically; the seed halves the exponent.
-    double g = x > 1.0 ? x / 2.0 : 1.0;
-    for (int i = 0; i < 60; i++) {
+    // Halving the encoded exponent provides a scale-correct seed across the
+    // complete normal range. Normalize subnormals first so the same bit
+    // construction remains valid, then undo sqrt(2^54) at the end.
+    unsigned long long bits = double_bits(x);
+    int subnormal = !(bits & 0x7ff0000000000000ull);
+    if (subnormal) {
+        x = x * 18014398509481984.0; // 2^54
+        bits = double_bits(x);
+    }
+    bits = (bits >> 1) + 0x1ff8000000000000ull;
+    double g;
+    __builtin_memcpy(&g, &bits, sizeof(g));
+    for (int i = 0; i < 12; i++) {
         double n = (g + x / g) / 2.0;
         if (n == g) {
             break;
         }
         g = n;
     }
-    return g;
+    return subnormal ? g / 134217728.0 : g; // 2^27
 }
 
 double ldexp(double x, int e) {
@@ -123,9 +155,10 @@ double frexp(double x, int* e) {
     return x < 0 ? -a : a;
 }
 
-// The transcendentals, by series. Every operation below becomes integer work
-// once bpf-soft-float rewrites it, so these are as available here as addition
-// is. Accuracy is a few ulp — enough for the inference that wants them.
+// The transcendentals, by compact series. Every operation below becomes
+// integer work once bpf-soft-float rewrites it, so these are as available here
+// as addition is. They are approximations, with explicit range reduction and
+// special-value handling rather than a correctly-rounded libm contract.
 #define LN2 0.6931471805599453094
 #define PI 3.1415926535897932385
 
@@ -250,39 +283,121 @@ double pow(double a, double b) {
     if (b == 0.0) {
         return 1.0;
     }
+    if (a == 1.0) {
+        return 1.0;
+    }
+    if (b != b) {
+        return b;
+    }
+    if (a == -1.0 && infinite(b)) {
+        return 1.0;
+    }
     if (a == 0.0) {
-        return 0.0;
+        int negative_odd = (double_bits(a) >> 63) && fabs(b) < 9007199254740992.0 && trunc(b) == b && ((long long)b & 1);
+        if (b < 0.0) {
+            return copysign(positive_infinity(), negative_odd ? -1.0 : 1.0);
+        }
+        return copysign(0.0, negative_odd ? -1.0 : 1.0);
     }
     if (a < 0.0) {
-        long long ib = (long long)b;
-        if ((double)ib != b) {
+        if (trunc(b) != b) {
             return quiet_nan();
         }
         double r = exp(b * log(-a));
-        return (ib & 1) ? -r : r;
+        int odd = fabs(b) < 9007199254740992.0 && ((long long)b & 1);
+        return odd ? -r : r;
     }
     return exp(b * log(a));
 }
-static double unsupported(void) {
-    __bpf_capsule_exit(CAPSULE_ERROR_UNSUPPORTED_LIBC);
-    __builtin_unreachable();
-}
-double asin(double x) {
-    return unsupported();
-}
-double acos(double x) {
-    return unsupported();
-}
 double atan(double x) {
-    return unsupported();
+    if (x != x) {
+        return x;
+    }
+    double sign = 1.0;
+    if (x < 0.0) {
+        sign = -1.0;
+        x = -x;
+    }
+    int invert = 0;
+    if (x > 1.0) {
+        invert = 1;
+        x = 1.0 / x;
+    }
+    // Three half-angle reductions (atan(x) = 2 atan(x / (1 + sqrt(1 + x^2))))
+    // pull the argument under ~0.14, where the nine-term odd Taylor series is
+    // a useful compact approximation.
+    int halvings;
+    for (halvings = 0; halvings < 3; halvings++) {
+        x = x / (1.0 + sqrt(1.0 + x * x));
+    }
+    static const double coeff[] = {
+        1.0 / 17.0,
+        -1.0 / 15.0,
+        1.0 / 13.0,
+        -1.0 / 11.0,
+        1.0 / 9.0,
+        -1.0 / 7.0,
+        1.0 / 5.0,
+        -1.0 / 3.0,
+        1.0,
+    };
+    double x2 = x * x;
+    double r = coeff[0];
+    unsigned i;
+    for (i = 1; i < sizeof(coeff) / sizeof(coeff[0]); i++) {
+        r = r * x2 + coeff[i];
+    }
+    r = r * x * 8.0; // undo the three halvings
+    if (invert) {
+        r = 1.5707963267948966 - r;
+    }
+    return sign * r;
 }
-double atan2(double a, double b) {
-    return unsupported();
+
+double atan2(double y, double x) {
+    if (y != y) {
+        return y;
+    }
+    if (x != x) {
+        return x;
+    }
+    if (x > 0.0) {
+        return atan(y / x);
+    }
+    if (x < 0.0) {
+        return y >= 0.0 ? atan(y / x) + PI : atan(y / x) - PI;
+    }
+    if (y > 0.0) {
+        return PI / 2.0;
+    }
+    if (y < 0.0) {
+        return -PI / 2.0;
+    }
+    return 0.0;
+}
+
+double asin(double x) {
+    if (x != x || x > 1.0 || x < -1.0) {
+        return quiet_nan();
+    }
+    return atan2(x, sqrt(1.0 - x * x));
+}
+
+double acos(double x) {
+    if (x != x || x > 1.0 || x < -1.0) {
+        return quiet_nan();
+    }
+    if (x == -1.0) {
+        return PI;
+    }
+    // Half-angle form: stable at both ends of the domain.
+    return 2.0 * atan2(sqrt(1.0 - x * x), 1.0 + x);
 }
 double difftime(long a, long b) {
-    return (double)(a - b);
+    return (double)a - (double)b;
 }
 double strtod(const char* s, char** end) {
+    // Deliberate stub: see the text-to-float limitation in README.md.
     if (end) {
         *end = (char*)s;
     }
@@ -314,6 +429,12 @@ float cosf(float x) {
 }
 float sqrtf(float x) {
     return (float)sqrt((double)x);
+}
+float copysignf(float x, float y) {
+    return (float)copysign(x, y);
+}
+float fmaf(float a, float b, float c) {
+    return (float)fma(a, b, c);
 }
 float fabsf(float x) {
     unsigned int bits;
@@ -375,9 +496,17 @@ double tanh(double x) {
     return (e - 1.0) / (e + 1.0);
 }
 double asinh(double x) {
-    return log(x + sqrt(x * x + 1.0));
+    if (x == 0.0 || x != x || infinite(x)) {
+        return x;
+    }
+    double magnitude = fabs(x);
+    double result = magnitude > 1.0e154 ? log(magnitude) + LN2 : log(magnitude + sqrt(magnitude * magnitude + 1.0));
+    return x < 0.0 ? -result : result;
 }
 double acosh(double x) {
+    if (x > 1.0e154) {
+        return log(x) + LN2;
+    }
     return log(x + sqrt(x * x - 1.0));
 }
 double atanh(double x) {
@@ -391,7 +520,21 @@ double cbrt(double x) {
     return x < 0 ? -r : r;
 }
 double hypot(double a, double b) {
-    return sqrt(a * a + b * b);
+    a = fabs(a);
+    b = fabs(b);
+    if (infinite(a) || infinite(b)) {
+        return positive_infinity();
+    }
+    if (a < b) {
+        double swap = a;
+        a = b;
+        b = swap;
+    }
+    if (a == 0.0) {
+        return a;
+    }
+    double ratio = b / a;
+    return a * sqrt(1.0 + ratio * ratio);
 }
 double expm1(double x) {
     return exp(x) - 1.0;
@@ -409,6 +552,9 @@ double fmin(double a, double b) {
     if (b != b) {
         return a;
     }
+    if (a == b) {
+        return a == 0.0 && (double_bits(a) >> 63) ? a : b;
+    }
     return a < b ? a : b;
 }
 double fmax(double a, double b) {
@@ -418,13 +564,30 @@ double fmax(double a, double b) {
     if (b != b) {
         return a;
     }
+    if (a == b) {
+        return a == 0.0 && (double_bits(a) >> 63) ? b : a;
+    }
     return a > b ? a : b;
 }
+
+static double round_to_even(double x) {
+    if (x == 0.0 || x != x || infinite(x) || fabs(x) >= 4503599627370496.0) {
+        return x;
+    }
+    double lower = floor(x);
+    double fraction = x - lower;
+    double result = lower;
+    if (fraction > 0.5 || (fraction == 0.5 && ((long long)lower & 1))) {
+        result = lower + 1.0;
+    }
+    return result == 0.0 ? copysign(0.0, x) : result;
+}
+
 double nearbyint(double x) {
-    return round(x);
+    return round_to_even(x);
 }
 double rint(double x) {
-    return round(x);
+    return round_to_even(x);
 }
 
 int isfinite(double x) {
@@ -438,8 +601,8 @@ int signbit(double x) {
     return (int)(bits >> 63);
 }
 long lrint(double x) {
-    return (long)round(x);
+    return (long)round_to_even(x);
 }
 long long llrint(double x) {
-    return (long long)round(x);
+    return (long long)round_to_even(x);
 }

@@ -13,8 +13,8 @@ for (var i = 0; i < 100; i++) { parts.push(i + ':' + (i * i)); }
 var s = parts.join(',');
 var m = s.match(/(\d+):(\d+)/g);
 acc = (acc + s.length + m.length) % 1000003;
-// Batch stdin: a line read and a read-all, both deterministic when stdin is
-// empty and both exercised in the kernel and the --native run.
+// Batch stdin: one line followed by all remaining input.
 var line = readLine();
 var rest = read();
-console.log('' + acc + '|' + s.length + '|' + m.length + '|' + (line === null) + '|' + rest.length);
+console.log('checksum', acc, 'text-bytes', s.length, 'matches', m.length);
+console.log('stdin-line', line === null ? 'EOF' : line, 'remaining-bytes', rest.length);

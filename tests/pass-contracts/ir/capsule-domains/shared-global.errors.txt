@@ -1,0 +1,1 @@
+bpf-capsule-domains: unsectioned global shared is shared by native and Capsule code

@@ -16,10 +16,6 @@ if(NOT WASM3_BPF_SOURCE_DIR OR NOT EXISTS "${WASM3_BPF_SOURCE_DIR}/source/m3_cor
         MARKER
         source/m3_core.c
     )
-    if(NOT fetched_wasm3)
-        message(STATUS "wasm3 example: upstream source unavailable, skipping")
-        return()
-    endif()
     set(WASM3_BPF_SOURCE_DIR "${fetched_wasm3}")
 endif()
 
@@ -36,13 +32,12 @@ set(WASM3_BPF_OPTIONS # The BPF target intentionally uses wasm3's generic archit
     -Wno-cpp -Wno-implicit-function-declaration
 )
 
-# Debug info comes from our own files only: clang crashes emitting it for
-# large third-party sources on this target (see the lua target).
+# Debug info comes from our integration sources, not the large upstream files.
 bpf_capsule_bitcode(
     WASM3_DRIVER_BC
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/zlib_wasm_module.h
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/wasm3_bpf.c ${BPF_CAPSULE_LIBC_DIR}/freestanding.c
-            ${BPF_CAPSULE_LIBC_DIR}/tlsf.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
+            ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
             ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
     INCLUDE_DIRECTORIES ${WASM3_BPF_INCLUDE_DIRECTORIES}
     COMPILE_DEFINITIONS ${WASM3_BPF_DEFINITIONS}
@@ -69,16 +64,11 @@ bpf_capsule_skeleton(
     DEPENDS wasm3_bpf_lib_output
 )
 
-# Native reference: the same interpreter, the same module.
-add_executable(wasm3 wasm3_host.c ${WASM3_SRC} "${CMAKE_CURRENT_BINARY_DIR}/wasm3.skel.h")
-set_source_files_properties(${WASM3_SRC} PROPERTIES COMPILE_OPTIONS -w)
-target_include_directories(
-    wasm3 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS}
-                  ${WASM3_BPF_SOURCE_DIR}/source
-)
-target_compile_options(wasm3 PRIVATE -Wall -Wextra -Dd_m3HasFloat=0 -Dd_m3NoFloatDynamic)
+add_executable(wasm3 wasm3_host.c "${CMAKE_CURRENT_BINARY_DIR}/wasm3.skel.h")
+target_include_directories(wasm3 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS})
+target_compile_options(wasm3 PRIVATE -Wall -Wextra)
 find_package(ZLIB REQUIRED)
-target_link_libraries(wasm3 PkgConfig::LibBpf ZLIB::ZLIB m)
+target_link_libraries(wasm3 ${BPF_CAPSULE_HOST_TARGET} ZLIB::ZLIB)
 add_dependencies(wasm3 wasm3_skeleton)
 
 install(TARGETS wasm3 RUNTIME DESTINATION libexec/bpf-capsule/examples/wasm3)

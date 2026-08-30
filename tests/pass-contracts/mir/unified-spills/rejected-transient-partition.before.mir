@@ -1,0 +1,90 @@
+--- |
+  source_filename = "unified-spills-rejected-transient-partition.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  declare i64 @callee(i64, i64, i64, i64, i64)
+  
+  define i64 @physical(ptr %input, ptr %stack.base) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 {
+  entry:
+    call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %stack.base)
+    %p01 = bitcast ptr %input to ptr
+    %p1 = getelementptr i64, ptr %input, i64 1
+    %p2 = getelementptr i64, ptr %input, i64 2
+    %p3 = getelementptr i64, ptr %input, i64 3
+    %p4 = getelementptr i64, ptr %input, i64 4
+    %p5 = getelementptr i64, ptr %input, i64 5
+    %p6 = getelementptr i64, ptr %input, i64 6
+    %p7 = getelementptr i64, ptr %input, i64 7
+    %p8 = getelementptr i64, ptr %input, i64 8
+    %p9 = getelementptr i64, ptr %input, i64 9
+    %v0 = load i64, ptr %p01, align 8
+    %v1 = load i64, ptr %p1, align 8
+    %v2 = load i64, ptr %p2, align 8
+    %v3 = load i64, ptr %p3, align 8
+    %v4 = load i64, ptr %p4, align 8
+    %v5 = load i64, ptr %p5, align 8
+    %v6 = load i64, ptr %p6, align 8
+    %v7 = load i64, ptr %p7, align 8
+    %v8 = load i64, ptr %p8, align 8
+    %v9 = load i64, ptr %p9, align 8
+    %called = call i64 @callee(i64 %v0, i64 %v1, i64 %v2, i64 %v3, i64 %v4)
+    %a = add i64 %called, %v5
+    %b = add i64 %a, %v6
+    %c = add i64 %b, %v7
+    %d = add i64 %c, %v8
+    %result = add i64 %d, %v9
+    ret i64 %result
+  }
+  
+  !0 = !{i32 0}
+  !1 = !{i64 8}
+...
+---
+name:            physical
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+tracksDebugUserValues: true
+liveins:
+  - { reg: '$r1' }
+  - { reg: '$r2' }
+frameInfo:
+  stackSize:       24
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+stack:
+  - { id: 0, type: spill-slot, offset: -24, size: 8, alignment: 8 }
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1, $r2
+  
+    INLINEASM &"# bpf_capsule_stack_anchor", sideeffect attdialect, reguse:GPR, killed $r2
+    $r2 = LDD $r1, 72 :: (load (s64) from %ir.p9)
+    STD killed $r2, $r10, -24
+    $r7 = LDD $r1, 64 :: (load (s64) from %ir.p8)
+    $r8 = LDD $r1, 56 :: (load (s64) from %ir.p7)
+    $r9 = LDD $r1, 48 :: (load (s64) from %ir.p6)
+    $r6 = LDD $r1, 40 :: (load (s64) from %ir.p5)
+    $r5 = LDD $r1, 32 :: (load (s64) from %ir.p4)
+    $r4 = LDD $r1, 24 :: (load (s64) from %ir.p3)
+    $r3 = LDD $r1, 16 :: (load (s64) from %ir.p2)
+    $r2 = LDD $r1, 8 :: (load (s64) from %ir.p1)
+    $r1 = LDD killed $r1, 0 :: (load (s64) from %ir.p01)
+    JAL @callee, csr, implicit $r11, implicit $r1, implicit $r2, implicit $r3, implicit $r4, implicit $r5, implicit-def $r11, implicit-def $r0
+    $r0 = ADD_rr killed $r0, killed $r6
+    $r0 = ADD_rr killed $r0, killed $r9
+    $r0 = ADD_rr killed $r0, killed $r8
+    $r0 = ADD_rr killed $r0, killed $r7
+    $r1 = LDD $r10, -24
+    $r0 = ADD_rr killed $r0, killed $r1
+    RET implicit $r0
+...

@@ -1,30 +1,24 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Control block shared between the BPF program (doom_bpf.c) and its host.
-// Lives in the .data.ctrl map, which libbpf mmaps, so both sides just read and
-// write it -- no syscall on the frame path. Fixed-offset scalars only, so
-// every access is verifier-trivial.
+// It lives in the mmapped .data.ctrl map, so both sides access it directly;
+// the WAD and framebuffer themselves remain in Capsule memory.
 #pragma once
 
-#include "bpf_capsule_abi.h"
+#include "bpf_capsule_types.h"
 
-// Input crosses the userspace/kernel boundary between game tics.  Keep every
-// transition in order: reducing a burst to one "latest down" and one "latest
-// up" loses taps and can replay a release before its press.
-#define DOOM_INPUT_QUEUE_CAPACITY 64u
+// A terminal tick can release the previous key and press its replacement.
+#define DOOM_INPUT_QUEUE_CAPACITY 2u
 #define DOOM_INPUT_DOWN (1u << 31)
 #define DOOM_INPUT_KEY_MASK 0xffffu
 
 struct doom_bpf_ctrl {
-    uint64_t wad_size;        // host -> bpf: total WAD size
-    uint64_t wad_addr;        // bpf -> host: address in capsule memory
-    uint64_t wad_capacity;    // bpf -> host: reserved bytes at wad_addr
-    uint64_t want_frame;      // host -> bpf: export the RGBA framebuffer
-    uint64_t autostart;       // host -> bpf: start directly in E1M1
-    unsigned int input_count; // host -> bpf: ordered transitions below
+    unsigned char* wad;               // host -> bpf: WAD in reserved Capsule memory
+    uint64_t wad_size;                // host -> bpf: total WAD size
+    const unsigned char* framebuffer; // bpf -> host: current 320x200 RGBA frame
+    unsigned int start_in_e1m1;       // host -> bpf: skip the menu for deterministic dumps
+    unsigned int input_count;         // host -> bpf: ordered transitions below
     unsigned int input_events[DOOM_INPUT_QUEUE_CAPACITY];
-    int inited; // bpf: doom_init done
-    int pad_;
-    struct capsule_result capsule; // bpf -> host: completion/continuation/error
+    struct capsule_result capsule; // bpf -> host: result of the last entry
     unsigned int error_len;        // bpf -> host: bytes valid in error_text
     char error_text[252];          // first PureDOOM "Error:" message, NUL-terminated
 };

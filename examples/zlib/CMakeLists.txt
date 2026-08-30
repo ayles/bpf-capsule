@@ -16,24 +16,20 @@ if(NOT ZLIB_BPF_SOURCE_DIR OR NOT EXISTS "${ZLIB_BPF_SOURCE_DIR}/inflate.c")
         MARKER
         inflate.c
     )
-    if(NOT fetched_zlib)
-        message(STATUS "zlib example: upstream source unavailable, skipping")
-        return()
-    endif()
     set(ZLIB_BPF_SOURCE_DIR "${fetched_zlib}")
 endif()
 
 set(ZLIB_SRC
     ${ZLIB_BPF_SOURCE_DIR}/inflate.c ${ZLIB_BPF_SOURCE_DIR}/inftrees.c
     ${ZLIB_BPF_SOURCE_DIR}/inffast.c ${ZLIB_BPF_SOURCE_DIR}/adler32.c
-    ${ZLIB_BPF_SOURCE_DIR}/crc32.c ${ZLIB_BPF_SOURCE_DIR}/zutil.c
+    ${ZLIB_BPF_SOURCE_DIR}/zutil.c
 )
 
 bpf_capsule_bitcode(
     ZLIB_BC
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/zlib_bpf.c ${ZLIB_SRC}
     INCLUDE_DIRECTORIES ${ZLIB_BPF_SOURCE_DIR}
-    COMPILE_DEFINITIONS Z_SOLO
+    COMPILE_DEFINITIONS Z_SOLO NO_GZIP
     COMPILE_OPTIONS -g
 )
 
@@ -52,21 +48,10 @@ bpf_capsule_skeleton(
 
 find_package(ZLIB REQUIRED)
 
-# Matched host baseline: the same generic upstream inflate sources as the BPF
-# object, compiled natively by the host compiler for the host architecture
-# with the same optimization and loop unrolling policy.  Z_PREFIX gives the
-# copy a private namespace so the benchmark can also link the distribution
-# zlib (which may select platform SIMD/assembly) for input compression and
-# comparison.
-add_library(zlib_scalar_native STATIC EXCLUDE_FROM_ALL ${ZLIB_SRC} ${ZLIB_BPF_SOURCE_DIR}/uncompr.c)
-target_include_directories(zlib_scalar_native PRIVATE ${ZLIB_BPF_SOURCE_DIR})
-target_compile_definitions(zlib_scalar_native PRIVATE Z_PREFIX)
-target_compile_options(zlib_scalar_native PRIVATE -O2 -fno-unroll-loops -fno-builtin)
-
 add_executable(zlib zlib_host.c "${CMAKE_CURRENT_BINARY_DIR}/zlib.skel.h")
 target_include_directories(zlib PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS})
 target_compile_options(zlib PRIVATE -Wall -Wextra)
-target_link_libraries(zlib PkgConfig::LibBpf ZLIB::ZLIB zlib_scalar_native)
+target_link_libraries(zlib PRIVATE ${BPF_CAPSULE_HOST_TARGET} ZLIB::ZLIB)
 add_dependencies(zlib zlib_skeleton)
 
 install(TARGETS zlib RUNTIME DESTINATION libexec/bpf-capsule/examples/zlib)

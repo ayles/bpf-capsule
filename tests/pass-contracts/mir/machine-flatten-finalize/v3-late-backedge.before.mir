@@ -1,0 +1,75 @@
+--- |
+  source_filename = "machine-finalize-v3-late-backedge.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i64 @flattened(i64 %value) #0 !bpf.capsule.flattened.units !0 {
+  prefix0:
+    br label %prefix1
+  
+  prefix1:                                          ; preds = %prefix0
+    br label %target
+  
+  target:                                           ; preds = %source, %prefix1
+    br label %source
+  
+  source:                                           ; preds = %target
+    %condition = icmp eq i64 %value, 0
+    br i1 %condition, label %target, label %exit
+  
+  exit:                                             ; preds = %source
+    ret i64 %value
+  }
+  
+  attributes #0 = { "target-cpu"="v3" }
+  
+  !0 = !{i32 1}
+...
+---
+name:            flattened
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+frameInfo:
+  maxAlignment:    1
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.prefix0:
+    liveins: $r1
+  
+    $r0 = MOV_ri 0
+    $r0 = MOV_ri 10
+    JMP %bb.1
+  
+  bb.1.prefix1:
+    liveins: $r1
+  
+    $r0 = MOV_ri 1
+    $r0 = MOV_ri 11
+    JMP %bb.2
+  
+  bb.2.target:
+    liveins: $r1
+  
+    $r0 = MOV_ri 2
+    JMP %bb.3
+  
+  bb.3.source:
+    successors: %bb.2(0x30000000), %bb.4(0x50000000)
+    liveins: $r1
+  
+    JEQ_ri $r1, 0, %bb.2
+    JMP %bb.4
+  
+  bb.4.exit:
+    liveins: $r1
+  
+    $r0 = MOV_rr $r1
+    RET implicit $r0
+...

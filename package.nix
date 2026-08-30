@@ -1,48 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 {
   llvmPackages,
+  stdenv,
   cmake,
   lib,
   bpftools,
   libbpf,
   elfutils,
   zstd,
+  zlib,
   pkg-config,
-  overrideCC,
   fetchzip,
-  python3,
+  gtest,
+  gbenchmark,
+  csmith,
   cargo,
   rustc,
-  csmith,
   runCommand,
+  buildTests ? false,
+  buildBenchmarks ? buildTests,
   buildExamples ? false,
-  example ? null,
   targetKernel ? "5.15",
 }:
 let
-  allExamples = [
-    "fib"
-    "zlib"
-    "sqlite"
-    "lua"
-    "lua-xdp"
-    "wasm3"
-    "llama2"
-    "quickjs"
-    "rust"
-    "doom"
-  ];
-  selectedExamples =
-    if example != null then [ example ]
-    else if buildExamples then allExamples
-    else [ ];
-  buildsExamples = selectedExamples != [ ];
-  builds = name: buildExamples || example == name;
-  stdenv = overrideCC llvmPackages.stdenv (
-    llvmPackages.stdenv.cc.override {
-      cc = llvmPackages.clang-unwrapped;
-    }
-  );
+  # Host tools use Nix's complete system compiler wrapper. bpf-capsule-cc
+  # discovers the pinned unwrapped Clang separately; the host compiler has no
+  # bearing on generated BPF and must retain its ordinary libc startup paths.
   zlibSource = fetchzip {
     url = "https://github.com/madler/zlib/archive/e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca.tar.gz";
     hash = "sha256-tA199foI8bwi/j8AHZQ8Y5QzxPoyoo7NZMeBHO12okk=";
@@ -78,71 +61,51 @@ let
       --output "$out/case.c"
   '';
 in
-assert lib.assertMsg (example == null || lib.elem example allExamples)
-  "unknown BPF Capsule example: ${toString example}";
 stdenv.mkDerivation {
-  pname =
-    if example != null then "bpf-capsule-${example}"
-    else if buildExamples then
-      "bpf-capsule-matrix-${lib.replaceStrings [ "." ] [ "" ] targetKernel}"
-    else "bpf-capsule";
-  # Keep in step with project(BpfCapsule VERSION ...) in CMakeLists.txt.
+  pname = "bpf-capsule-${builtins.replaceStrings [ "." ] [ "" ] targetKernel}";
   version = "0.1.0";
 
   src = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
       ./src
-      ./examples
-      ./benchmarks
-      ./tests
+      ./tools
       ./cmake
-      ./docs
-      ./LICENSE
-      ./NOTICE
+      ./tests
+      ./benchmarks
+      ./examples
+      ./thirdparty
+      ./CMakeLists.txt
       ./README.md
       ./DESIGN.md
-      ./ARCHITECTURE.md
-      ./SPEC.md
-      ./CONTRIBUTING.md
-      ./CMakeLists.txt
-      ./tools/generate-llama-fixtures.py
+      ./LICENSE
     ];
   };
 
   cmakeBuildType = "Release";
-
   hardeningDisable = [
     "stackprotector"
     "zerocallusedregs"
   ];
-
   cmakeFlags = [
     "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON"
     "-DBPF_CAPSULE_TARGET_KERNEL=${targetKernel}"
-  ] ++ lib.optionals buildsExamples [
-    "-DBPF_CAPSULE_BUILD_EXAMPLES:BOOL=ON"
-    "-DBPF_CAPSULE_EXAMPLES:STRING=${
-      if buildExamples then "all"
-      else lib.concatStringsSep ";" selectedExamples
-    }"
-  ] ++ lib.optionals buildExamples [
-    "-DBPF_CAPSULE_INSTALL_TEST_ARTIFACTS:BOOL=ON"
+    "-DBPF_CAPSULE_BUILD_TESTS:BOOL=${lib.boolToString buildTests}"
+    "-DBPF_CAPSULE_BUILD_BENCHMARKS:BOOL=${lib.boolToString buildBenchmarks}"
+    "-DBPF_CAPSULE_BUILD_EXAMPLES:BOOL=${lib.boolToString buildExamples}"
+    "-DBPF_CAPSULE_INSTALL_TEST_ARTIFACTS:BOOL=${lib.boolToString buildTests}"
+  ] ++ lib.optionals buildTests [
     "-DBPF_CAPSULE_CSMITH_CASE=${csmithCase}/case.c"
     "-DBPF_CAPSULE_CSMITH_INCLUDE_DIR=${csmith}/include"
-  ] ++ lib.optionals (builds "zlib") [
-    "-DZLIB_BPF_SOURCE_DIR=${zlibSource}"
-  ] ++ lib.optionals (builds "sqlite") [
-    "-DSQLITE_BPF_SOURCE_DIR=${sqliteSource}"
-  ] ++ lib.optionals (builds "lua" || builds "lua-xdp") [
+  ] ++ lib.optionals (buildTests || buildExamples) [
     "-DLUA_BPF_SOURCE_DIR=${luaSource}"
-  ] ++ lib.optionals (builds "wasm3") [
+  ] ++ lib.optionals buildExamples [
+    "-DBPF_CAPSULE_EXAMPLES:STRING=all"
+    "-DZLIB_BPF_SOURCE_DIR=${zlibSource}"
+    "-DSQLITE_BPF_SOURCE_DIR=${sqliteSource}"
     "-DWASM3_BPF_SOURCE_DIR=${wasm3Source}"
-  ] ++ lib.optionals (builds "llama2") [
     "-DLLAMA2_BPF_SOURCE_DIR=${llama2Source}"
-  ] ++ lib.optionals (builds "quickjs") [
     "-DQUICKJS_BPF_SOURCE_DIR=${quickjsSource}"
-  ] ++ lib.optionals (builds "doom") [
     "-DPUREDOOM_SOURCE_DIR=${puredoomSource}"
   ];
 
@@ -150,39 +113,43 @@ stdenv.mkDerivation {
     cmake
     pkg-config
     llvmPackages.libllvm
+    llvmPackages.clang-unwrapped
     bpftools
-  ] ++ lib.optionals (builds "llama2") [
-    python3
-  ] ++ lib.optionals (builds "rust") [
+  ] ++ lib.optionals buildExamples [
     cargo
     rustc
   ];
-
   buildInputs = [
     libbpf
     elfutils
     zstd
+  ] ++ lib.optionals buildTests [
+    gtest
+  ] ++ lib.optionals buildBenchmarks [
+    gbenchmark
+  ] ++ lib.optionals buildExamples [
+    zlib
   ];
 
-  postInstall = lib.optionalString (builds "llama2") ''
-    fixture_dir=$out/libexec/bpf-capsule/examples/llama2
-    ${python3}/bin/python3 $src/tools/generate-llama-fixtures.py "$fixture_dir"
+  doCheck = buildTests;
+  enableParallelChecking = true;
+  checkPhase = ''
+    runHook preCheck
+    ctest --output-on-failure -j "$NIX_BUILD_CORES"
+    runHook postCheck
   '';
 
   meta = {
-    description = "Compiles ordinary C and no_std Rust into verifier-loadable eBPF";
-    # Apache-2.0 WITH LLVM-exception; the pinned nixpkgs has no asl20-llvm
-    # attribute, so express the base license and the exception separately.
+    description = "Compile ordinary C, C++, and no_std Rust into verifier-loadable eBPF";
     license = [
       lib.licenses.asl20
       lib.licenses.llvm-exception
-    ] ++ lib.optionals buildsExamples [
+    ] ++ lib.optionals buildExamples [
       lib.licenses.bsd3
+      lib.licenses.gpl2Only
       lib.licenses.mit
       lib.licenses.publicDomain
       lib.licenses.zlib
-    ] ++ lib.optionals (builds "doom") [
-      lib.licenses.gpl2Only
     ];
     platforms = lib.platforms.linux;
   };

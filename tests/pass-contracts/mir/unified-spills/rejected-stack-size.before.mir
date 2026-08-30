@@ -1,0 +1,41 @@
+--- |
+  source_filename = "unified-spills-rejected-stack-size.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i64 @physical(ptr %stack.base) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 {
+  entry:
+    ret i64 0
+  }
+  
+  !0 = !{i32 0}
+  !1 = !{i64 12}
+...
+---
+name:            physical
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+frameInfo:
+  stackSize:       40
+  maxAlignment:    8
+  adjustsStack:    true
+  framePointerPolicy: none
+  isCalleeSavedInfoValid: true
+stack:
+  - { id: 0, offset: -40, size: 8, alignment: 8 }
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1
+  
+    INLINEASM &"# bpf_capsule_stack_anchor", sideeffect attdialect, reguse:GPR, $r1
+    STD_imm 7, $r10, -40
+    $r0 = LDD $r10, -40
+    RET implicit $r0
+...

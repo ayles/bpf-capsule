@@ -1,22 +1,27 @@
-# Csmith differential testing
+# Csmith differential test
 
-The installed matrix contains one fixed, terminating Csmith program. It is a
-fast regression tripwire, not a representative fuzzing campaign.
+The release matrix generates one fixed, terminating Csmith program and runs
+the same translation unit natively and through Capsule. Its checksum is a
+quick tripwire for arrays, pointers, aggregates, bitfields, packed layouts,
+volatile objects, division, and Csmith's safe-math helpers. It is not a fuzzing
+campaign.
 
-Run the larger rotating campaign with:
+Configure a case explicitly with:
 
 ```sh
-nix run .#fuzz
+cmake -S . -B build \
+  -DBPF_CAPSULE_CSMITH_CASE=/path/to/case.c \
+  -DBPF_CAPSULE_CSMITH_INCLUDE_DIR=/path/to/csmith/include
 ```
 
-The integer profile retains Csmith's normal arrays, pointers, aggregates,
-bitfields, packed layouts, volatile objects, division, and safe-math wrappers.
-The other profiles add floating point or 128-bit integers. Every case is first
-compiled and run natively; programs that do not terminate natively within the
-limit are discarded. The remaining program is compiled for Capsule and its
-checksum is compared after `bpf_prog_test_run` execution.
+Generated failures should be reduced into focused compiler or runtime tests.
 
-Failures retain the generated source, command, metadata, and output below
-`$XDG_CACHE_HOME/bpf-capsule/csmith-failures`. A failing program belongs in a
-focused regression test after reduction. Run the same command on a Linux 5.15
-host or VM with `--target 5.15` for the fixed-map tier.
+For a rotating integer, floating-point, and 128-bit campaign, run:
+
+```sh
+nix develop -c python3 tests/csmith/fuzz.py --count 30 --target 6.9
+```
+
+The driver stores the source, command metadata, and combined log for every
+failure under `$XDG_CACHE_HOME/bpf-capsule/csmith-failures`. It uses this same
+GTest fixture; there is no second checksum implementation or build pipeline.

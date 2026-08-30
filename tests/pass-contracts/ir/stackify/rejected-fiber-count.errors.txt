@@ -1,0 +1,1 @@
+stackify: bpf_capsule_fibers count is outside the shared Capsule ABI

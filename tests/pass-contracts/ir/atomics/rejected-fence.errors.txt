@@ -1,0 +1,1 @@
+bpf-validate-atomics: Capsule atomic fence in managed has no exact lowering for this target

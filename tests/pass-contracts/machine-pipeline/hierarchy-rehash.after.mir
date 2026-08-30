@@ -1,0 +1,575 @@
+--- |
+  source_filename = "machine-hierarchy-rehash.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i32 @root(i32 %selector, i32 %key, i32 %value) #0 !bpf.capsule.flatten.root !0 !bpf.capsule.flattened.units !1 {
+  entry:
+    switch i32 %selector, label %bad [
+      i32 0, label %call.router
+      i32 1, label %call.region0
+      i32 2, label %call.region1
+      i32 3, label %call.region2
+      i32 4, label %call.region3
+      i32 5, label %call.region4
+      i32 6, label %call.region5
+      i32 7, label %call.region6
+      i32 8, label %call.region7
+      i32 9, label %call.region8
+      i32 10, label %call.region9
+      i32 11, label %call.region10
+      i32 12, label %call.region11
+    ]
+  
+  call.router:                                      ; preds = %entry
+    %result = call i32 @router(i32 %key, i32 %value)
+    ret i32 %result
+  
+  call.region0:                                     ; preds = %entry
+    ret i32 -10
+  
+  call.region1:                                     ; preds = %entry
+    ret i32 -11
+  
+  call.region2:                                     ; preds = %entry
+    ret i32 -12
+  
+  call.region3:                                     ; preds = %entry
+    ret i32 -13
+  
+  call.region4:                                     ; preds = %entry
+    ret i32 -14
+  
+  call.region5:                                     ; preds = %entry
+    ret i32 -15
+  
+  call.region6:                                     ; preds = %entry
+    ret i32 -16
+  
+  call.region7:                                     ; preds = %entry
+    ret i32 -17
+  
+  call.region8:                                     ; preds = %entry
+    ret i32 -18
+  
+  call.region9:                                     ; preds = %entry
+    ret i32 -19
+  
+  call.region10:                                    ; preds = %entry
+    ret i32 -20
+  
+  call.region11:                                    ; preds = %entry
+    ret i32 -21
+  
+  bad:                                              ; preds = %entry
+    ret i32 -1
+  }
+  
+  define available_externally i32 @router(i32 %key, i32 %value) #0 !bpf.capsule.flatten.unit !0 !bpf.capsule.flatten.router !2 {
+  entry:
+    switch i32 %key, label %bad [
+      i32 0, label %call.region0
+      i32 1, label %call.region1
+      i32 2, label %call.region2
+      i32 3, label %call.region3
+      i32 4, label %call.region4
+      i32 5, label %call.region5
+      i32 6, label %call.region6
+      i32 7, label %call.region7
+      i32 8, label %call.region8
+      i32 9, label %call.region9
+      i32 10, label %call.region10
+      i32 11, label %call.region11
+    ]
+  
+  call.region0:                                     ; preds = %entry
+    %result0 = call i32 @region0(i32 %value)
+    ret i32 %result0
+  
+  call.region1:                                     ; preds = %entry
+    %result1 = call i32 @region1(i32 %value)
+    ret i32 %result1
+  
+  call.region2:                                     ; preds = %entry
+    %result2 = call i32 @region2(i32 %value)
+    ret i32 %result2
+  
+  call.region3:                                     ; preds = %entry
+    %result3 = call i32 @region3(i32 %value)
+    ret i32 %result3
+  
+  call.region4:                                     ; preds = %entry
+    %result4 = call i32 @region4(i32 %value)
+    ret i32 %result4
+  
+  call.region5:                                     ; preds = %entry
+    %result5 = call i32 @region5(i32 %value)
+    ret i32 %result5
+  
+  call.region6:                                     ; preds = %entry
+    %result6 = call i32 @region6(i32 %value)
+    ret i32 %result6
+  
+  call.region7:                                     ; preds = %entry
+    %result7 = call i32 @region7(i32 %value)
+    ret i32 %result7
+  
+  call.region8:                                     ; preds = %entry
+    %result8 = call i32 @region8(i32 %value)
+    ret i32 %result8
+  
+  call.region9:                                     ; preds = %entry
+    %result9 = call i32 @region9(i32 %value)
+    ret i32 %result9
+  
+  call.region10:                                    ; preds = %entry
+    %result10 = call i32 @region10(i32 %value)
+    ret i32 %result10
+  
+  call.region11:                                    ; preds = %entry
+    %result11 = call i32 @region11(i32 %value)
+    ret i32 %result11
+  
+  bad:                                              ; preds = %entry
+    ret i32 -1
+  }
+  
+  define available_externally i32 @region0(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 10
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region1(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 11
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region2(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 12
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region3(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 13
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region4(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 14
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region5(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 15
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region6(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 16
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region7(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 17
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region8(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 18
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region9(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 19
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region10(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 20
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region11(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 21
+    ret i32 %result
+  }
+  
+  attributes #0 = { "target-cpu"="v4" }
+  
+  !0 = !{i32 0}
+  !1 = !{i32 13}
+  !2 = !{}
+...
+---
+name:            root
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+tracksDebugUserValues: true
+liveins:
+  - { reg: '$w1' }
+  - { reg: '$w2' }
+  - { reg: '$w3' }
+frameInfo:
+  maxAlignment:    1
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+jumpTable:
+  kind:            block-address
+  entries:
+    - id:              0
+      blocks:          [ '%bb.2', '%bb.10', '%bb.7', '%bb.8', '%bb.4', 
+                         '%bb.11', '%bb.13', '%bb.9', '%bb.15', '%bb.6', 
+                         '%bb.14', '%bb.3', '%bb.5' ]
+body:             |
+  bb.0.entry:
+    successors: %bb.12(0x09249249), %bb.1(0x76db6db7)
+    liveins: $w1, $w2, $w3
+  
+    JUGT_ri_32 $w1, 12, %bb.12
+  
+  bb.1.entry:
+    successors: %bb.2(0x09d89d8a), %bb.10(0x09d89d8a), %bb.7(0x09d89d8a), %bb.8(0x09d89d8a), %bb.4(0x09d89d8a), %bb.11(0x09d89d8a), %bb.13(0x09d89d8a), %bb.9(0x09d89d8a), %bb.15(0x09d89d8a), %bb.6(0x09d89d8a), %bb.14(0x09d89d8a), %bb.3(0x09d89d8a), %bb.5(0x09d89d8a)
+    liveins: $w1, $w2, $w3
+  
+    $r1 = MOV_32_64 killed $w1
+    $r1 = SLL_ri killed $r1, 3
+    $r4 = LD_imm64 %jump-table.0
+    $r5 = LD_imm64 %jump-table.0
+    $r5 = ADD_rr killed $r5, killed $r1
+    $r1 = LDD killed $r5, 0 :: (load (s64) from jump-table)
+    $r4 = ADD_rr killed $r4, killed $r1
+    JX killed $r4
+  
+  bb.2.call.router:
+    liveins: $w2, $w3
+  
+    $w1 = MOV_rr_32 killed $w2
+    $w2 = MOV_rr_32 killed $w3
+    JMP %bb.16
+  
+  bb.3.call.region10:
+    $w0 = MOV_ri_32 -20
+    RET implicit $w0
+  
+  bb.4.call.region3:
+    $w0 = MOV_ri_32 -13
+    RET implicit $w0
+  
+  bb.5.call.region11:
+    $w0 = MOV_ri_32 -21
+    RET implicit $w0
+  
+  bb.6.call.region8:
+    $w0 = MOV_ri_32 -18
+    RET implicit $w0
+  
+  bb.7.call.region1:
+    $w0 = MOV_ri_32 -11
+    RET implicit $w0
+  
+  bb.8.call.region2:
+    $w0 = MOV_ri_32 -12
+    RET implicit $w0
+  
+  bb.9.call.region6:
+    $w0 = MOV_ri_32 -16
+    RET implicit $w0
+  
+  bb.10.call.region0:
+    $w0 = MOV_ri_32 -10
+    RET implicit $w0
+  
+  bb.11.call.region4:
+    $w0 = MOV_ri_32 -14
+    RET implicit $w0
+  
+  bb.12.bad:
+    $w0 = MOV_ri_32 -1
+    RET implicit $w0
+  
+  bb.13.call.region5:
+    $w0 = MOV_ri_32 -15
+    RET implicit $w0
+  
+  bb.14.call.region9:
+    $w0 = MOV_ri_32 -19
+    RET implicit $w0
+  
+  bb.15.call.region7:
+    $w0 = MOV_ri_32 -17
+    RET implicit $w0
+  
+  bb.16.entry:
+    successors: %bb.17, %bb.22
+    liveins: $w1, $w2
+  
+    JSGT_ri_32 $w1, 5, %bb.22
+  
+  bb.17.entry:
+    successors: %bb.18, %bb.27
+    liveins: $w1, $w2
+  
+    JSGT_ri_32 $w1, 2, %bb.27
+  
+  bb.18.entry:
+    successors: %bb.35(0x27627628), %bb.19(0x589d89d8)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 0, %bb.35
+  
+  bb.19.entry:
+    successors: %bb.39(0x38e38e3a), %bb.20(0x471c71c6)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 1, %bb.39
+  
+  bb.20.entry:
+    successors: %bb.21(0x6666666b), %bb.43(0x19999995)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 killed $w1, 2, %bb.21
+    JMP %bb.43
+  
+  bb.21.call.region2:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.44
+  
+  bb.22.entry:
+    successors: %bb.23, %bb.31
+    liveins: $w1, $w2
+  
+    JSGT_ri_32 $w1, 8, %bb.31
+  
+  bb.23.entry:
+    successors: %bb.36(0x27627628), %bb.24(0x589d89d8)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 6, %bb.36
+  
+  bb.24.entry:
+    successors: %bb.40(0x38e38e3a), %bb.25(0x471c71c6)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 7, %bb.40
+  
+  bb.25.entry:
+    successors: %bb.26(0x6666666b), %bb.43(0x19999995)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 killed $w1, 8, %bb.26
+    JMP %bb.43
+  
+  bb.26.call.region8:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.45
+  
+  bb.27.entry:
+    successors: %bb.37(0x27627628), %bb.28(0x589d89d8)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 3, %bb.37
+  
+  bb.28.entry:
+    successors: %bb.41(0x38e38e3a), %bb.29(0x471c71c6)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 4, %bb.41
+  
+  bb.29.entry:
+    successors: %bb.30(0x6666666b), %bb.43(0x19999995)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 killed $w1, 5, %bb.30
+    JMP %bb.43
+  
+  bb.30.call.region5:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.46
+  
+  bb.31.entry:
+    successors: %bb.38(0x27627628), %bb.32(0x589d89d8)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 9, %bb.38
+  
+  bb.32.entry:
+    successors: %bb.42(0x38e38e3a), %bb.33(0x471c71c6)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 $w1, 10, %bb.42
+  
+  bb.33.entry:
+    successors: %bb.34(0x6666666b), %bb.43(0x19999995)
+    liveins: $w1, $w2
+  
+    JEQ_ri_32 killed $w1, 11, %bb.34
+    JMP %bb.43
+  
+  bb.34.call.region11:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.47
+  
+  bb.35.call.region0:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.48
+  
+  bb.36.call.region6:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.49
+  
+  bb.37.call.region3:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.50
+  
+  bb.38.call.region9:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.51
+  
+  bb.39.call.region1:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.52
+  
+  bb.40.call.region7:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.53
+  
+  bb.41.call.region4:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.54
+  
+  bb.42.call.region10:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.55
+  
+  bb.43.bad:
+    $w0 = MOV_ri_32 -1
+    RET implicit $w0
+  
+  bb.44.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 12
+    RET implicit $w0
+  
+  bb.45.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 18
+    RET implicit $w0
+  
+  bb.46.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 15
+    RET implicit $w0
+  
+  bb.47.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 21
+    RET implicit $w0
+  
+  bb.48.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 10
+    RET implicit $w0
+  
+  bb.49.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 16
+    RET implicit $w0
+  
+  bb.50.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 13
+    RET implicit $w0
+  
+  bb.51.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 19
+    RET implicit $w0
+  
+  bb.52.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 11
+    RET implicit $w0
+  
+  bb.53.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 17
+    RET implicit $w0
+  
+  bb.54.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 14
+    RET implicit $w0
+  
+  bb.55.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 20
+    RET implicit $w0
+...

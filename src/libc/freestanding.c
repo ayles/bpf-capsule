@@ -23,7 +23,6 @@
 #include <errno.h>
 #include <locale.h>
 #include <signal.h>
-#include <setjmp.h>
 
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
@@ -34,36 +33,95 @@
 // rejects one instruction serving both ("same insn cannot be used with
 // different pointers"). That collision came from codegen tail merging, which
 // is disabled globally, so these need no per-call-site duplication.
-void* memcpy(void* d, const void* s, unsigned long n) {
-    char* dp = d;
-    const char* sp = s;
+// Bulk memory runs as bounded native chunk kernels below managed drivers.
+// Each kernel is a nosuspend subprogram the verifier checks exactly once,
+// with constant-bounded loops; the drivers walk arbitrary lengths by
+// looping those bounded chunks. Expanding the loops inline at every call
+// site instead pays the loop's verifier cost per site — expanded
+// memcpy/memset was 72% of SQLite's object and pushed it past the
+// one-million-instruction verifier budget.
+// The kernels copy one complete chunk each with exact-trip loops — the shape
+// the nosuspend proof accepts — and the drivers' own managed loops handle the
+// sub-chunk tail, whose verifier cost is likewise paid once.
+#define BPF_MEM_CHUNK 512ul
+typedef unsigned long long __attribute__((may_alias, aligned(1))) bpf_mem_word;
+
+CAPSULE_NOSUSPEND unsigned long long __bpf_memcpy_chunk(unsigned long long dst, unsigned long long src) {
+    bpf_mem_word* d = (bpf_mem_word*)(unsigned long)dst;
+    const bpf_mem_word* s = (const bpf_mem_word*)(unsigned long)src;
+    for (unsigned long i = 0; i < BPF_MEM_CHUNK / 8; i++) {
+        d[i] = s[i];
+    }
+    return 0;
+}
+
+// The descending twin for overlapping backward moves: copies the chunk
+// highest word first.
+CAPSULE_NOSUSPEND unsigned long long __bpf_memmove_chunk(unsigned long long dst, unsigned long long src) {
+    bpf_mem_word* d = (bpf_mem_word*)(unsigned long)dst;
+    const bpf_mem_word* s = (const bpf_mem_word*)(unsigned long)src;
+    for (unsigned long i = 0; i < BPF_MEM_CHUNK / 8; i++) {
+        unsigned long at = BPF_MEM_CHUNK / 8 - 1 - i;
+        d[at] = s[at];
+    }
+    return 0;
+}
+
+CAPSULE_NOSUSPEND unsigned long long __bpf_memset_chunk(unsigned long long dst, unsigned long long value) {
+    bpf_mem_word* d = (bpf_mem_word*)(unsigned long)dst;
+    unsigned long long word = (value & 0xff) * 0x0101010101010101ull;
+    for (unsigned long i = 0; i < BPF_MEM_CHUNK / 8; i++) {
+        d[i] = word;
+    }
+    return 0;
+}
+
+__attribute__((noinline)) void* memcpy(void* d, const void* s, unsigned long n) {
+    unsigned long long dw = (unsigned long long)(unsigned long)d;
+    unsigned long long sw = (unsigned long long)(unsigned long)s;
+    while (n >= BPF_MEM_CHUNK) {
+        __bpf_memcpy_chunk(dw, sw);
+        dw += BPF_MEM_CHUNK;
+        sw += BPF_MEM_CHUNK;
+        n -= BPF_MEM_CHUNK;
+    }
+    char* dp = (char*)(unsigned long)dw;
+    const char* sp = (const char*)(unsigned long)sw;
     for (unsigned long i = 0; i < n; i++) {
         dp[i] = sp[i];
     }
     return d;
 }
-void* memmove(void* d, const void* s, unsigned long n) {
-    char* dp = d;
-    const char* sp = s;
-    if (dp < sp) {
-        for (unsigned long i = 0; i < n; i++) {
-            dp[i] = sp[i];
-        }
-    } else {
-        for (unsigned long i = n; i > 0; i--) {
-            dp[i - 1] = sp[i - 1];
-        }
+__attribute__((noinline)) void* memmove(void* d, const void* s, unsigned long n) {
+    if (d < s) {
+        return memcpy(d, s, n);
+    }
+    char* dp = (char*)d;
+    const char* sp = (const char*)s;
+    while (n && (n & (BPF_MEM_CHUNK - 1))) {
+        n--;
+        dp[n] = sp[n];
+    }
+    while (n) {
+        n -= BPF_MEM_CHUNK;
+        __bpf_memmove_chunk((unsigned long long)(unsigned long)(dp + n), (unsigned long long)(unsigned long)(sp + n));
     }
     return d;
 }
-void* memset(void* d, int c, unsigned long n) {
-    char* dp = d;
+__attribute__((noinline)) void* memset(void* d, int c, unsigned long n) {
+    unsigned long long dw = (unsigned long long)(unsigned long)d;
+    while (n >= BPF_MEM_CHUNK) {
+        __bpf_memset_chunk(dw, (unsigned long long)(unsigned char)c);
+        dw += BPF_MEM_CHUNK;
+        n -= BPF_MEM_CHUNK;
+    }
+    char* dp = (char*)(unsigned long)dw;
     for (unsigned long i = 0; i < n; i++) {
         dp[i] = (char)c;
     }
     return d;
 }
-int memcmp(const void* a, const void* b, unsigned long n) {
+__attribute__((noinline)) int memcmp(const void* a, const void* b, unsigned long n) {
     const unsigned char* x = a;
     const unsigned char* y = b;
     for (unsigned long i = 0; i < n; i++) {
@@ -73,7 +131,7 @@ int memcmp(const void* a, const void* b, unsigned long n) {
     }
     return 0;
 }
-void* memchr(const void* s, int c, unsigned long n) {
+__attribute__((noinline)) void* memchr(const void* s, int c, unsigned long n) {
     const unsigned char* p = s;
     for (unsigned long i = 0; i < n; i++) {
         if (p[i] == (unsigned char)c) {
@@ -82,14 +140,14 @@ void* memchr(const void* s, int c, unsigned long n) {
     }
     return 0;
 }
-unsigned long strlen(const char* s) {
+__attribute__((noinline)) unsigned long strlen(const char* s) {
     unsigned long n = 0;
     while (s[n]) {
         n++;
     }
     return n;
 }
-int strcmp(const char* a, const char* b) {
+__attribute__((noinline)) int strcmp(const char* a, const char* b) {
     unsigned long i = 0;
     for (; a[i] && a[i] == b[i]; i++) {
     }
@@ -98,7 +156,7 @@ int strcmp(const char* a, const char* b) {
 int strcoll(const char* a, const char* b) {
     return strcmp(a, b);
 }
-int strncmp(const char* a, const char* b, unsigned long n) {
+__attribute__((noinline)) int strncmp(const char* a, const char* b, unsigned long n) {
     for (unsigned long i = 0; i < n; i++) {
         if (a[i] != b[i]) {
             return (unsigned char)a[i] - (unsigned char)b[i];
@@ -109,7 +167,7 @@ int strncmp(const char* a, const char* b, unsigned long n) {
     }
     return 0;
 }
-char* strcpy(char* d, const char* s) {
+__attribute__((noinline)) char* strcpy(char* d, const char* s) {
     unsigned long i = 0;
     for (; s[i]; i++) {
         d[i] = s[i];
@@ -117,7 +175,7 @@ char* strcpy(char* d, const char* s) {
     d[i] = 0;
     return d;
 }
-char* strncpy(char* d, const char* s, unsigned long n) {
+__attribute__((noinline)) char* strncpy(char* d, const char* s, unsigned long n) {
     unsigned long i = 0;
     for (; i < n && s[i]; i++) {
         d[i] = s[i];
@@ -135,7 +193,7 @@ char* strcat(char* d, const char* s) {
     d[n + i] = 0;
     return d;
 }
-char* strchr(const char* s, int c) {
+__attribute__((noinline)) char* strchr(const char* s, int c) {
     for (unsigned long i = 0;; i++) {
         if (s[i] == (char)c) {
             return (char*)&s[i];
@@ -145,7 +203,7 @@ char* strchr(const char* s, int c) {
         }
     }
 }
-char* strrchr(const char* s, int c) {
+__attribute__((noinline)) char* strrchr(const char* s, int c) {
     char* last = 0;
     for (unsigned long i = 0;; i++) {
         if (s[i] == (char)c) {
@@ -207,42 +265,57 @@ char* strerror(int e) {
 
 // ------------------------------------------------------------------ allocator
 //
-// Allocation is TLSF (see src/libc/tlsf.c): two-level segregated
+// Allocation is TLSF (see thirdparty/tlsf/): two-level segregated
 // fit and O(1) malloc/free over the load-time-sized Capsule heap.
 #ifndef BPF_CAPSULE_FREESTANDING_NULL_ALLOCATOR
 #include "tlsf.h"
 
 static tlsf_t fs_tlsf;
 
-// A HASH insertion with BPF_NOEXIST is the portable kernel-wide compare and
-// exchange available to every program type on both supported tiers. It is a
-// better allocator mutex than bpf_spin_lock here: Linux 5.15 rejects spin
-// locks in the sleepable syscall programs used by BPF_PROG_TEST_RUN.
+// Modern BPF JITs implement compare-exchange. Keep the mutex in native map
+// storage so taking it is one BPF atomic rather than a HASH update followed
+// by a HASH delete for every allocator operation. It cannot live in Capsule
+// memory: managed compare-exchange is deliberately unsupported.
+#if BPF_CAPSULE_FEATURE_FULL_ATOMICS
+static volatile unsigned int fs_allocator_lock_word SEC(".bss.fsalloc");
+#else
+// Linux 5.15 verifies the modern atomic encodings but old arm64 JITs only
+// implement non-fetching XADD and otherwise fall the complete program back to
+// the interpreter. A single-entry HASH is the kernel's native atomic
+// test-and-set on that tier. This cost stays entirely at allocator entry/exit;
+// generated application code and memory accesses are unchanged.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 1);
     __type(key, unsigned int);
     __type(value, unsigned int);
 } fs_allocator_lease SEC(".maps");
-
-// BPF helpers require key/value arguments with verifier-native provenance;
-// managed-frame pointers are deliberately rejected. This fixed word lives in
-// libbpf-managed read-only storage and supplies both arguments. Its contents
-// are irrelevant: BPF_NOEXIST insertion is the linearization point.
-static const unsigned int fs_allocator_token SEC(".rodata.fs_allocator") = 0;
+#endif
 
 #define FS_ALLOCATOR_BUSY (~0ull)
 #define FS_ALLOCATOR_ERROR (~1ull)
 
 static __attribute__((always_inline)) int fs_try_lock(void) {
-    return bpf_map_update_elem(&fs_allocator_lease, &fs_allocator_token, &fs_allocator_token, BPF_NOEXIST) == 0;
+#if BPF_CAPSULE_FEATURE_FULL_ATOMICS
+    unsigned int expected = 0;
+    return __atomic_compare_exchange_n(&fs_allocator_lock_word, &expected, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#else
+    unsigned int key = 0;
+    unsigned int value = 1;
+    return bpf_map_update_elem(&fs_allocator_lease, &key, &value, BPF_NOEXIST) == 0;
+#endif
 }
 
 static __attribute__((always_inline)) int fs_unlock(void) {
-    return bpf_map_delete_elem(&fs_allocator_lease, &fs_allocator_token) == 0;
+#if BPF_CAPSULE_FEATURE_FULL_ATOMICS
+    return __atomic_exchange_n(&fs_allocator_lock_word, 0, __ATOMIC_SEQ_CST) == 1;
+#else
+    unsigned int key = 0;
+    return bpf_map_delete_elem(&fs_allocator_lease, &key) == 0;
+#endif
 }
 
-static int fs_setup(void) {
+static __attribute__((always_inline)) int fs_setup(void) {
     unsigned long heap_size = capsule_heap_size();
     unsigned long minimum = tlsf_size() + tlsf_pool_overhead() + tlsf_block_size_min();
     if (heap_size < minimum) {
@@ -257,8 +330,8 @@ static int fs_setup(void) {
 // retries and may suspend there. Once an island acquires the lease it performs
 // the complete metadata operation and releases it in the same BPF invocation.
 // The compiler rejects any virtualized backedge or managed call that survives
-// inside a __bpf_capsule_nosuspend_ function.
-__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_malloc(unsigned long n) {
+// inside a CAPSULE_NOSUSPEND function.
+CAPSULE_NOSUSPEND unsigned long long __bpf_allocator_malloc(unsigned long n) {
     if (!fs_try_lock()) {
         return FS_ALLOCATOR_BUSY;
     }
@@ -269,7 +342,7 @@ __attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_m
     return fs_unlock() ? (unsigned long long)(unsigned long)result : FS_ALLOCATOR_ERROR;
 }
 
-__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_free(unsigned long address) {
+CAPSULE_NOSUSPEND unsigned long long __bpf_allocator_free(unsigned long address) {
     if (!fs_try_lock()) {
         return FS_ALLOCATOR_BUSY;
     }
@@ -279,7 +352,7 @@ __attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_f
     return fs_unlock() ? 0 : FS_ALLOCATOR_ERROR;
 }
 
-__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_size(unsigned long address) {
+CAPSULE_NOSUSPEND unsigned long long __bpf_allocator_size(unsigned long address) {
     if (!fs_try_lock()) {
         return FS_ALLOCATOR_BUSY;
     }
@@ -287,7 +360,7 @@ __attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_s
     return fs_unlock() ? result : FS_ALLOCATOR_ERROR;
 }
 
-__attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_memalign(unsigned long align, unsigned long n) {
+CAPSULE_NOSUSPEND unsigned long long __bpf_allocator_memalign(unsigned long align, unsigned long n) {
     if (!fs_try_lock()) {
         return FS_ALLOCATOR_BUSY;
     }
@@ -301,7 +374,7 @@ __attribute__((noinline)) unsigned long long __bpf_capsule_nosuspend_allocator_m
 void* malloc(unsigned long n) {
     unsigned long long result;
     do {
-        result = __bpf_capsule_nosuspend_allocator_malloc(n);
+        result = __bpf_allocator_malloc(n);
     } while (result == FS_ALLOCATOR_BUSY);
     if (result == FS_ALLOCATOR_ERROR) {
         __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
@@ -318,7 +391,7 @@ void free(void* p) {
     }
     unsigned long long result;
     do {
-        result = __bpf_capsule_nosuspend_allocator_free((unsigned long)p);
+        result = __bpf_allocator_free((unsigned long)p);
     } while (result == FS_ALLOCATOR_BUSY);
     if (result == FS_ALLOCATOR_ERROR) {
         __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
@@ -344,7 +417,7 @@ unsigned long malloc_usable_size(void* p) {
     }
     unsigned long long result;
     do {
-        result = __bpf_capsule_nosuspend_allocator_size((unsigned long)p);
+        result = __bpf_allocator_size((unsigned long)p);
     } while (result == FS_ALLOCATOR_BUSY);
     if (result == FS_ALLOCATOR_ERROR) {
         __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
@@ -379,7 +452,7 @@ void* realloc(void* p, unsigned long n) {
 void* memalign(unsigned long align, unsigned long n) {
     unsigned long long result;
     do {
-        result = __bpf_capsule_nosuspend_allocator_memalign(align, n);
+        result = __bpf_allocator_memalign(align, n);
     } while (result == FS_ALLOCATOR_BUSY);
     if (result == FS_ALLOCATOR_ERROR) {
         __bpf_capsule_exit(CAPSULE_ERROR_ALLOCATOR_CORRUPT);
@@ -597,10 +670,15 @@ FILE* stdout = &fs_null;
 FILE* stderr = &fs_null;
 
 FILE* fopen(const char* p, const char* m) {
+    (void)p;
+    (void)m;
     errno = ENOSYS;
     return 0;
 }
 FILE* freopen(const char* p, const char* m, FILE* f) {
+    (void)p;
+    (void)m;
+    (void)f;
     errno = ENOSYS;
     return 0;
 }
@@ -619,10 +697,18 @@ int fflush(FILE* f) {
     return EOF;
 }
 unsigned long fread(void* p, unsigned long sz, unsigned long n, FILE* f) {
+    (void)p;
+    (void)sz;
+    (void)n;
+    (void)f;
     errno = EBADF;
     return 0;
 }
 unsigned long fwrite(const void* p, unsigned long sz, unsigned long n, FILE* f) {
+    (void)p;
+    (void)sz;
+    (void)n;
+    (void)f;
     errno = EBADF;
     return 0;
 }
@@ -639,10 +725,14 @@ int fputc(int c, FILE* f) {
     return EOF;
 }
 char* fgets(char* s, int n, FILE* f) {
+    (void)s;
+    (void)n;
+    (void)f;
     errno = EBADF;
     return 0;
 }
 int getc(FILE* f) {
+    (void)f;
     errno = EBADF;
     return EOF;
 }
@@ -653,34 +743,49 @@ int ungetc(int c, FILE* f) {
     return EOF;
 }
 int ferror(FILE* f) {
+    (void)f;
     return 1;
 }
 int feof(FILE* f) {
+    (void)f;
     return 0;
 }
 void clearerr(FILE* f) {
+    (void)f;
 }
 int setvbuf(FILE* f, char* b, int m, unsigned long s) {
+    (void)f;
+    (void)b;
+    (void)m;
+    (void)s;
     errno = EBADF;
     return -1;
 }
 int fseek(FILE* f, long o, int w) {
+    (void)f;
+    (void)o;
+    (void)w;
     errno = EBADF;
     return -1;
 }
 long ftell(FILE* f) {
+    (void)f;
     errno = EBADF;
     return -1;
 }
 int remove(const char* p) {
+    (void)p;
     errno = ENOSYS;
     return -1;
 }
 int rename(const char* a, const char* b) {
+    (void)a;
+    (void)b;
     errno = ENOSYS;
     return -1;
 }
 char* tmpnam(char* s) {
+    (void)s;
     errno = ENOSYS;
     return 0;
 }
@@ -693,9 +798,11 @@ __attribute__((noreturn)) void exit(int code) {
     capsule_exit(code);
 }
 char* getenv(const char* n) {
+    (void)n;
     return 0;
 }
 int system(const char* c) {
+    (void)c;
     errno = ENOSYS;
     return -1;
 }
@@ -712,18 +819,23 @@ clock_t clock(void) {
     return (clock_t)-1;
 }
 struct tm* localtime(const time_t* t) {
+    (void)t;
     errno = ENOSYS;
     return 0;
 }
 struct tm* gmtime(const time_t* t) {
+    (void)t;
     errno = ENOSYS;
     return 0;
 }
 time_t mktime(struct tm* tm) {
+    (void)tm;
     errno = ENOSYS;
     return -1;
 }
 unsigned long strftime(char* s, unsigned long m, const char* f, const struct tm* tm) {
+    (void)f;
+    (void)tm;
     if (m) {
         s[0] = 0;
     }
@@ -743,27 +855,15 @@ struct lconv* localeconv(void) {
 }
 
 sighandler_t signal(int sig, sighandler_t h) {
+    (void)sig;
+    (void)h;
     errno = ENOSYS;
     return SIG_ERR;
 }
 int raise(int sig) {
+    (void)sig;
     errno = ENOSYS;
     return -1;
-}
-
-// setjmp/longjmp cannot be honoured: the machine stack this would unwind is
-// not where execution lives. A program that needs error recovery overrides
-// its own mechanism; reaching these means it did not.
-int setjmp(jmp_buf b) {
-    (void)b;
-    __bpf_capsule_exit(CAPSULE_ERROR_UNSUPPORTED_LIBC);
-    __builtin_unreachable();
-}
-__attribute__((noreturn)) void longjmp(jmp_buf b, int v) {
-    (void)b;
-    (void)v;
-    __bpf_capsule_exit(CAPSULE_ERROR_UNSUPPORTED_LIBC);
-    __builtin_unreachable();
 }
 
 // ------------------------------------------------------------- formatting
@@ -799,6 +899,18 @@ static void fs_format_repeat(struct fs_format_output* output, char value, unsign
 static void fs_format_bytes(struct fs_format_output* output, const char* bytes, unsigned long length) {
     for (unsigned long index = 0; index < length; ++index) {
         fs_format_char(output, bytes[index]);
+    }
+}
+
+static __attribute__((always_inline)) inline void fs_format_padded_bytes(
+    struct fs_format_output* output, const char* bytes, unsigned long length, unsigned long width, int left) {
+    unsigned long padding = width > length ? width - length : 0;
+    if (!left) {
+        fs_format_repeat(output, ' ', padding);
+    }
+    fs_format_bytes(output, bytes, length);
+    if (left) {
+        fs_format_repeat(output, ' ', padding);
     }
 }
 
@@ -859,10 +971,8 @@ static unsigned long long fs_format_unsigned_arg(va_list* ap, enum fs_format_len
     }
 }
 
-static void fs_format_field(
-    struct fs_format_output* output, const char* prefix, unsigned int prefix_length, const char* reversed_digits, unsigned int digit_length,
-    unsigned long precision_zeroes, unsigned long width, int left, int zero_pad
-) {
+static void fs_format_field(struct fs_format_output* output, const char* prefix, unsigned int prefix_length, const char* reversed_digits,
+    unsigned int digit_length, unsigned long precision_zeroes, unsigned long width, int left, int zero_pad) {
     unsigned long content = (unsigned long)prefix_length + precision_zeroes + digit_length;
     unsigned long padding = width > content ? width - content : 0;
     if (!left && !zero_pad) {
@@ -973,28 +1083,25 @@ int vsnprintf(char* out, unsigned long cap, const char* fmt, va_list ap) {
                 break;
             }
             case 'u':
+            case 'o':
             case 'x':
             case 'X': {
                 unsigned long long value = fs_format_unsigned_arg(&ap, length);
-                unsigned int base = *f == 'u' ? 10 : 16;
+                unsigned int base = *f == 'u' ? 10 : *f == 'o' ? 8 : 16;
                 char digits[24];
                 unsigned int digit_length = precision == 0 && value == 0 ? 0 : fs_utoa_reverse(digits, value, base, *f == 'X');
                 char prefix[2] = {'0', *f};
-                unsigned int prefix_length = alternate && value && base == 16 ? 2 : 0;
+                unsigned int prefix_length = alternate && value && base == 16 ? 2 : alternate && base == 8 && !digit_length ? 1 : 0;
+                if (alternate && base == 8 && digit_length && digits[digit_length - 1] != '0') {
+                    prefix_length = 1;
+                }
                 unsigned long precision_zeroes = precision > (long)digit_length ? (unsigned long)precision - digit_length : 0;
                 fs_format_field(&output, prefix, prefix_length, digits, digit_length, precision_zeroes, width, left, zero_pad && precision < 0);
                 break;
             }
             case 'c': {
                 char value = (char)va_arg(ap, int);
-                unsigned long padding = width > 1 ? width - 1 : 0;
-                if (!left) {
-                    fs_format_repeat(&output, ' ', padding);
-                }
-                fs_format_char(&output, value);
-                if (left) {
-                    fs_format_repeat(&output, ' ', padding);
-                }
+                fs_format_padded_bytes(&output, &value, 1, width, left);
                 break;
             }
             case 's': {
@@ -1006,14 +1113,7 @@ int vsnprintf(char* out, unsigned long cap, const char* fmt, va_list ap) {
                 if (precision >= 0 && length > (unsigned long)precision) {
                     length = (unsigned long)precision;
                 }
-                unsigned long padding = width > length ? width - length : 0;
-                if (!left) {
-                    fs_format_repeat(&output, ' ', padding);
-                }
-                fs_format_bytes(&output, s, length);
-                if (left) {
-                    fs_format_repeat(&output, ' ', padding);
-                }
+                fs_format_padded_bytes(&output, s, length, width, left);
                 break;
             }
             case 'p': {
@@ -1033,14 +1133,7 @@ int vsnprintf(char* out, unsigned long cap, const char* fmt, va_list ap) {
                 (void)va_arg(ap, double);
                 const char* s = "<float>";
                 unsigned long length = 7;
-                unsigned long padding = width > length ? width - length : 0;
-                if (!left) {
-                    fs_format_repeat(&output, ' ', padding);
-                }
-                fs_format_bytes(&output, s, length);
-                if (left) {
-                    fs_format_repeat(&output, ' ', padding);
-                }
+                fs_format_padded_bytes(&output, s, length, width, left);
                 break;
             }
             case '%':
@@ -1118,6 +1211,8 @@ int putc(int c, FILE* f) {
 // that reach for it are given a clean failure, and the ports stage their data
 // through a map instead.
 int open(const char* path, int flags, ...) {
+    (void)path;
+    (void)flags;
     errno = ENOSYS;
     return -1;
 }
@@ -1168,9 +1263,9 @@ void* bsearch(const void* key, const void* base, unsigned long n, unsigned long 
     return 0;
 }
 
-// Text-to-float parsing needs the float formatting this environment does not
-// have; nothing on a tested path calls it.
+// Text-to-float parsing is not implemented in the freestanding environment.
 double atof(const char* s) {
+    (void)s;
     return 0.0;
 }
 int atoi(const char* s) {
@@ -1181,6 +1276,8 @@ int atoi(const char* s) {
 // declaration exists so callers compile, and it reports that it matched
 // nothing.
 int sscanf(const char* s, const char* fmt, ...) {
+    (void)s;
+    (void)fmt;
     return 0;
 }
 

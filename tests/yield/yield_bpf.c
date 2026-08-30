@@ -12,7 +12,7 @@ static uint64_t yield_test_body(uint64_t seed) {
     for (unsigned int index = 0; index < sizeof(stack_probe); ++index) {
         stack_probe[index] = (unsigned char)(seed + index * 3u);
     }
-    yield_test_output.stack_probe_address = (uint64_t)(unsigned long)stack_probe;
+    yield_test_output.stack_probe = stack_probe;
     yield_test_output.request = seed + 1;
     yield_test_output.stage = 1;
     capsule_yield();

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#pragma once
 
 #include <stdint.h>
-// Csmith's minimal runtime is freestanding, deterministic, and exposes its
-// checksum as ordinary data. Include a generated case once, then remove the
-// integer-type macros before including Linux or libc headers.
+
+// Csmith's minimal runtime is freestanding and deterministic. Include the
+// generated translation unit once, rename its entry, then remove the type
+// macros before Linux, libbpf, or libc headers are parsed.
 #define CSMITH_MINIMAL 1
 #define NO_PRINTF 1
 #define NOT_PRINT_CHECKSUM 1

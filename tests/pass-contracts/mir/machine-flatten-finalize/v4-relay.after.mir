@@ -1,0 +1,83 @@
+--- |
+  source_filename = "machine-finalize-v4-relay.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i64 @flattened(i64 %value) #0 !bpf.capsule.flattened.units !0 {
+  entry:
+    %condition = icmp eq i64 %value, 0
+    br i1 %condition, label %target, label %one
+  
+  one:                                              ; preds = %entry
+    br label %two
+  
+  two:                                              ; preds = %one
+    br label %three
+  
+  three:                                            ; preds = %two
+    br label %four
+  
+  four:                                             ; preds = %three
+    br label %target
+  
+  target:                                           ; preds = %four, %entry
+    ret i64 %value
+  }
+  
+  attributes #0 = { "target-cpu"="v4" }
+  
+  !0 = !{i32 1}
+...
+---
+name:            flattened
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+frameInfo:
+  maxAlignment:    1
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.1(0x30000000), %bb.2(0x50000000)
+    liveins: $r1
+  
+    JEQ_ri $r1, 0, %bb.1
+    JMP %bb.2
+  
+  bb.1.entry:
+    liveins: $r1
+  
+    JMP %bb.6
+  
+  bb.2.one:
+    liveins: $r1
+  
+    $r0 = MOV_ri 1
+  
+  bb.3.two:
+    liveins: $r1
+  
+    $r0 = MOV_ri 2
+  
+  bb.4.three:
+    liveins: $r1
+  
+    $r0 = MOV_ri 3
+  
+  bb.5.four:
+    liveins: $r1
+  
+    $r0 = MOV_ri 4
+  
+  bb.6.target:
+    liveins: $r1
+  
+    $r0 = MOV_rr $r1
+    RET implicit $r0
+...

@@ -1,11 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Floating point does not exist on BPF; the bpf-soft-float pass rewrites
 // every floating-point operation into the integer routines in softfloat.c.
-// These declarations bind to the implementations in mathfns.c: most are
-// real, computed by series where hardware would use its own tables, and the
-// few with no implementation (asin, acos, atan, atan2) terminate the
-// computation with a named Capsule framework code rather than return a
-// plausible wrong number.
+// These declarations bind to the compact range-reduced implementations in
+// mathfns.c; they are not a correctly-rounded general-purpose libm.
 #pragma once
 #define HUGE_VAL (__builtin_huge_val())
 #define HUGE_VALF (__builtin_huge_valf())
@@ -30,6 +27,8 @@ double atan2(double a, double b);
 double frexp(double x, int* e);
 double ldexp(double x, int e);
 double fabs(double x);
+double copysign(double x, double y);
+double fma(double a, double b, double c);
 int isnan(double x);
 int isinf(double x);
 
@@ -43,6 +42,8 @@ float sinf(float x);
 float cosf(float x);
 float sqrtf(float x);
 float fabsf(float x);
+float copysignf(float x, float y);
+float fmaf(float a, float b, float c);
 float floorf(float x);
 float ceilf(float x);
 float fmodf(float a, float b);

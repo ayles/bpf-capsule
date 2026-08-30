@@ -1,0 +1,1 @@
+stackify: __bpf_capsule_copy_return has the wrong ABI

@@ -1,0 +1,1 @@
+stackify: pointer argument 2 to a BPF helper in root is not provably verifier-native

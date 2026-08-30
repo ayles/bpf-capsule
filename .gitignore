@@ -1,17 +1,10 @@
-.envrc
-.direnv/
-.cache/
-.deps/
-__pycache__/
-*.py[cod]
-compile_commands.json
-build*/
-target/
-benchmark-results/
+# Out-of-tree and local matrix builds.
+build/
+build-*/
 result
 result-*
+
+# Local kernel/performance proof artifacts.
 *.qcow2
-*.wad
-.DS_Store
-.idea/
-.vscode
+perf.data
+perf.data.old

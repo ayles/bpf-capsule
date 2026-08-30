@@ -17,6 +17,6 @@ struct yield_test_state {
     uint64_t stale_continuation;
     struct capsule_result benchmark_result;
     uint64_t benchmark_output;
-    uint64_t stack_probe_address;
+    unsigned char* stack_probe;
     uint64_t stack_probe_checksum;
 };

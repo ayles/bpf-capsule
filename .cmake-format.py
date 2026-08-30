@@ -15,10 +15,9 @@ with section("parse"):
         },
         "bpf_capsule_object": {
             "pargs": 1,
+            "flags": ["SAVE_TEMPS"],
             "kwargs": {
                 "OUTPUT": 1,
-                "LINKED_BC": 1,
-                "OPTIMIZED_BC": 1,
                 "BITCODE": "+",
                 "DEPENDS": "*",
                 "RUNTIME_COMPILE_DEFINITIONS": "*",

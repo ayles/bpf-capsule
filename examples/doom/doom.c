@@ -49,7 +49,7 @@ static void print_capsule_error_text(volatile const struct doom_bpf_ctrl* contro
         error_text[i] = control->error_text[i];
     }
     error_text[length] = '\0';
-    fprintf(stderr, "%.*s\n", (int)length, error_text);
+    fprintf(stderr, "%s\n", error_text);
 }
 
 static void report_capsule_stop(const char* operation, int run_error, volatile const struct doom_bpf_ctrl* control) {
@@ -58,10 +58,8 @@ static void report_capsule_stop(const char* operation, int run_error, volatile c
     } else if (control->capsule.status == CAPSULE_EXITED) {
         fprintf(stderr, "%s: guest exited with code %lld\n", operation, (long long)control->capsule.code);
     } else {
-        fprintf(
-            stderr, "%s: %s; capsule status=%s\n", operation, run_error ? strerror(errno) : "managed computation did not return",
-            bpf_capsule_status_string(control->capsule.status)
-        );
+        fprintf(stderr, "%s: %s; capsule status=%s\n", operation, run_error ? strerror(errno) : "phase did not finish in one invocation",
+            bpf_capsule_status_string(control->capsule.status));
     }
     print_capsule_error_text(control);
 }
@@ -70,6 +68,14 @@ static uint64_t monotonic_us(void) {
     struct timespec time;
     clock_gettime(CLOCK_MONOTONIC, &time);
     return (uint64_t)time.tv_sec * 1000000ull + (uint64_t)time.tv_nsec / 1000;
+}
+
+static int framebuffer_is_readable(const struct bpf_capsule* capsule, const unsigned char* framebuffer) {
+    uintptr_t memory = (uintptr_t)bpf_capsule_memory_start(capsule);
+    uintptr_t address = (uintptr_t)framebuffer;
+    uint64_t memory_size = bpf_capsule_memory_size(capsule);
+    const uint64_t framebuffer_size = (uint64_t)W * H * 4;
+    return framebuffer && address >= memory && memory_size >= framebuffer_size && address - memory <= memory_size - framebuffer_size;
 }
 
 struct terminal_output {
@@ -144,23 +150,6 @@ static int draw_terminal(struct terminal_output* output, const unsigned char* fr
     return fflush(stdout) ? -1 : 0;
 }
 
-// One kernel entry must complete each phase: prepare, engine start-up and
-// every frame all finish inside a single drive span, so a PENDING result is
-// a hard failure — this example never drains continuations. Callers branch
-// on ctrl->capsule.status, where PENDING falls out as "not CAPSULE_OK".
-static int drive_capsule(int entry_fd, struct bpf_test_run_opts* options) {
-    return bpf_prog_test_run_opts(entry_fd, options) ? -1 : 0;
-}
-
-// Kernel-side BPF runtime accounting: with stats enabled, run_time_ns holds
-// the frame program's cumulative real execution nanoseconds, so it advances
-// by exactly one frame's in-kernel time per drive.
-static uint64_t program_run_time(int program_fd) {
-    struct bpf_prog_info info = {};
-    unsigned int info_length = sizeof(info);
-    return bpf_prog_get_info_by_fd(program_fd, &info, &info_length) ? 0 : info.run_time_ns;
-}
-
 struct frame_samples {
     uint64_t* ns;
     size_t count;
@@ -198,45 +187,15 @@ static void print_frame_stats(struct frame_samples* samples) {
         total += samples->ns[i];
     }
     size_t last = samples->count - 1;
-    fprintf(
-        stderr, "kernel frame time over %zu frames: avg %.3f ms, p50 %.3f ms, p90 %.3f ms, p99 %.3f ms, max %.3f ms\n", samples->count,
+    fprintf(stderr, "kernel frame time over %zu frames: avg %.3f ms, p50 %.3f ms, p90 %.3f ms, p99 %.3f ms, max %.3f ms\n", samples->count,
         total / 1e6 / samples->count, samples->ns[last * 50 / 100] / 1e6, samples->ns[last * 90 / 100] / 1e6, samples->ns[last * 99 / 100] / 1e6,
-        samples->ns[last] / 1e6
-    );
+        samples->ns[last] / 1e6);
 }
 
-static int load_wad(struct bpf_object* object, const char* path, uint64_t address, size_t capacity, size_t* loaded) {
-    struct bpf_capsule_memory memory;
-    if (bpf_capsule_memory(object, &memory)) {
-        return -1;
-    }
-    FILE* file = fopen(path, "rb");
-    if (!file) {
-        perror(path);
-        return -1;
-    }
-    if (fseek(file, 0, SEEK_END)) {
-        perror("WAD size");
-        fclose(file);
-        return -1;
-    }
-    long file_size = ftell(file);
-    if (file_size < 0) {
-        perror("WAD size");
-        fclose(file);
-        return -1;
-    }
-    size_t size = (size_t)file_size;
-    rewind(file);
-    if (size > capacity) {
-        fprintf(stderr, "WAD is %zu bytes; capsule reserved %zu\n", size, capacity);
-        fclose(file);
-        return -1;
-    }
-
+static int import_wad(FILE* file, const struct bpf_capsule* capsule, unsigned char* destination, size_t size) {
     unsigned char* buffer = malloc(1u << 20);
     if (!buffer) {
-        fclose(file);
+        perror("WAD import");
         return -1;
     }
     for (size_t offset = 0; offset < size;) {
@@ -244,20 +203,23 @@ static int load_wad(struct bpf_object* object, const char* path, uint64_t addres
         if (part > (1u << 20)) {
             part = 1u << 20;
         }
-        if (fread(buffer, 1, part, file) != part || bpf_capsule_memory_write(&memory, address + offset, buffer, part)) {
+        if (fread(buffer, 1, part, file) != part) {
+            if (ferror(file)) {
+                perror("WAD read");
+            } else {
+                fprintf(stderr, "WAD changed while it was being read\n");
+            }
+            free(buffer);
+            return -1;
+        }
+        if (bpf_capsule_memcpy(capsule, destination + offset, buffer, part)) {
             perror("WAD import");
             free(buffer);
-            fclose(file);
             return -1;
         }
         offset += part;
     }
     free(buffer);
-    if (fclose(file)) {
-        perror("WAD close");
-        return -1;
-    }
-    *loaded = size;
     return 0;
 }
 
@@ -348,65 +310,89 @@ int main(int argc, char** argv) {
         char* end = NULL;
         errno = 0;
         dump_frames = strtol(argv[3], &end, 10);
-        if (errno || !end || *end || dump_frames < 1 || dump_frames > INT_MAX) {
+        if (errno || *end || dump_frames < 1 || dump_frames > INT_MAX) {
             fprintf(stderr, "dump frame count must be an integer from 1 through %d\n", INT_MAX);
             return 1;
         }
     }
 
     int result = 1;
-    int stats_fd = -1;
     int terminal_configured = 0;
     struct termios saved = {0};
     struct terminal_output terminal = {0};
     struct frame_samples samples = {0};
-    struct doom* skeleton = doom__open();
+    FILE* wad = fopen(argv[1], "rb");
+    struct doom* skeleton = NULL;
+    struct bpf_capsule capsule = {0};
+    if (!wad) {
+        perror(argv[1]);
+        goto cleanup;
+    }
+    if (fseek(wad, 0, SEEK_END)) {
+        perror("WAD size");
+        goto cleanup;
+    }
+    long wad_file_size = ftell(wad);
+    if (wad_file_size < 0) {
+        perror("WAD size");
+        goto cleanup;
+    }
+    if (!wad_file_size) {
+        fprintf(stderr, "WAD must not be empty\n");
+        goto cleanup;
+    }
+    if (wad_file_size > INT_MAX) {
+        fprintf(stderr, "WAD is too large for PureDOOM\n");
+        goto cleanup;
+    }
+    if (fseek(wad, 0, SEEK_SET)) {
+        perror("WAD rewind");
+        goto cleanup;
+    }
+    uint64_t wad_size = (uint64_t)wad_file_size;
+    uint64_t wad_reservation = (wad_size + 15u) & ~15ull;
+    const uint64_t engine_heap_size = 20ull << 20;
+
+    skeleton = doom__open();
     if (!skeleton) {
         fprintf(stderr, "open failed\n");
         goto cleanup;
     }
-    struct bpf_object* obj = skeleton->obj;
     const struct bpf_capsule_config capsule_config = {
         .fiber_count = 1,
-        .heap_bytes = 20ull << 20,
+        .heap_bytes = wad_reservation + engine_heap_size,
+        .reserved_bytes = wad_size,
     };
-    if (bpf_capsule_configure(obj, capsule_config) || bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_finish_initialization(skeleton->obj)) {
+    if (bpf_capsule_configure(&capsule, skeleton->obj, capsule_config) || bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
         fprintf(stderr, "failed to load BPF object: %s\n", strerror(errno));
         goto cleanup;
     }
     volatile struct doom_bpf_ctrl* ctrl = &skeleton->data_ctrl->ctrl;
-    unsigned char* pix = skeleton->bss_fb->doom_fb;
-    _Static_assert(sizeof(skeleton->bss_fb->doom_fb) >= W * H * 4, "framebuffer global smaller than one frame");
     int frame_fd = bpf_program__fd(skeleton->progs.doom_frame);
-    int prepare_fd = bpf_program__fd(skeleton->progs.doom_prepare);
     int start_fd = bpf_program__fd(skeleton->progs.doom_start);
-    if (frame_fd < 0 || prepare_fd < 0 || start_fd < 0) {
+    if (frame_fd < 0 || start_fd < 0) {
         fprintf(stderr, "BPF object is missing a Doom entry\n");
         goto cleanup;
     }
     struct bpf_test_run_opts options = {.sz = sizeof(options)};
-    // Enabled for the process's lifetime; per-frame deltas of run_time_ns
-    // around each drive make the enable point irrelevant.
-    stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
-    int prepare_error = drive_capsule(prepare_fd, &options);
-    if (prepare_error || ctrl->capsule.status != CAPSULE_OK) {
-        report_capsule_stop("prepare capsule memory failed", prepare_error, ctrl);
-        goto cleanup;
-    }
-    if ((int)options.retval != 0) {
-        fprintf(stderr, "prepare capsule memory returned %d\n", (int)options.retval);
-        goto cleanup;
-    }
-    size_t wad_size;
-    if (load_wad(obj, argv[1], ctrl->wad_addr, ctrl->wad_capacity, &wad_size)) {
-        goto cleanup;
-    }
+    ctrl->wad = bpf_capsule_memory_reserved_start(&capsule);
     ctrl->wad_size = wad_size;
+    if (import_wad(wad, &capsule, ctrl->wad, (size_t)wad_size)) {
+        goto cleanup;
+    }
+    int wad_close_error = fclose(wad);
+    wad = NULL;
+    if (wad_close_error) {
+        perror("WAD close");
+        goto cleanup;
+    }
 
     // Start the engine once, before any frame: in dump mode it warps straight
     // into E1M1 for determinism.
-    ctrl->autostart = dump;
-    int start_error = drive_capsule(start_fd, &options);
+    ctrl->start_in_e1m1 = dump;
+    // Startup and every frame must finish in one invocation. This example has
+    // no continuation-driving loop, so any non-OK status is a hard failure.
+    int start_error = bpf_prog_test_run_opts(start_fd, &options);
     if (start_error || ctrl->capsule.status != CAPSULE_OK) {
         report_capsule_stop("engine start failed", start_error, ctrl);
         goto cleanup;
@@ -415,13 +401,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "engine start returned %d\n", (int)options.retval);
         goto cleanup;
     }
-
     if (dump) { // deterministic input and PPMs out
-        ctrl->want_frame = 1;
         int dump_failed = 0;
         for (int i = 0; i < (int)dump_frames; ++i) {
-            uint64_t before = program_run_time(frame_fd);
-            int frame_error = drive_capsule(frame_fd, &options);
+            int frame_error = bpf_prog_test_run_opts(frame_fd, &options);
             if (frame_error || ctrl->capsule.status != CAPSULE_OK) {
                 report_capsule_stop("run failed", frame_error, ctrl);
                 dump_failed = 1;
@@ -432,7 +415,13 @@ int main(int argc, char** argv) {
                 dump_failed = 1;
                 break;
             }
-            if (stats_fd >= 0 && record_frame(&samples, program_run_time(frame_fd) - before)) {
+            const unsigned char* framebuffer = ctrl->framebuffer;
+            if (!framebuffer_is_readable(&capsule, framebuffer)) {
+                fprintf(stderr, "framebuffer is outside Capsule memory\n");
+                dump_failed = 1;
+                break;
+            }
+            if (record_frame(&samples, options.duration)) {
                 fprintf(stderr, "cannot record frame timing\n");
                 dump_failed = 1;
                 break;
@@ -445,16 +434,20 @@ int main(int argc, char** argv) {
                 dump_failed = 1;
                 break;
             }
-            char ppm[256];
+            char ppm[PATH_MAX];
             int name_length = snprintf(ppm, sizeof(ppm), "%s/frame_%05d.ppm", argv[4], i);
-            if (name_length < 0 || (size_t)name_length >= sizeof(ppm) || write_ppm(ppm, pix)) {
+            if (name_length < 0 || (size_t)name_length >= sizeof(ppm)) {
+                fprintf(stderr, "frame output path is too long\n");
+                dump_failed = 1;
+                break;
+            }
+            if (write_ppm(ppm, framebuffer)) {
                 dump_failed = 1;
                 break;
             }
         }
         fprintf(stderr, dump_failed ? "dump failed: status=%u\n" : "dump done: status=%u\n", ctrl->capsule.status);
-        print_capsule_error_text(ctrl);
-        result = dump_failed ? 1 : 0;
+        result = dump_failed;
         goto cleanup;
     }
 
@@ -464,7 +457,6 @@ int main(int argc, char** argv) {
     }
 
     uint64_t t0 = 0, tick = 0;
-    ctrl->want_frame = 1;
     struct termios raw;
     if (tcgetattr(STDIN_FILENO, &saved)) {
         perror("tcgetattr");
@@ -481,12 +473,12 @@ int main(int argc, char** argv) {
     terminal_configured = 1;
 
     int failed = 0;
+    int held = 0, linger = 0;
     while (!stop_requested) {
         // A terminal delivers keystrokes, not press/release pairs, so a key
         // sent down is never sent up and DOOM holds it forever. Synthesize the
         // release after a few tics; terminal auto-repeat refreshes it while the
         // key is physically held.
-        static int held, linger;
         int pressed = 0;
         char buf[64];
         ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
@@ -541,31 +533,35 @@ int main(int argc, char** argv) {
             }
             held = 0;
         }
-
-        if (failed) {
-            break;
-        }
-
         // PureDOOM advances exactly one game tic per call; pace those calls at
         // the engine's native 35 Hz.
-        uint64_t frame_start = monotonic_us();
         if (!t0) {
-            t0 = frame_start;
+            t0 = monotonic_us();
         }
         uint64_t due = ++tick * 1000000ull / 35;
-        uint64_t before = program_run_time(frame_fd);
-        int frame_error = drive_capsule(frame_fd, &options);
+        int frame_error = bpf_prog_test_run_opts(frame_fd, &options);
         if (frame_error || ctrl->capsule.status != CAPSULE_OK) {
             report_capsule_stop("run stopped", frame_error, ctrl);
             failed = ctrl->capsule.status != CAPSULE_EXITED || ctrl->capsule.code != 0;
             break;
         }
-        if (stats_fd >= 0 && record_frame(&samples, program_run_time(frame_fd) - before)) {
+        if ((int)options.retval != 0) {
+            fprintf(stderr, "frame returned %d\n", (int)options.retval);
+            failed = 1;
+            break;
+        }
+        const unsigned char* framebuffer = ctrl->framebuffer;
+        if (!framebuffer_is_readable(&capsule, framebuffer)) {
+            fprintf(stderr, "framebuffer is outside Capsule memory\n");
+            failed = 1;
+            break;
+        }
+        if (record_frame(&samples, options.duration)) {
             fprintf(stderr, "cannot record frame timing\n");
             failed = 1;
             break;
         }
-        if (draw_terminal(&terminal, pix)) {
+        if (draw_terminal(&terminal, framebuffer)) {
             failed = 1;
             break;
         }
@@ -592,14 +588,13 @@ cleanup:
             result = 1;
         }
     }
-    if (stats_fd >= 0) {
-        print_frame_stats(&samples);
-    }
-    if (stats_fd >= 0) {
-        close(stats_fd);
-    }
+    print_frame_stats(&samples);
     free(samples.ns);
     free(terminal.bytes);
+    if (wad) {
+        fclose(wad);
+    }
+    (void)bpf_capsule_release(&capsule);
     doom__destroy(skeleton);
     return result;
 }

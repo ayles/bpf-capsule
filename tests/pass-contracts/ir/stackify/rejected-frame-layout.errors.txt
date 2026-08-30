@@ -1,0 +1,1 @@
+stackify: static alloca in root exceeds the 262144-byte per-fiber stack

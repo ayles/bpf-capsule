@@ -20,8 +20,6 @@ struct atomic_managed_cells {
 };
 
 // Keep these cells in Capsule memory and reach them through a stored pointer.
-// The fixed-map target must therefore use its dynamic width-specific accessors
-// rather than benefiting from a compile-time-known global/map relocation.
 static struct atomic_managed_cells atomic_managed_cells = {
     .byte = ATOMIC_MANAGED_BYTE_A,
     .half = ATOMIC_MANAGED_HALF_A,

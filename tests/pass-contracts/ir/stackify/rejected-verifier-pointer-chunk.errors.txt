@@ -1,0 +1,1 @@
+stackify: pointer returned by a BPF helper in pointer_across_chunk is live across a suspendable loop chunk

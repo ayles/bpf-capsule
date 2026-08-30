@@ -1,0 +1,1 @@
+bpf-memory: runtime must define bpf_capsule_config

@@ -1,0 +1,1 @@
+bpf-lower-capsule-exit: malformed __bpf_capsule_exit marker

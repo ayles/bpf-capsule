@@ -1,0 +1,1 @@
+bpf-memory: initialized image exceeds the selected 1-region direct-map budget; reduce initialized data

@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Build-time defaults for the toolchain binaries.
+#pragma once
+
+#define BPF_CAPSULE_DEFAULT_CLANG "@BPF_CAPSULE_CLANG@"
+#define BPF_CAPSULE_SOURCE_GUEST_INCLUDE_DIR "@CMAKE_SOURCE_DIR@/src/runtime/guest"
+#define BPF_CAPSULE_SOURCE_INTERNAL_INCLUDE_DIR "@CMAKE_SOURCE_DIR@/src/runtime/internal"

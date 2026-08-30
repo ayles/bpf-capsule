@@ -1,0 +1,368 @@
+--- |
+  source_filename = "machine-router-shared-suffix.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  declare i32 @scalar_step(i32) #0
+  
+  define i32 @root(i32 %router, i32 %key, i32 %value) #0 !bpf.capsule.flatten.root !0 !bpf.capsule.flattened.units !1 {
+  entry:
+    switch i32 %router, label %scalar [
+      i32 0, label %call.router0
+      i32 1, label %call.router1
+      i32 2, label %call.region0
+      i32 3, label %call.region1
+      i32 4, label %call.region2
+      i32 5, label %call.region3
+    ]
+  
+  call.router0:                                     ; preds = %entry
+    %from.router0 = call i32 @router0(i32 %key, i32 %value)
+    ret i32 %from.router0
+  
+  call.router1:                                     ; preds = %entry
+    %from.router1 = call i32 @router1(i32 %key, i32 %value)
+    ret i32 %from.router1
+  
+  call.region0:                                     ; preds = %entry
+    ret i32 -10
+  
+  call.region1:                                     ; preds = %entry
+    ret i32 -11
+  
+  call.region2:                                     ; preds = %entry
+    ret i32 -12
+  
+  call.region3:                                     ; preds = %entry
+    ret i32 -13
+  
+  scalar:                                           ; preds = %entry
+    ret i32 -14
+  }
+  
+  define available_externally i32 @router0(i32 %key, i32 %value) #0 !bpf.capsule.flatten.unit !0 !bpf.capsule.flatten.router !2 {
+  entry:
+    switch i32 %key, label %scalar [
+      i32 0, label %call.region0
+      i32 1, label %call.region1
+      i32 2, label %call.region0
+      i32 3, label %call.region1
+      i32 4, label %call.region0
+      i32 5, label %call.region1
+      i32 6, label %call.region0
+      i32 7, label %call.region1
+      i32 8, label %call.region0
+      i32 9, label %call.region1
+      i32 10, label %call.region0
+      i32 11, label %call.region1
+      i32 12, label %call.region0
+      i32 13, label %call.region1
+      i32 14, label %call.region0
+      i32 15, label %call.region1
+      i32 16, label %call.region0
+      i32 17, label %call.region1
+      i32 18, label %call.region0
+      i32 19, label %call.region1
+      i32 20, label %call.region0
+      i32 21, label %call.region1
+      i32 22, label %call.region0
+      i32 23, label %call.region1
+      i32 24, label %call.region0
+      i32 25, label %call.region1
+      i32 26, label %call.region0
+      i32 27, label %call.region1
+      i32 28, label %call.region0
+      i32 29, label %call.region1
+      i32 30, label %call.region0
+      i32 31, label %call.region1
+    ]
+  
+  call.region0:                                     ; preds = %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry
+    %from.region0 = call i32 @region0(i32 %value)
+    ret i32 %from.region0
+  
+  call.region1:                                     ; preds = %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry
+    %from.region1 = call i32 @region1(i32 %value)
+    ret i32 %from.region1
+  
+  scalar:                                           ; preds = %entry
+    %from.scalar = call i32 @scalar_step(i32 %value)
+    ret i32 %from.scalar
+  }
+  
+  define available_externally i32 @router1(i32 %key, i32 %value) #0 !bpf.capsule.flatten.unit !0 !bpf.capsule.flatten.router !2 {
+  entry:
+    switch i32 %key, label %scalar [
+      i32 0, label %call.region2
+      i32 1, label %call.region3
+      i32 2, label %call.region2
+      i32 3, label %call.region3
+      i32 4, label %call.region2
+      i32 5, label %call.region3
+      i32 6, label %call.region2
+      i32 7, label %call.region3
+      i32 8, label %call.region2
+      i32 9, label %call.region3
+      i32 10, label %call.region2
+      i32 11, label %call.region3
+      i32 12, label %call.region2
+      i32 13, label %call.region3
+      i32 14, label %call.region2
+      i32 15, label %call.region3
+      i32 16, label %call.region2
+      i32 17, label %call.region3
+      i32 18, label %call.region2
+      i32 19, label %call.region3
+      i32 20, label %call.region2
+      i32 21, label %call.region3
+      i32 22, label %call.region2
+      i32 23, label %call.region3
+      i32 24, label %call.region2
+      i32 25, label %call.region3
+      i32 26, label %call.region2
+      i32 27, label %call.region3
+      i32 28, label %call.region2
+      i32 29, label %call.region3
+      i32 30, label %call.region2
+      i32 31, label %call.region3
+    ]
+  
+  call.region2:                                     ; preds = %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry
+    %from.region2 = call i32 @region2(i32 %value)
+    ret i32 %from.region2
+  
+  call.region3:                                     ; preds = %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry, %entry
+    %from.region3 = call i32 @region3(i32 %value)
+    ret i32 %from.region3
+  
+  scalar:                                           ; preds = %entry
+    %from.scalar = call i32 @scalar_step(i32 %value)
+    ret i32 %from.scalar
+  }
+  
+  define available_externally i32 @region0(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 10
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region1(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 20
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region2(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 30
+    ret i32 %result
+  }
+  
+  define available_externally i32 @region3(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
+  entry:
+    %result = add i32 %value, 40
+    ret i32 %result
+  }
+  
+  attributes #0 = { "target-cpu"="v4" }
+  
+  !0 = !{i32 0}
+  !1 = !{i32 6}
+  !2 = !{}
+...
+---
+name:            root
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+tracksDebugUserValues: true
+liveins:
+  - { reg: '$w1' }
+  - { reg: '$w2' }
+  - { reg: '$w3' }
+frameInfo:
+  maxAlignment:    1
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.1, %bb.5
+    liveins: $w1, $w2, $w3
+  
+    JSGT_ri_32 $w1, 2, %bb.5
+  
+  bb.1.entry:
+    successors: %bb.9(0x24924925), %bb.2(0x5b6db6db)
+    liveins: $w1, $w2, $w3
+  
+    JEQ_ri_32 $w1, 0, %bb.9
+  
+  bb.2.entry:
+    successors: %bb.12(0x33333333), %bb.3(0x4ccccccd)
+    liveins: $w1, $w2, $w3
+  
+    JEQ_ri_32 $w1, 1, %bb.12
+  
+  bb.3.entry:
+    successors: %bb.4(0x55555555), %bb.11(0x2aaaaaab)
+    liveins: $w1
+  
+    JEQ_ri_32 killed $w1, 2, %bb.4
+    JMP %bb.11
+  
+  bb.4.call.region0:
+    $w0 = MOV_ri_32 -10
+    RET implicit $w0
+  
+  bb.5.entry:
+    successors: %bb.10(0x24924925), %bb.6(0x5b6db6db)
+    liveins: $w1
+  
+    JEQ_ri_32 $w1, 3, %bb.10
+  
+  bb.6.entry:
+    successors: %bb.13(0x33333333), %bb.7(0x4ccccccd)
+    liveins: $w1
+  
+    JEQ_ri_32 $w1, 4, %bb.13
+  
+  bb.7.entry:
+    successors: %bb.8(0x55555555), %bb.11(0x2aaaaaab)
+    liveins: $w1
+  
+    JEQ_ri_32 killed $w1, 5, %bb.8
+    JMP %bb.11
+  
+  bb.8.call.region3:
+    $w0 = MOV_ri_32 -13
+    RET implicit $w0
+  
+  bb.9.call.router0:
+    liveins: $w2, $w3
+  
+    $w1 = MOV_rr_32 killed $w2
+    $w2 = MOV_rr_32 killed $w3
+    JMP %bb.14
+  
+  bb.10.call.region1:
+    $w0 = MOV_ri_32 -11
+    RET implicit $w0
+  
+  bb.11.scalar:
+    $w0 = MOV_ri_32 -14
+    RET implicit $w0
+  
+  bb.12.call.router1:
+    liveins: $w2, $w3
+  
+    $w1 = MOV_rr_32 killed $w2
+    $w2 = MOV_rr_32 killed $w3
+    JMP %bb.21
+  
+  bb.13.call.region2:
+    $w0 = MOV_ri_32 -12
+    RET implicit $w0
+  
+  bb.14.entry:
+    successors: %bb.18(0x03e0f83e), %bb.15(0x7c1f07c2)
+    liveins: $w1, $w2
+  
+    JUGT_ri_32 $w1, 31, %bb.18
+  
+  bb.15.entry:
+    liveins: $w1, $w2
+  
+    $w3 = MOV_ri_32 1
+    $w3 = SLL_rr_32 killed $w3, killed $w1
+    $w3 = AND_ri_32 killed $w3, 1431655765
+    JNE_ri_32 killed $w3, 0, %bb.16
+    JMP %bb.17
+  
+  bb.16.call.region0:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.19
+  
+  bb.17.call.region1:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.20
+  
+  bb.18.scalar:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JAL @scalar_step, csr, implicit $r11, implicit $w1, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+  
+  bb.19.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 10
+    RET implicit $w0
+  
+  bb.20.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 20
+    RET implicit $w0
+  
+  bb.21.entry:
+    successors: %bb.25(0x03e0f83e), %bb.22(0x7c1f07c2)
+    liveins: $w1, $w2
+  
+    JUGT_ri_32 $w1, 31, %bb.25
+  
+  bb.22.entry:
+    liveins: $w1, $w2
+  
+    $w3 = MOV_ri_32 1
+    $w3 = SLL_rr_32 killed $w3, killed $w1
+    $w3 = AND_ri_32 killed $w3, 1431655765
+    JNE_ri_32 killed $w3, 0, %bb.23
+    JMP %bb.24
+  
+  bb.23.call.region2:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.26
+  
+  bb.24.call.region3:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JMP %bb.27
+  
+  bb.25.scalar:
+    liveins: $w2
+  
+    $w1 = MOV_rr_32 killed $w2
+    JAL @scalar_step, csr, implicit $r11, implicit $w1, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+  
+  bb.26.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 30
+    RET implicit $w0
+  
+  bb.27.entry:
+    liveins: $w1
+  
+    $w0 = MOV_rr_32 $w1
+    $w0 = ADD_ri_32 killed $w0, 40
+    RET implicit $w0
+...

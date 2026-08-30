@@ -1,0 +1,1 @@
+stackify: pointer returned by a BPF helper in pointer_across_call is live across a Capsule suspension point

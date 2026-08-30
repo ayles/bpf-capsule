@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 @PACKAGE_INIT@
 
-include("${CMAKE_CURRENT_LIST_DIR}/BpfCapsuleTargets.cmake")
-set(BPF_CAPSULE_PASS_TARGET BpfCapsule::bpf_capsule_pass)
-set_and_check(_bpf_capsule_installed_include "${PACKAGE_PREFIX_DIR}/include/bpf-capsule")
-set(BPF_CAPSULE_INCLUDE_DIRS "${_bpf_capsule_installed_include}")
-set_and_check(BPF_CAPSULE_LIBC_DIR "${PACKAGE_PREFIX_DIR}/share/bpf-capsule/libc")
-set_and_check(BPF_CAPSULE_RUNTIME_DIR "${PACKAGE_PREFIX_DIR}/share/bpf-capsule/runtime")
-set_and_check(
-    BPF_CAPSULE_RUST_RUNTIME_DIR "${PACKAGE_PREFIX_DIR}/share/bpf-capsule/rust/bpf-capsule-rt"
-)
-# Before calling a bitcode helper, consumers set BPF_CAPSULE_LIBBPF_TARGET to
-# their imported libbpf >= 1.4 target; the package deliberately does not choose
-# a dependency-discovery mechanism for the embedding project.
-# The LLVM major the installed pass plugin was built against. BpfCapsule.cmake
-# refuses llc/clang/opt from any other LLVM major when this is set.
-set(BPF_CAPSULE_REQUIRED_LLVM_MAJOR "@BPF_CAPSULE_PLUGIN_LLVM_MAJOR@")
-include("${CMAKE_CURRENT_LIST_DIR}/BpfCapsule.cmake")
+include(CMakeFindDependencyMacro)
+find_dependency(PkgConfig)
+pkg_check_modules(LibBpf libbpf>=1.4.0 REQUIRED IMPORTED_TARGET)
 
+include("${CMAKE_CURRENT_LIST_DIR}/BpfCapsuleTargets.cmake")
+
+set(BPF_CAPSULE_CC_TARGET BpfCapsule::cc)
+set(BPF_CAPSULE_LD_TARGET BpfCapsule::ld)
+set(BPF_CAPSULE_HOST_TARGET BpfCapsule::host)
+set(BPF_CAPSULE_LLVM_MAJOR "@LLVM_VERSION_MAJOR@")
+set_and_check(BPF_CAPSULE_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@/bpf-capsule")
+set(BPF_CAPSULE_INCLUDE_DIRS "${BPF_CAPSULE_INCLUDE_DIR}")
+set_and_check(BPF_CAPSULE_RUNTIME_DIR "@PACKAGE_CMAKE_INSTALL_DATADIR@/bpf-capsule/runtime")
+set_and_check(BPF_CAPSULE_LIBC_DIR "@PACKAGE_CMAKE_INSTALL_DATADIR@/bpf-capsule/libc")
+set_and_check(BPF_CAPSULE_TLSF_DIR "@PACKAGE_CMAKE_INSTALL_DATADIR@/bpf-capsule/thirdparty/tlsf")
+set_and_check(BPF_CAPSULE_RUST_RUNTIME_DIR
+    "@PACKAGE_CMAKE_INSTALL_DATADIR@/bpf-capsule/rust/bpf-capsule-rt")
+
+include("${CMAKE_CURRENT_LIST_DIR}/BpfCapsule.cmake")
 check_required_components(BpfCapsule)

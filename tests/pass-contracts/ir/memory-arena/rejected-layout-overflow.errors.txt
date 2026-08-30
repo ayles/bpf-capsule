@@ -1,0 +1,1 @@
+bpf-arena: sparse global too_large exceeds the Capsule address domain

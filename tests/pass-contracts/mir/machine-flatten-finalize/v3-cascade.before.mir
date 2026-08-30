@@ -1,0 +1,358 @@
+--- |
+  source_filename = "machine-finalize-v3-cascade.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i64 @flattened(i64 %value) #0 !bpf.capsule.flattened.units !0 {
+  entry:
+    br label %pad0
+  
+  pad0:                                             ; preds = %entry
+    br label %pad1
+  
+  pad1:                                             ; preds = %pad0
+    br label %pad2
+  
+  pad2:                                             ; preds = %pad1
+    br label %pad3
+  
+  pad3:                                             ; preds = %pad2
+    br label %pad4
+  
+  pad4:                                             ; preds = %pad3
+    br label %pad5
+  
+  pad5:                                             ; preds = %pad4
+    br label %pad6
+  
+  pad6:                                             ; preds = %pad5
+    br label %pad7
+  
+  pad7:                                             ; preds = %pad6
+    br label %pad8
+  
+  pad8:                                             ; preds = %pad7
+    br label %pad9
+  
+  pad9:                                             ; preds = %pad8
+    br label %pad10
+  
+  pad10:                                            ; preds = %pad9
+    br label %pad11
+  
+  pad11:                                            ; preds = %pad10
+    br label %pad12
+  
+  pad12:                                            ; preds = %pad11
+    br label %pad13
+  
+  pad13:                                            ; preds = %pad12
+    br label %pad14
+  
+  pad14:                                            ; preds = %pad13
+    br label %pad15
+  
+  pad15:                                            ; preds = %pad14
+    br label %pad16
+  
+  pad16:                                            ; preds = %pad15
+    br label %pad17
+  
+  pad17:                                            ; preds = %pad16
+    br label %pad18
+  
+  pad18:                                            ; preds = %pad17
+    br label %pad19
+  
+  pad19:                                            ; preds = %pad18
+    br label %pad20
+  
+  pad20:                                            ; preds = %pad19
+    br label %pad21
+  
+  pad21:                                            ; preds = %pad20
+    br label %pad22
+  
+  pad22:                                            ; preds = %pad21
+    br label %pad23
+  
+  pad23:                                            ; preds = %pad22
+    br label %pad24
+  
+  pad24:                                            ; preds = %pad23
+    br label %pad25
+  
+  pad25:                                            ; preds = %pad24
+    br label %pad26
+  
+  pad26:                                            ; preds = %pad25
+    br label %pad27
+  
+  pad27:                                            ; preds = %pad26
+    br label %pad28
+  
+  pad28:                                            ; preds = %pad27
+    br label %pad29
+  
+  pad29:                                            ; preds = %pad28
+    br label %pad30
+  
+  pad30:                                            ; preds = %pad29
+    br label %pad31
+  
+  pad31:                                            ; preds = %pad30
+    br label %pad32
+  
+  pad32:                                            ; preds = %pad31
+    br label %pad33
+  
+  pad33:                                            ; preds = %pad32
+    br label %pad34
+  
+  pad34:                                            ; preds = %pad33
+    br label %target
+  
+  target:                                           ; preds = %pad34
+    ret i64 %value
+  }
+  
+  attributes #0 = { "target-cpu"="v3" }
+  
+  !0 = !{i32 1}
+...
+---
+name:            flattened
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+frameInfo:
+  maxAlignment:    1
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1
+  
+    JMP %bb.36
+  
+  bb.1.pad0:
+    liveins: $r1
+  
+    $r0 = MOV_ri 0
+    $r0 = MOV_ri 100
+  
+  bb.2.pad1:
+    liveins: $r1
+  
+    $r0 = MOV_ri 1
+    $r0 = MOV_ri 101
+  
+  bb.3.pad2:
+    liveins: $r1
+  
+    $r0 = MOV_ri 2
+    $r0 = MOV_ri 102
+  
+  bb.4.pad3:
+    liveins: $r1
+  
+    $r0 = MOV_ri 3
+    $r0 = MOV_ri 103
+  
+  bb.5.pad4:
+    liveins: $r1
+  
+    $r0 = MOV_ri 4
+    $r0 = MOV_ri 104
+  
+  bb.6.pad5:
+    liveins: $r1
+  
+    $r0 = MOV_ri 5
+    $r0 = MOV_ri 105
+  
+  bb.7.pad6:
+    liveins: $r1
+  
+    $r0 = MOV_ri 6
+    $r0 = MOV_ri 106
+  
+  bb.8.pad7:
+    liveins: $r1
+  
+    $r0 = MOV_ri 7
+    $r0 = MOV_ri 107
+  
+  bb.9.pad8:
+    liveins: $r1
+  
+    $r0 = MOV_ri 8
+    $r0 = MOV_ri 108
+  
+  bb.10.pad9:
+    liveins: $r1
+  
+    $r0 = MOV_ri 9
+    $r0 = MOV_ri 109
+  
+  bb.11.pad10:
+    liveins: $r1
+  
+    $r0 = MOV_ri 10
+    $r0 = MOV_ri 110
+  
+  bb.12.pad11:
+    liveins: $r1
+  
+    $r0 = MOV_ri 11
+    $r0 = MOV_ri 111
+  
+  bb.13.pad12:
+    liveins: $r1
+  
+    $r0 = MOV_ri 12
+    $r0 = MOV_ri 112
+  
+  bb.14.pad13:
+    liveins: $r1
+  
+    $r0 = MOV_ri 13
+    $r0 = MOV_ri 113
+  
+  bb.15.pad14:
+    liveins: $r1
+  
+    $r0 = MOV_ri 14
+    $r0 = MOV_ri 114
+  
+  bb.16.pad15:
+    liveins: $r1
+  
+    $r0 = MOV_ri 15
+    $r0 = MOV_ri 115
+  
+  bb.17.pad16:
+    liveins: $r1
+  
+    $r0 = MOV_ri 16
+    $r0 = MOV_ri 116
+  
+  bb.18.pad17:
+    liveins: $r1
+  
+    $r0 = MOV_ri 17
+    $r0 = MOV_ri 117
+  
+  bb.19.pad18:
+    liveins: $r1
+  
+    $r0 = MOV_ri 18
+    $r0 = MOV_ri 118
+  
+  bb.20.pad19:
+    liveins: $r1
+  
+    $r0 = MOV_ri 19
+    $r0 = MOV_ri 119
+  
+  bb.21.pad20:
+    liveins: $r1
+  
+    $r0 = MOV_ri 20
+    $r0 = MOV_ri 120
+  
+  bb.22.pad21:
+    liveins: $r1
+  
+    $r0 = MOV_ri 21
+    $r0 = MOV_ri 121
+  
+  bb.23.pad22:
+    liveins: $r1
+  
+    $r0 = MOV_ri 22
+    $r0 = MOV_ri 122
+  
+  bb.24.pad23:
+    liveins: $r1
+  
+    $r0 = MOV_ri 23
+    $r0 = MOV_ri 123
+  
+  bb.25.pad24:
+    liveins: $r1
+  
+    $r0 = MOV_ri 24
+    $r0 = MOV_ri 124
+  
+  bb.26.pad25:
+    liveins: $r1
+  
+    $r0 = MOV_ri 25
+    $r0 = MOV_ri 125
+  
+  bb.27.pad26:
+    liveins: $r1
+  
+    $r0 = MOV_ri 26
+    $r0 = MOV_ri 126
+  
+  bb.28.pad27:
+    liveins: $r1
+  
+    $r0 = MOV_ri 27
+    $r0 = MOV_ri 127
+  
+  bb.29.pad28:
+    liveins: $r1
+  
+    $r0 = MOV_ri 28
+    $r0 = MOV_ri 128
+  
+  bb.30.pad29:
+    liveins: $r1
+  
+    $r0 = MOV_ri 29
+    $r0 = MOV_ri 129
+  
+  bb.31.pad30:
+    liveins: $r1
+  
+    $r0 = MOV_ri 30
+    $r0 = MOV_ri 130
+  
+  bb.32.pad31:
+    liveins: $r1
+  
+    $r0 = MOV_ri 31
+    $r0 = MOV_ri 131
+  
+  bb.33.pad32:
+    liveins: $r1
+  
+    $r0 = MOV_ri 32
+    $r0 = MOV_ri 132
+  
+  bb.34.pad33:
+    liveins: $r1
+  
+    $r0 = MOV_ri 33
+    $r0 = MOV_ri 133
+  
+  bb.35.pad34:
+    liveins: $r1
+  
+    $r0 = MOV_ri 34
+    $r0 = MOV_ri 134
+  
+  bb.36.target:
+    liveins: $r1
+  
+    $r0 = MOV_rr $r1
+    RET implicit $r0
+...

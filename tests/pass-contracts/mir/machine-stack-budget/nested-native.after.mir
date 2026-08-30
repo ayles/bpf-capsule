@@ -1,0 +1,181 @@
+--- |
+  source_filename = "machine-stack-budget-contract.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i32 @entry() section "syscall" {
+  entry:
+    %result = call i32 @wrapper0()
+    ret i32 %result
+  }
+  
+  define i32 @wrapper0() {
+  entry:
+    %result = call i32 @wrapper1()
+    ret i32 %result
+  }
+  
+  define i32 @wrapper1() {
+  entry:
+    %result = call i32 @root()
+    ret i32 %result
+  }
+  
+  define i32 @root() !bpf.capsule.flatten.root !0 {
+  entry:
+    %result = call i32 @unit()
+    ret i32 %result
+  }
+  
+  define i32 @unit() !bpf.capsule.allocation.unit !1 !bpf.capsule.flatten.unit !0 !bpf.capsule.native.stack.budget !2 {
+  entry:
+    %result = call i32 @accessor()
+    ret i32 %result
+  }
+  
+  define i32 @accessor() {
+  entry:
+    ret i32 0
+  }
+  
+  !0 = !{i32 7}
+  !1 = !{i32 0}
+  !2 = !{i32 256}
+...
+---
+name:            entry
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       8
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 1, $r10, -8
+    JAL @wrapper0, csr, implicit $r11, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+...
+---
+name:            wrapper0
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       40
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 2, $r10, -40
+    JAL @wrapper1, csr, implicit $r11, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+...
+---
+name:            wrapper1
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       72
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 3, $r10, -72
+    JAL @root, csr, implicit $r11, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+...
+---
+name:            root
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       8
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 4, $r10, -8
+    JAL @unit, csr, implicit $r11, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+...
+---
+name:            unit
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       200
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 5, $r10, -200
+    JAL @accessor, csr, implicit $r11, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+...
+---
+name:            accessor
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       40
+  maxAlignment:    8
+  adjustsStack:    true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 6, $r10, -40
+    $w0 = MOV_ri_32 0
+    RET implicit $w0
+...

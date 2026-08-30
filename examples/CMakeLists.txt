@@ -4,7 +4,7 @@ include(FetchContent)
 # TLSF is shared by several installed example objects. Keep its complete BSD
 # notice in binary installations as well as beside the source header.
 install(
-    FILES "${BPF_CAPSULE_LIBC_DIR}/TLSF-LICENSE"
+    FILES "${BPF_CAPSULE_TLSF_DIR}/LICENSE"
     DESTINATION share/licenses/bpf-capsule-examples
     RENAME tlsf-LICENSE
 )
@@ -84,19 +84,8 @@ foreach(requested IN LISTS BPF_CAPSULE_EXAMPLES)
     endif()
 endforeach()
 
-set(BPF_CAPSULE_STANDALONE_EXAMPLES ${BPF_CAPSULE_KNOWN_EXAMPLES})
-list(REMOVE_ITEM BPF_CAPSULE_STANDALONE_EXAMPLES lua lua-xdp)
-foreach(example IN LISTS BPF_CAPSULE_STANDALONE_EXAMPLES)
+foreach(example IN LISTS BPF_CAPSULE_KNOWN_EXAMPLES)
     if("all" IN_LIST BPF_CAPSULE_EXAMPLES OR example IN_LIST BPF_CAPSULE_EXAMPLES)
         add_subdirectory("${example}")
     endif()
 endforeach()
-
-# Both Lua examples use one fetched source tree and one tiny platform shim,
-# while remaining independently selectable targets.
-if("all" IN_LIST BPF_CAPSULE_EXAMPLES
-   OR "lua" IN_LIST BPF_CAPSULE_EXAMPLES
-   OR "lua-xdp" IN_LIST BPF_CAPSULE_EXAMPLES
-)
-    add_subdirectory(lua)
-endif()

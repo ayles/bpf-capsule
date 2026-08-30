@@ -1,0 +1,1 @@
+bpf-validate-atomics: Capsule atomic compare-exchange i32 in managed has no exact lowering for this target

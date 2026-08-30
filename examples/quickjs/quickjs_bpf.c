@@ -1,64 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// JavaScript in the kernel — QuickJS, unmodified, through the same pipeline.
-//
-// Every JavaScript number is a double, so this is the port that leans hardest
-// on bpf-soft-float: the interpreter's arithmetic, its number formatting and
-// its property lookups all end up as integer work. Batch stdin goes in,
-// console.log text and any uncaught exception come back out, all through
-// guest-owned buffers in Capsule memory.
+// Stock QuickJS in the kernel. Scripts and batch stdin come from Capsule
+// memory; console output and uncaught exceptions go back to it.
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <stdint.h>
+#include <string.h>
 
 #include "bpf_capsule.h"
 
-#include <stdint.h>
-
 #include "quickjs.h"
 #include "quickjs_ctrl.h"
-#include "quickjs_io.h"
 
 struct quickjs_bpf_ctrl qctrl SEC(".data.qctrl");
 
-// Ordinary unsectioned storage: Capsule picks the kernel representation and
-// keeps the zero-filled bytes out of the object image.
-static char qjs_script_buf[256 << 10];
-static char qjs_input_buf[256 << 10];
-static char qjs_output_buf[1 << 20];
-static char qjs_error_buf[64 << 10];
+struct qjs_input {
+    const char* data;
+    size_t size;
+    size_t cursor;
+};
 
-static struct qjs_buffer_input qjs_input;
-
-static void quickjs_prepare_body(void) {
-    qctrl.script.address = (uint64_t)(void*)qjs_script_buf;
-    qctrl.script.capacity = sizeof(qjs_script_buf);
-    qctrl.input.address = (uint64_t)(void*)qjs_input_buf;
-    qctrl.input.capacity = sizeof(qjs_input_buf);
-    qctrl.output.address = (uint64_t)(void*)qjs_output_buf;
-    qctrl.output.capacity = sizeof(qjs_output_buf);
-    qctrl.error.address = (uint64_t)(void*)qjs_error_buf;
-    qctrl.error.capacity = sizeof(qjs_error_buf);
-}
+static struct qjs_input qjs_input;
 
 // Sizes keep counting past the capacity so the host can report truncation.
-// The new size comes back as a value: a pointer into the sectioned control
-// map must not cross the managed call boundary.
-static uint64_t qjs_append(char* buffer, uint64_t capacity, uint64_t begin, const char* text, unsigned long length) {
-    for (unsigned long index = 0; index < length; ++index) {
-        if (begin + index < capacity) {
-            buffer[begin + index] = text[index];
-        }
+static size_t qjs_append(char* buffer, size_t capacity, size_t begin, const char* text, size_t length) {
+    size_t copied = begin < capacity ? capacity - begin : 0;
+    if (copied > length) {
+        copied = length;
     }
-    return begin + length;
+    if (copied) {
+        memcpy(buffer + begin, text, copied);
+    }
+    return length > SIZE_MAX - begin ? SIZE_MAX : begin + length;
 }
 
-static void qjs_out(const char* text, unsigned long length) {
-    qctrl.output.size = qjs_append(qjs_output_buf, sizeof(qjs_output_buf), qctrl.output.size, text, length);
+static void qjs_out(const char* text, size_t length) {
+    qctrl.output.size = qjs_append(qctrl.output.address, qctrl.output.capacity, qctrl.output.size, text, length);
 }
 
 static JSValue qjs_console_log(JSContext* context, JSValueConst this_value, int argument_count, JSValueConst* arguments) {
     (void)this_value;
     for (int index = 0; index < argument_count; ++index) {
-        unsigned long length = 0;
+        size_t length = 0;
         const char* text = JS_ToCStringLen(context, &length, arguments[index]);
         if (!text) {
             return JS_EXCEPTION;
@@ -73,25 +55,54 @@ static JSValue qjs_console_log(JSContext* context, JSValueConst this_value, int 
     return JS_UNDEFINED;
 }
 
+static JSValue qjs_buffer_read(JSContext* context) {
+    JSValue text = JS_NewStringLen(context, qjs_input.data + qjs_input.cursor, qjs_input.size - qjs_input.cursor);
+    qjs_input.cursor = qjs_input.size;
+    return text;
+}
+
+static JSValue qjs_buffer_read_line(JSContext* context) {
+    if (qjs_input.cursor >= qjs_input.size) {
+        return JS_NULL;
+    }
+    size_t line_end = qjs_input.cursor;
+    while (line_end < qjs_input.size && qjs_input.data[line_end] != '\n') {
+        ++line_end;
+    }
+    JSValue line = JS_NewStringLen(context, qjs_input.data + qjs_input.cursor, line_end - qjs_input.cursor);
+    qjs_input.cursor = line_end < qjs_input.size ? line_end + 1 : line_end;
+    return line;
+}
+
 static JSValue qjs_read(JSContext* context, JSValueConst this_value, int argument_count, JSValueConst* arguments) {
     (void)this_value;
     (void)argument_count;
     (void)arguments;
-    return qjs_buffer_read(context, &qjs_input);
+    return qjs_buffer_read(context);
 }
 
 static JSValue qjs_read_line(JSContext* context, JSValueConst this_value, int argument_count, JSValueConst* arguments) {
     (void)this_value;
     (void)argument_count;
     (void)arguments;
-    return qjs_buffer_read_line(context, &qjs_input);
+    return qjs_buffer_read_line(context);
+}
+
+static void qjs_install_globals(JSContext* context) {
+    JSValue global = JS_GetGlobalObject(context);
+    JSValue console = JS_NewObject(context);
+    JS_SetPropertyStr(context, console, "log", JS_NewCFunction(context, qjs_console_log, "log", 1));
+    JS_SetPropertyStr(context, global, "console", console);
+    JS_SetPropertyStr(context, global, "read", JS_NewCFunction(context, qjs_read, "read", 0));
+    JS_SetPropertyStr(context, global, "readLine", JS_NewCFunction(context, qjs_read_line, "readLine", 0));
+    JS_FreeValue(context, global);
 }
 
 // Record the failure the way a command-line engine would report it, then
 // exit(1): an uncaught exception ends the whole script run.
 static __attribute__((noreturn)) void qjs_fail(const char* fallback, JSRuntime* runtime, JSContext* context) {
     const char* text = fallback;
-    unsigned long length = 0;
+    size_t length = 0;
     JSValue exception = JS_UNDEFINED;
     if (context) {
         exception = JS_GetException(context);
@@ -105,7 +116,7 @@ static __attribute__((noreturn)) void qjs_fail(const char* fallback, JSRuntime* 
             ++length;
         }
     }
-    qctrl.error.size = qjs_append(qjs_error_buf, sizeof(qjs_error_buf), qctrl.error.size, text, length);
+    qctrl.error.size = qjs_append(qctrl.error.address, qctrl.error.capacity, qctrl.error.size, text, length);
     if (context) {
         if (text != fallback) {
             JS_FreeCString(context, text);
@@ -122,8 +133,12 @@ static __attribute__((noreturn)) void qjs_fail(const char* fallback, JSRuntime* 
 static void quickjs_run_body(void) {
     qctrl.output.size = 0;
     qctrl.error.size = 0;
-    qjs_input.data = qjs_input_buf;
-    qjs_input.size = (unsigned long)qctrl.input.size;
+    if (!qctrl.script.address || qctrl.script.size >= qctrl.script.capacity || !qctrl.input.address || qctrl.input.size > qctrl.input.capacity ||
+        !qctrl.output.address || !qctrl.output.capacity || !qctrl.error.address || !qctrl.error.capacity) {
+        capsule_exit(1);
+    }
+    qjs_input.data = qctrl.input.address;
+    qjs_input.size = qctrl.input.size;
     qjs_input.cursor = 0;
 
     JSRuntime* runtime = JS_NewRuntime();
@@ -131,8 +146,8 @@ static void quickjs_run_body(void) {
     if (!context) {
         qjs_fail("cannot create QuickJS context", runtime, 0);
     }
-    qjs_install_globals(context, qjs_console_log, qjs_read, qjs_read_line);
-    JSValue value = JS_Eval(context, qjs_script_buf, qctrl.script.size, "bpf.js", JS_EVAL_TYPE_GLOBAL);
+    qjs_install_globals(context);
+    JSValue value = JS_Eval(context, qctrl.script.address, qctrl.script.size, "bpf.js", JS_EVAL_TYPE_GLOBAL);
     if (JS_IsException(value)) {
         JS_FreeValue(context, value);
         qjs_fail("QuickJS evaluation failed", runtime, context);
@@ -140,12 +155,6 @@ static void quickjs_run_body(void) {
     JS_FreeValue(context, value);
     JS_FreeContext(context);
     JS_FreeRuntime(runtime);
-}
-
-SEC("syscall")
-int quickjs_prepare(void) {
-    qctrl.capsule = capsule_call_void(quickjs_prepare_body);
-    return 0;
 }
 
 SEC("syscall")

@@ -1,0 +1,51 @@
+--- |
+  source_filename = "machine-flatten-finalize.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i64 @flattened(i64 %value) !bpf.capsule.flattened.units !0 {
+  entry:
+    %condition = icmp eq i64 %value, 0
+    br i1 %condition, label %zero, label %nonzero
+  
+  nonzero:                                          ; preds = %entry
+    ret i64 %value
+  
+  zero:                                             ; preds = %entry
+    ret i64 0
+  }
+  
+  !0 = !{i32 2}
+...
+---
+name:            flattened
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+frameInfo:
+  maxAlignment:    1
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.2(0x30000000), %bb.1(0x50000000)
+    liveins: $r1
+  
+    JEQ_ri $r1, 0, %bb.2
+    JMP %bb.1
+  
+  bb.1.nonzero:
+    liveins: $r1
+  
+    $r0 = MOV_rr $r1
+    RET implicit $r0
+  
+  bb.2.zero:
+    $r0 = MOV_ri 0
+    RET implicit $r0
+...

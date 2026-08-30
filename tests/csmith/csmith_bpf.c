@@ -17,13 +17,14 @@ static uint64_t run_csmith(void) {
 
 SEC("syscall")
 int csmith_run(void) {
-    csmith_result.capsule = capsule_call((uint64_t*)&csmith_result.checksum, run_csmith);
+    csmith_result.capsule = capsule_call(&csmith_result.checksum, run_csmith);
     return 0;
 }
 
 SEC("syscall")
 int csmith_continue(void) {
-    csmith_result.capsule = capsule_continue((uint64_t*)&csmith_result.checksum, csmith_result.capsule.continuation);
+    csmith_result.capsule =
+        capsule_continue(&csmith_result.checksum, csmith_result.capsule.continuation);
     return 0;
 }
 

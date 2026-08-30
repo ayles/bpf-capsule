@@ -1,0 +1,1 @@
+bpf-capsule-domains: function shared is reachable from both native code and a capsule_call

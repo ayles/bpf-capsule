@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #pragma once
 
-#include "bpf_capsule_abi.h"
-
-enum rust_stage {
-    RUST_STAGE_STARTED = 1,
-    RUST_STAGE_COMPLETE,
-};
+#include "bpf_capsule_types.h"
 
 struct rust_bpf_ctrl {
-    uint64_t status;
-    uint64_t result;
+    uint64_t checksum;
     struct capsule_result capsule;
 };

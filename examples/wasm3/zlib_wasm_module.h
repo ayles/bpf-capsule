@@ -4,30 +4,44 @@
  * freestanding guest shim, exporting
  * guest_zlib_run as the entry point and guest_zin / guest_zout / guest_zctrl
  * as the addresses of the staging buffers and the control block in guest
- * linear memory. Both the in-kernel wasm3 and the native reference wasm3
- * execute this same module.
+ * linear memory. The in-kernel wasm3 executes this module.
  *
- * Built from zlib's inflate-side sources (the same set the zlib example
- * compiles for BPF) at the revision pinned there and recorded in
- * docs/THIRD_PARTY.md: e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca. The
- * compile was of the shape
+ * Built from zlib's inflate-side sources at revision
+ * e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca. The compile was of the shape
  *
  *   clang --target=wasm32 -O2 -nostdlib \
- *       -Iexamples/wasm3 -Isrc/runtime/abi -Wl,--no-entry \
+ *       -Iexamples/wasm3 -Isrc/runtime/guest -Wl,--no-entry \
  *       -Wl,--export=guest_zlib_run -Wl,--export=guest_zin \
  *       -Wl,--export=guest_zout -Wl,--export=guest_zctrl \
  *       guest_zlib.c <zlib inflate sources> -o zlib_guest.wasm
  *
- * guest_zlib.c beside this header is that shim, so the module is fully
- * reproducible from the tree; nothing else is needed to rebuild it.
+ * guest_zlib.c beside this header is that shim. Rebuilding also needs the
+ * pinned upstream zlib source supplied as ZLIB_BPF_SOURCE_DIR (package.nix
+ * records its revision and hash) and a compatible wasm32 Clang toolchain.
  *
- * with the result dumped as this C array (the module's own producers
- * section names the clang that processed it).
+ * The result was then dumped as this C array; the module's own producers
+ * section names the Clang version that processed it.
  *
  * The zlib portion is an altered form of zlib — compiled to WebAssembly, not
- * changed in source — and this comment is the plain marking of that fact
- * which zlib's license asks for. The full zlib license notice is reproduced
- * in docs/THIRD_PARTY.md.
+ * changed in source — and this comment is the plain marking of that fact.
+ *
+ * Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler
+ *
+ * This software is provided 'as-is', without any express or implied warranty.
+ * In no event will the authors be held liable for any damages arising from
+ * the use of this software.
+ *
+ * Permission is granted to anyone to use this software for any purpose,
+ * including commercial applications, and to alter it and redistribute it
+ * freely, subject to the following restrictions:
+ *
+ * 1. The origin of this software must not be misrepresented; you must not
+ *    claim that you wrote the original software. If you use this software in
+ *    a product, an acknowledgment in the product documentation would be
+ *    appreciated but is not required.
+ * 2. Altered source versions must be plainly marked as such, and must not be
+ *    misrepresented as being the original software.
+ * 3. This notice may not be removed or altered from any source distribution.
  */
 static const unsigned char zlib_wasm_module[] = {
     0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x33, 0x08, 0x60, 0x02, 0x7f, 0x7f, 0x00, 0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f, 0x60, 0x00, 0x01,

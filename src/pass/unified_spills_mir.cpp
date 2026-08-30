@@ -3,14 +3,18 @@
 //
 // The 512-byte BPF stack is consumed by register spills, created by the
 // register allocator below anything an IR pass can reach. This pass runs
-// post-PEI, immediately after machine block placement inside stock llc. Layout
-// is final when old-verifier CFG quirks are fixed, while branch offsets,
-// relocations, symbols and BTF are still emitted by stock LLVM.
+// post-PEI, before the stock machine block-placement pass. Flattening joins
+// the independently allocated regions at that boundary, so placement sees
+// the real emitted CFG; a final pass then repairs target/verifier layout
+// constraints while stock LLVM still owns branch offsets, relocations,
+// symbols and BTF emission.
 //
 // Spill words whose contents are provably scalar move into a transient extent
 // at the low end of the current fiber's existing unified stack. Managed
 // frames grow down from the high end; an anchor supplies the resolved backing
-// pointer and current managed SP, and this pass inserts one collision check.
+// pointer and current managed SP. Stackify bounds every descent against the
+// transient reserve, while this pass proves that the relocated extent fits in
+// that reserve; no per-spill collision check is needed.
 // Words holding a rematerializable ld_imm64+const pointer are deleted and
 // their reloads recomputed; everything else stays on the real BPF stack. No
 // register can be reserved without rebuilding LLVM, so the managed base is
@@ -18,7 +22,7 @@
 // stores through it and restores. Fills are cheaper: the destination is its
 // own scratch.
 //
-// The verifier drives the analysis (all learned the hard way on 5.15):
+// The verifier drives the analysis:
 //  - a scalar reloaded from map memory is unbounded, and `map_ptr += scalar`
 //    with unbounded smin is rejected at the add: track AND-masks (including
 //    alignment masks from shifts) and re-apply the mask after the fill —
@@ -32,12 +36,14 @@
 //
 // This pass avoids BPF target internals (no such headers ship with stock
 // LLVM): opcodes are classified by name, registers matched by name.
+#include "common.h"
+#include "machine_flatten.h"
+#include "machine_stack_budget.h"
+#include "runtime_symbols.h"
 #include "target.h"
 #include "bpf_capsule_abi.h"
 
-#include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/PostOrderIterator.h"
-#include "llvm/ADT/SCCIterator.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
@@ -69,24 +75,10 @@
 
 using namespace llvm;
 
-// The default is derived, not tuned. Linux charges at least 32 bytes for
-// every BPF-to-BPF frame and rounds each frame's deepest access up to 32.
-// Fixed-map memory can take the longest generated path: entry -> trampoline
-// -> level-1 trampoline -> dispatcher -> step -> generic accessor -> array
-// accessor. Six non-step frames consume 192 bytes, so the step can use exactly
-// 512 - 192 = 320 bytes. Arena builds explicitly raise the limit to 352 because
-// their accessor has no outlined array-map child. Keeping 328 bytes would
-// actually cost 352 after rounding and make the fixed-map path 544 bytes.
-// The minimal-movement policy below keeps the most-used words on the stack,
-// so only the exact overflow moves to unified memory.
-constexpr int MaxPhysicalStackBytes = 320;
-static cl::opt<int>
-    UnifiedSpillLimit("bpf-unified-spill-limit", cl::init(MaxPhysicalStackBytes), cl::desc("Rewrite functions whose frame exceeds this many bytes"));
-static cl::opt<bool> UnifiedSpillReport("bpf-unified-spill-report", cl::init(false), cl::desc("Report per-function frame changes"));
-static cl::opt<int>
-    UnifiedSpillMaxWords("bpf-unified-spill-max-words", cl::init(-1), cl::desc("Debug: relocate only the first N unified-memory-eligible words"));
-static cl::opt<bool>
-    UnifiedSpillPipeline("bpf-unified-spill-pipeline", cl::init(false), cl::desc("Run spill relocation after machine block placement in normal llc"));
+static cl::opt<int> UnifiedSpillLimit(
+    "bpf-unified-spill-limit", cl::init(512), cl::desc("Optional cap on the post-RA call-graph-derived Capsule frame budget"));
+static cl::opt<bool> UnifiedSpillPipeline(
+    "bpf-unified-spill-pipeline", cl::init(false), cl::desc("Run post-RA spill relocation and machine flattening in normal llc"));
 
 namespace {
 
@@ -212,6 +204,18 @@ OpInfo classifyName(StringRef n) {
     return o;
 }
 
+// MachineInstr::defs() covers the conventional leading-def operand layout.
+// INLINEASM instead interleaves descriptor immediates, explicit uses and
+// implicit defs, so a dataflow pass must inspect every operand's def flag.
+template <typename Visitor>
+void ForEachRegisterDef(MachineInstr& instruction, Visitor&& visit) {
+    for (MachineOperand& operand : instruction.operands()) {
+        if (operand.isReg() && operand.isDef()) {
+            visit(operand);
+        }
+    }
+}
+
 // ------------------------------------------------------------- value lattice
 
 // A mask is usable only if one AND-immediate can re-apply it after a unified
@@ -288,35 +292,13 @@ Val join(const Val& a, const Val& b) {
     return Val::unknown();
 }
 
-// Taint sets are one bit per physical spill word. They used to have an
-// arbitrary 1024-bit ceiling, which made a valid function with more than 8
-// KiB of register-allocation spills bail out before relocation. Size them from
-// the final machine frame instead: analysis cost follows the function which
-// actually needs it and small functions do not carry a huge static bitset.
-using Taint = BitVector;
-
 struct State {
     // Only r0-r9 carry values worth tracking; r10 is the frame pointer and
     // is handled structurally, so it needs no lattice slot.
     Val reg[11];
-    Taint taint[11];
-    Taint pending[11];
-    int64_t budget[11];
     uint16_t initMask = 0;
     std::map<int32_t, Val> stack;
     bool reachable = false;
-
-    explicit State(size_t words = 0) {
-        for (auto& value : taint) {
-            value.resize(words);
-        }
-        for (auto& value : pending) {
-            value.resize(words);
-        }
-        for (auto& b : budget) {
-            b = INT64_MAX;
-        }
-    }
 
     bool merge(const State& o) {
         bool ch = false;
@@ -330,33 +312,27 @@ struct State {
                 reg[i] = j;
                 ch = true;
             }
-            Taint t = taint[i];
-            t |= o.taint[i];
-            if (t != taint[i]) {
-                taint[i] = t;
-                ch = true;
-            }
-            Taint pj = pending[i];
-            pj |= o.pending[i];
-            if (pj != pending[i]) {
-                pending[i] = pj;
-                ch = true;
-            }
-            int64_t b = std::min(budget[i], o.budget[i]);
-            if (b != budget[i]) {
-                budget[i] = b;
-                ch = true;
-            }
         }
         uint16_t m = initMask & o.initMask;
         if (m != initMask) {
             initMask = m;
             ch = true;
         }
+        // Unlike register Bot, an absent stack word on one reachable edge is
+        // not a useful identity: the other edge's store is not definite. A
+        // later load must remain unknown/pinned (and the verifier may reject
+        // the original uninitialized path), never be moved to pre-existing
+        // unified memory as though every path had initialized it.
+        for (auto& [k, v] : stack) {
+            if (!o.stack.contains(k) && v.k != Val::Unknown) {
+                v = Val::unknown();
+                ch = true;
+            }
+        }
         for (auto& [k, v] : o.stack) {
             auto it = stack.find(k);
             if (it == stack.end()) {
-                stack[k] = v;
+                stack[k] = Val::unknown();
                 ch = true;
             } else {
                 Val j = join(it->second, v);
@@ -399,6 +375,8 @@ enum class SlotClass { Stack, Unified, UnifiedArena, Remat };
 // ---------------------------------------------------------------------- pass
 
 struct BPFUnifiedSpillsMIR : MachineFunctionPass {
+    static constexpr unsigned PhysicalRegisterTableSize = 1024;
+
     static char ID;
     BPFUnifiedSpillsMIR()
         : MachineFunctionPass(ID) {
@@ -414,13 +392,15 @@ struct BPFUnifiedSpillsMIR : MachineFunctionPass {
     // itself catches out-of-range accesses and pointer arithmetic needs no
     // proof. Skipping the taint/budget analysis there is most of the pass's
     // cost on large functions.
-    bool trackBounds = true;
     bool regsDone = false;
-    std::vector<OpInfo> opInfo;   // by opcode
-    std::vector<bool> opInfoDone; // classified in this instance
-    int regIdx[1024];             // phys reg -> 0..10, -1 other
-    unsigned regOf[11];           // 0..10 -> 64-bit phys reg
-    unsigned wregOf[11];          // 0..10 -> 32-bit phys reg
+    bool emittedOpcodesDone = false;
+    std::vector<OpInfo> opInfo;            // by opcode
+    std::vector<bool> opInfoDone;          // classified in this instance
+    int regIdx[PhysicalRegisterTableSize]; // phys reg -> 0..10, -1 other
+    unsigned regOf[11];                    // 0..10 -> 64-bit phys reg
+    unsigned wregOf[11];                   // 0..10 -> 32-bit phys reg
+    unsigned opSTD = 0, opSTDimm = 0, opSTWimm = 0, opLDD = 0, opLDimm = 0, opADDri = 0, opANDri = 0, opANDri32 = 0;
+    unsigned opCast = 0, opMOVri32 = 0, opJULTri = 0, opJMP = 0, opRET = 0;
     std::set<MachineInstr*> arenaRepairStackAccesses;
     std::set<int32_t> arenaPointerStackWords;
 
@@ -444,16 +424,13 @@ struct BPFUnifiedSpillsMIR : MachineFunctionPass {
             return -1;
         }
         unsigned r = mo.getReg().id();
-        return r < 1024 ? regIdx[r] : -1;
+        return r < PhysicalRegisterTableSize ? regIdx[r] : -1;
     }
 
     bool runOnMachineFunction(MachineFunction& MF) override;
     unsigned fixArenaPointerArithmetic(MachineFunction& MF);
-    bool makeOldVerifierBackedgesExplicit(MachineFunction& MF);
-    bool analyze(
-        MachineFunction& MF, std::vector<Access>& accesses, std::set<int32_t>& needsBounds, std::vector<StackAddress>& stackAddresses, int32_t& frameLow,
-        std::string& bailWhy
-    );
+    bool analyze(MachineFunction& MF, std::vector<Access>& accesses, std::vector<StackAddress>& stackAddresses, int32_t& frameLow, std::string& bailWhy,
+        int physicalLimit);
 };
 
 char BPFUnifiedSpillsMIR::ID = 0;
@@ -584,6 +561,9 @@ unsigned BPFUnifiedSpillsMIR::fixArenaPointerArithmetic(MachineFunction& MF) {
                 }
                 addDest = d;
                 addSource = rhs;
+                // Both registers hold the same pointer after the operand
+                // swap and result move, so their definite-pointer facts are
+                // intentionally identical.
                 addDestMust = arena.Must.test(rhs);
                 addSourceMust = arena.Must.test(rhs);
                 fixed++;
@@ -657,10 +637,8 @@ unsigned BPFUnifiedSpillsMIR::fixArenaPointerArithmetic(MachineFunction& MF) {
         if (arenaRepairStackAccesses.count(&MI) && oi.kind == OpInfo::Load) {
             result = ridx(MI.getOperand(0));
             resultMayArena = resultMustArena = true;
-        } else if (
-            oi.kind == OpInfo::Load && oi.width == 8 && MI.getNumOperands() >= 3 && MI.getOperand(0).isReg() && MI.getOperand(1).isReg() &&
-            MI.getOperand(2).isImm() && ridx(MI.getOperand(1)) == 10
-        ) {
+        } else if (oi.kind == OpInfo::Load && oi.width == 8 && MI.getNumOperands() >= 3 && MI.getOperand(0).isReg() && MI.getOperand(1).isReg() &&
+            MI.getOperand(2).isImm() && ridx(MI.getOperand(1)) == 10) {
             result = ridx(MI.getOperand(0));
             int64_t off64 = MI.getOperand(2).getImm();
             if (off64 >= INT32_MIN && off64 <= INT32_MAX && off64 % 8 == 0) {
@@ -736,13 +714,13 @@ unsigned BPFUnifiedSpillsMIR::fixArenaPointerArithmetic(MachineFunction& MF) {
             }
         }
 
-        for (MachineOperand& def : MI.defs()) {
+        ForEachRegisterDef(MI, [&](MachineOperand& def) {
             int reg = ridx(def);
             if (reg >= 0) {
                 arena.May.reset(reg);
                 arena.Must.reset(reg);
             }
-        }
+        });
         if (result >= 0) {
             arena.May.set(result, resultMayArena);
             arena.Must.set(result, resultMustArena);
@@ -1007,6 +985,12 @@ unsigned BPFUnifiedSpillsMIR::fixArenaPointerArithmetic(MachineFunction& MF) {
                                 }
                                 const ArenaFacts& edge = outgoing[pred];
                                 if (edge.May.test(root) && !edge.Must.test(root)) {
+                                    errs() << "bpf-arena-arith: ambiguous incoming edge in " << MF.getName() << " from block " << pred->getNumber() << " to "
+                                           << block.getNumber() << " for r" << root << " (may=" << edge.May.to_ulong() << ", must=" << edge.Must.to_ulong()
+                                           << ") at: ";
+                                    MI.print(errs());
+                                    pred->print(errs());
+                                    block.print(errs());
                                     report_fatal_error(Twine("bpf-arena-arith: ambiguous incoming edge in ") + MF.getName());
                                 }
                                 if (!edge.Must.test(root)) {
@@ -1077,13 +1061,13 @@ unsigned BPFUnifiedSpillsMIR::fixArenaPointerArithmetic(MachineFunction& MF) {
                 }
 
                 step(block, MI, state, false);
-                for (MachineOperand& def : MI.defs()) {
+                ForEachRegisterDef(MI, [&](MachineOperand& def) {
                     int reg = ridx(def);
                     if (reg >= 0) {
                         origin[reg] = -1;
                         stackOrigin[reg] = nullptr;
                     }
-                }
+                });
                 if (result >= 0 && state.May.test(result) && !state.Must.test(result)) {
                     origin[result] = nextOrigin;
                     stackOrigin[result] = nextStackOrigin;
@@ -1154,169 +1138,18 @@ unsigned BPFUnifiedSpillsMIR::fixArenaPointerArithmetic(MachineFunction& MF) {
     return fixed;
 }
 
-// Linux 5.15's CFG walk permits a cycle-closing edge for privileged programs
-// only when its source is a jump instruction. A layout fallthrough at the end
-// of a machine block is therefore occasionally rejected even though the same
-// edge encoded as `goto +0` is accepted. It also rejects a conditional jump to
-// its own fallthrough: the DFS discovers pc+1 as FALLTHROUGH, then mistakes the
-// identical branch edge for a back-edge. Remove that semantically empty branch,
-// then materialize every remaining fallthrough inside a cyclic SCC. Fixing all
-// such edges (rather than one DFS's chosen back-edges) matters because libbpf's
-// linked call graph can change the verifier's traversal order. Acyclic merges
-// stay untouched, so this remains much smaller than blanket fallthrough jumps.
-bool BPFUnifiedSpillsMIR::makeOldVerifierBackedgesExplicit(MachineFunction& MF) {
-    unsigned redundant = 0;
-    for (MachineBasicBlock& block : MF) {
-        MachineBasicBlock* next = block.getNextNode();
-        if (!next || block.succ_size() != 1 || !block.isSuccessor(next)) {
-            continue;
-        }
-
-        MachineInstr* branch = nullptr;
-        for (MachineInstr& mi : llvm::reverse(block)) {
-            if (!mi.isDebugInstr()) {
-                branch = &mi;
-                break;
-            }
-        }
-        if (!branch || !branch->isConditionalBranch()) {
-            continue;
-        }
-
-        bool targetsNext = false;
-        for (const MachineOperand& operand : branch->operands()) {
-            targetsNext |= operand.isMBB() && operand.getMBB() == next;
-        }
-        if (!targetsNext) {
-            continue;
-        }
-
-        // The encoded conditional offset would be zero, so both outcomes
-        // continue at the same instruction. Keep the CFG fallthrough and
-        // delete the branch which old check_cfg cannot represent. The SCC
-        // repair below adds an unconditional jump if this edge is cyclic.
-        branch->eraseFromParent();
-        redundant++;
-    }
-
-    std::map<MachineBasicBlock*, unsigned> component;
-    std::set<unsigned> cyclic;
-    unsigned nextComponent = 1;
-    for (auto it = scc_begin(&MF); !it.isAtEnd(); ++it, ++nextComponent) {
-        bool hasCycle = it->size() > 1;
-        if (!hasCycle && !it->empty()) {
-            hasCycle = it->front()->isSuccessor(it->front());
-        }
-        for (MachineBasicBlock* block : *it) {
-            component[block] = nextComponent;
-        }
-        if (hasCycle) {
-            cyclic.insert(nextComponent);
-        }
-    }
-
-    unsigned fixed = 0;
-    for (MachineBasicBlock& block : MF) {
-        MachineBasicBlock* target = block.getNextNode();
-        if (!target || !block.isSuccessor(target)) {
-            continue;
-        }
-        unsigned id = component[&block];
-        if (!id || component[target] != id || !cyclic.count(id)) {
-            continue;
-        }
-
-        MachineInstr* last = nullptr;
-        for (MachineInstr& mi : llvm::reverse(block)) {
-            if (!mi.isDebugInstr()) {
-                last = &mi;
-                break;
-            }
-        }
-        if (last && info(*last).kind == OpInfo::Branch) {
-            continue;
-        }
-        DebugLoc dl;
-        if (last) {
-            dl = last->getDebugLoc();
-        }
-        TII->insertUnconditionalBranch(block, target, dl);
-        fixed++;
-    }
-    if ((redundant || fixed) && UnifiedSpillReport) {
-        errs() << "bpf-old-cfg: " << MF.getName() << " removed " << redundant << " redundant branches, materialized " << fixed
-               << " verifier-sensitive fallthroughs\n";
-    }
-    return redundant || fixed;
-}
-
 // One instruction's effect on the dataflow state. Returns false to bail.
 // `record` collects stack accesses with their pre-instruction facts.
-// Diagnostic only: which instructions first turn a value opaque. A single
-// unrecognized producer poisons every word its value reaches.
-std::map<std::string, unsigned>& unknownSources() {
-    static std::map<std::string, unsigned> m;
-    return m;
-}
-
 struct Xfer {
     BPFUnifiedSpillsMIR& P;
     const DataLayout& DL;
-    std::map<int32_t, size_t>& wordId;
-    std::vector<Taint>& storedTaint;
-    Taint& needsBounds;
-    std::set<size_t> grownWords; // words whose stored taint just widened
-    bool trackBounds = true;
     std::string bailWhy;
 
     bool step(MachineInstr& MI, State& st, std::vector<Access>* record) {
         const OpInfo& oi = P.info(MI);
-        // Snapshot for the diagnostic below: a def that lands on Unknown
-        // while its inputs were not Unknown is a producer worth naming.
-        struct Watch {
-            Xfer& x;
-            MachineInstr& mi;
-            State& st;
-            bool active;
-            Val before[11];
-            Watch(Xfer& x, MachineInstr& mi, State& st)
-                : x(x)
-                , mi(mi)
-                , st(st)
-                , active(UnifiedSpillReport) {
-                if (active) {
-                    for (int i = 0; i < 11; i++) {
-                        before[i] = st.reg[i];
-                    }
-                }
-            }
-            ~Watch() {
-                if (!active) {
-                    return;
-                }
-                for (int i = 0; i < 11; i++) {
-                    if (st.reg[i].k == Val::Unknown && before[i].k != Val::Unknown) {
-                        unknownSources()[x.P.TII->getName(mi.getOpcode()).str()]++;
-                    }
-                }
-            }
-        } watch(*this, MI, st);
         auto wr = [&](int r) {
             if (r >= 0) {
                 st.initMask |= 1u << r;
-            }
-        };
-        auto clearFlow = [&](int r) {
-            if (r < 0) {
-                return;
-            }
-            st.taint[r].reset();
-            st.pending[r].reset();
-            st.budget[r] = INT64_MAX;
-        };
-        auto checkBase = [&](int br, int64_t off, int w) {
-            if (br >= 0 && st.pending[br].any() && off + w > st.budget[br]) {
-                needsBounds |= st.pending[br];
             }
         };
 
@@ -1333,7 +1166,6 @@ struct Xfer {
                 } else {
                     st.reg[d] = Val::scalar();
                 }
-                clearFlow(d);
                 wr(d);
                 break;
             }
@@ -1350,7 +1182,6 @@ struct Xfer {
                 // every value that reached a cast opaque, which cascaded.
                 int64_t to = MI.getNumOperands() > 3 && MI.getOperand(3).isImm() ? MI.getOperand(3).getImm() : -1;
                 st.reg[d] = to == 1 ? Val::arena() : to == 0 ? Val::scalar() : Val::unknown();
-                clearFlow(d);
                 wr(d);
                 break;
             }
@@ -1361,7 +1192,6 @@ struct Xfer {
                 }
                 if (s < 0) {
                     st.reg[d] = Val::unknown();
-                    clearFlow(d);
                     wr(d);
                     break;
                 }
@@ -1372,20 +1202,12 @@ struct Xfer {
                 } else {
                     st.reg[d] = v;
                 }
-                st.taint[d] = st.taint[s];
-                if (to32) {
-                    st.pending[d].reset();
-                } else {
-                    st.pending[d] = st.pending[s];
-                }
-                st.budget[d] = to32 ? INT64_MAX : st.budget[s];
                 wr(d);
                 break;
             }
             case OpInfo::Call:
                 for (int r = 0; r <= 5; r++) {
                     st.reg[r] = Val::unknown();
-                    clearFlow(r);
                 }
                 st.initMask &= ~0b111110u;
                 st.initMask |= 1u << 0;
@@ -1416,16 +1238,8 @@ struct Xfer {
                         record->push_back(a);
                     }
                     st.reg[d] = (v.k == Val::Remat || v.scalarish()) ? v : Val::unknown();
-                    clearFlow(d);
-                    if (trackBounds) {
-                        size_t w = wordId[(int32_t)off & ~7];
-                        st.taint[d] = storedTaint[w];
-                        st.taint[d].set(w);
-                    }
                 } else {
-                    checkBase(b, off, oi.width);
                     st.reg[d] = Val::scalar();
-                    clearFlow(d);
                 }
                 wr(d);
                 break;
@@ -1455,20 +1269,6 @@ struct Xfer {
                     } else {
                         st.stack[(int32_t)off & ~7] = Val::unknown();
                     }
-                    if (!isImm && trackBounds) {
-                        if (st.pending[s].any()) {
-                            needsBounds |= st.pending[s];
-                        }
-                        size_t w = wordId[(int32_t)off & ~7];
-                        Taint grown = storedTaint[w];
-                        grown |= st.taint[s];
-                        if (grown != storedTaint[w]) {
-                            storedTaint[w] = grown;
-                            grownWords.insert(w);
-                        }
-                    }
-                } else {
-                    checkBase(b, off, oi.width);
                 }
                 break;
             }
@@ -1479,14 +1279,13 @@ struct Xfer {
                     return false;
                 }
                 // fetch forms write a register; be blunt: any def becomes scalar
-                for (auto& mo : MI.defs()) {
+                ForEachRegisterDef(MI, [&](MachineOperand& mo) {
                     int d = P.ridx(mo);
                     if (d >= 0) {
                         st.reg[d] = Val::scalar();
-                        clearFlow(d);
                         wr(d);
                     }
-                }
+                });
                 break;
             }
             case OpInfo::Alu: {
@@ -1524,59 +1323,21 @@ struct Xfer {
                         return false;
                     }
                     st.reg[d] = Val::unknown();
-                    clearFlow(d);
                     wr(d);
                     break;
                 }
-                int64_t imm = oi.immSrc && MI.getNumOperands() > 2 && MI.getOperand(2).isImm() ? MI.getOperand(2).getImm() : 0;
+                // MOV_ri is the immediate counterpart of the two-operand
+                // MOV_rr exception above: its immediate is operand 1. The
+                // ordinary two-address ALU forms keep their immediate in
+                // operand 2. Reading every immediate from operand 2 made a
+                // spilled positive MOV constant look masked by zero and the
+                // rewrite then changed its value to zero after the reload.
+                unsigned immediateOperand = oi.alu == OpInfo::Mov ? 1 : 2;
+                int64_t imm = oi.immSrc && MI.getNumOperands() > immediateOperand && MI.getOperand(immediateOperand).isImm()
+                    ? MI.getOperand(immediateOperand).getImm()
+                    : 0;
                 Val dPre = st.reg[d];
                 Val sPre = s >= 0 ? st.reg[s] : Val::scalar();
-
-                // pointer-add obligations (64-bit adds only)
-                if (trackBounds && oi.alu == OpInfo::Add && !oi.is32 && !oi.immSrc && s >= 0) {
-                    bool dPtr = !dPre.scalarish(), sPtr = !sPre.scalarish();
-                    Taint pend = st.pending[d];
-                    pend |= st.pending[s];
-                    int64_t bud = std::min(st.budget[d], st.budget[s]);
-                    if (dPtr && sPtr) {
-                        needsBounds |= st.taint[d];
-                        needsBounds |= st.taint[s];
-                        needsBounds |= pend;
-                        pend.reset();
-                        bud = INT64_MAX;
-                    } else if (dPtr || sPtr) {
-                        const Val& ptrV = dPtr ? dPre : sPre;
-                        const Val& sclV = dPtr ? sPre : dPre;
-                        int sclR = dPtr ? s : d;
-                        int64_t vs = -1;
-                        if (ptrV.k == Val::Remat && ptrV.gv) {
-                            if (auto* g = dyn_cast<GlobalVariable>(ptrV.gv)) {
-                                vs = (int64_t)DL.getTypeAllocSize(g->getValueType()) - ptrV.add;
-                            }
-                        }
-                        int64_t u = sclV.k == Val::Masked ? (int64_t)sclV.msk : -1;
-                        if (u >= 0) {
-                            if (pend.any()) {
-                                bud -= u;
-                            }
-                            if (st.taint[sclR].any()) {
-                                if (vs > u) {
-                                    pend |= st.taint[sclR];
-                                    bud = std::min(bud, vs - u);
-                                } else {
-                                    needsBounds |= st.taint[sclR];
-                                }
-                            }
-                        } else {
-                            needsBounds |= st.taint[sclR];
-                            needsBounds |= pend;
-                            pend.reset();
-                            bud = INT64_MAX;
-                        }
-                    }
-                    st.pending[d] = pend;
-                    st.budget[d] = bud;
-                }
 
                 // value transfer
                 switch (oi.alu) {
@@ -1593,7 +1354,6 @@ struct Xfer {
                             } else {
                                 st.reg[d] = Val::scalar();
                             }
-                            clearFlow(d);
                         } else if (s >= 0) {
                             Val v = st.reg[s];
                             if (oi.is32) {
@@ -1601,13 +1361,6 @@ struct Xfer {
                             } else {
                                 st.reg[d] = v;
                             }
-                            st.taint[d] = st.taint[s];
-                            if (oi.is32) {
-                                st.pending[d].reset();
-                            } else {
-                                st.pending[d] = st.pending[s];
-                            }
-                            st.budget[d] = oi.is32 ? INT64_MAX : st.budget[s];
                         }
                         break;
                     case OpInfo::And: {
@@ -1624,9 +1377,6 @@ struct Xfer {
                             lim &= 0xffffffffu;
                         }
                         st.reg[d] = lim != ~0ull ? Val::masked(lim) : (dPre.scalarish() && (oi.immSrc || sPre.scalarish())) ? Val::scalar() : Val::unknown();
-                        if (!oi.immSrc && s >= 0) {
-                            st.taint[d] |= st.taint[s];
-                        }
                         break;
                     }
                     case OpInfo::Sll:
@@ -1641,9 +1391,6 @@ struct Xfer {
                             st.reg[d] = Val::masked(m);
                         } else {
                             st.reg[d] = Val::scalar();
-                            if (s >= 0) {
-                                st.taint[d] |= st.taint[s];
-                            }
                         }
                         break;
                     case OpInfo::Add:
@@ -1659,29 +1406,15 @@ struct Xfer {
                             } else {
                                 st.reg[d] = Val::unknown();
                             }
-                            if (st.pending[d].any()) {
-                                st.budget[d] -= imm;
-                            }
                         } else {
                             bool arena =
                                 !oi.is32 && ((dPre.k == Val::Arena && (s < 0 || sPre.scalarish())) || (s >= 0 && sPre.k == Val::Arena && dPre.scalarish()));
                             bool ok = dPre.scalarish() && (s < 0 || sPre.scalarish());
                             st.reg[d] = arena ? Val::arena() : ok ? Val::scalar() : Val::unknown();
-                            if (s >= 0) {
-                                st.taint[d] |= st.taint[s];
-                            }
                         }
                         break;
                     default:
                         st.reg[d] = (dPre.scalarish() || dPre.k == Val::Bot) && (oi.immSrc || s < 0 || sPre.scalarish()) ? Val::scalar() : Val::unknown();
-                        if (!oi.immSrc && s >= 0) {
-                            st.taint[d] |= st.taint[s];
-                        }
-                        if (st.pending[d].any()) {
-                            needsBounds |= st.pending[d];
-                        }
-                        st.pending[d].reset();
-                        st.budget[d] = INT64_MAX;
                         break;
                 }
                 wr(d);
@@ -1689,7 +1422,31 @@ struct Xfer {
             }
             case OpInfo::Branch:
             case OpInfo::Ret:
+                break;
             case OpInfo::Other:
+                // An unclassified definition invalidates the old value. In
+                // particular, leaving a full-register INLINEASM output at its
+                // previous Scalar/Remat state is optimistic: arbitrary
+                // assembly may have produced a verifier pointer. A W output
+                // is the one structural fact we do know — ALU32 results are
+                // scalar — even when INLINEASM also lists the aliased R
+                // register as an implicit def.
+                uint16_t defs = 0, scalarDefs = 0;
+                ForEachRegisterDef(MI, [&](MachineOperand& operand) {
+                    int d = P.ridx(operand);
+                    if (d >= 0) {
+                        defs |= 1u << d;
+                        if (MI.isInlineAsm() && operand.getReg() == P.wregOf[d]) {
+                            scalarDefs |= 1u << d;
+                        }
+                    }
+                });
+                for (int d = 0; d <= 9; ++d) {
+                    if (defs & (1u << d)) {
+                        st.reg[d] = scalarDefs & (1u << d) ? Val::scalar() : Val::unknown();
+                        wr(d);
+                    }
+                }
                 break;
         }
         return true;
@@ -1697,9 +1454,7 @@ struct Xfer {
 };
 
 bool BPFUnifiedSpillsMIR::analyze(
-    MachineFunction& MF, std::vector<Access>& accesses, std::set<int32_t>& needsBoundsOut, std::vector<StackAddress>& stackAddresses, int32_t& frameLow,
-    std::string& bailWhy
-) {
+    MachineFunction& MF, std::vector<Access>& accesses, std::vector<StackAddress>& stackAddresses, int32_t& frameLow, std::string& bailWhy, int physicalLimit) {
     const DataLayout& DL = MF.getFunction().getParent()->getDataLayout();
 
     // Word ids over all r10-relative accesses.
@@ -1721,11 +1476,12 @@ bool BPFUnifiedSpillsMIR::analyze(
             }
         }
     }
-    // Nothing to relocate: skip the dataflow entirely. Most functions in a
-    // large program are under the limit, and the analysis below is the
-    // expensive part of the pass — running it on all of SQLite's 163 step
-    // subprograms costs more than the rest of the build put together.
-    if (-frameLow <= UnifiedSpillLimit) {
+    // Nothing to relocate: skip the dataflow entirely. Most native/runtime
+    // functions and allocation units are under the limit. The units that do
+    // need unified spills are still independent here; machine flattening is
+    // deliberately later than this analysis and register allocation.
+    uint64_t nativeFrameBytes = std::max<uint64_t>(MF.getFrameInfo().getStackSize(), static_cast<uint64_t>(-static_cast<int64_t>(frameLow)));
+    if (nativeFrameBytes <= static_cast<uint64_t>(physicalLimit)) {
         return true;
     }
 
@@ -1820,29 +1576,10 @@ bool BPFUnifiedSpillsMIR::analyze(
         }
     }
 
-    std::vector<Taint> storedTaint(wordId.size(), Taint(wordId.size(), false));
-    Taint needsBounds(wordId.size(), false);
-    Xfer xf{*this, DL, wordId, storedTaint, needsBounds};
-    xf.trackBounds = trackBounds;
-
-    // Which blocks reload each word: when a word's stored taint widens, only
-    // its readers need revisiting. Restarting the whole fixpoint instead is
-    // what made this pass unusable on large programs — SQLite has functions
-    // with thousands of blocks, and every restart recopies each block's
-    // state.
-    std::vector<std::set<MachineBasicBlock*>> readersOf(wordId.size());
-    for (auto& MBB : MF) {
-        for (auto& MI : MBB) {
-            const OpInfo& oi = info(MI);
-            if (oi.kind != OpInfo::Load || MI.getNumOperands() < 3 || !MI.getOperand(1).isReg() || !MI.getOperand(2).isImm() || ridx(MI.getOperand(1)) != 10) {
-                continue;
-            }
-            readersOf[wordId[(int32_t)MI.getOperand(2).getImm() & ~7]].insert(&MBB);
-        }
-    }
+    Xfer xf{*this, DL};
 
     std::map<MachineBasicBlock*, State> in;
-    State& entry = in.try_emplace(&MF.front(), wordId.size()).first->second;
+    State& entry = in.try_emplace(&MF.front()).first->second;
     entry.reachable = true;
     // Registers start at bottom, not Unknown: a register that some path
     // leaves untouched must not poison the join for the paths that do define
@@ -1858,7 +1595,7 @@ bool BPFUnifiedSpillsMIR::analyze(
     entry.initMask = 1u << 10;
     for (const auto& li : MF.front().liveins()) {
         unsigned reg = li.PhysReg;
-        int idx = reg < 1024 ? regIdx[reg] : -1;
+        int idx = reg < PhysicalRegisterTableSize ? regIdx[reg] : -1;
         if (idx >= 0) {
             entry.initMask |= 1u << idx;
         }
@@ -1879,10 +1616,6 @@ bool BPFUnifiedSpillsMIR::analyze(
     auto later = [&](MachineBasicBlock* a, MachineBasicBlock* b) {
         return rpoIndex[a] > rpoIndex[b]; // pop the earliest block first
     };
-    if (UnifiedSpillReport) {
-        errs() << "bpf-unified-spills: analyzing " << MF.getName() << " (" << rpoIndex.size() << " blocks, " << wordId.size() << " words, frame " << -frameLow
-               << ")\n";
-    }
 
     // Chaotic iteration always terminates in theory — the lattice only grows —
     // but "eventually" is not a build time. The budget is generous enough that
@@ -1923,12 +1656,6 @@ bool BPFUnifiedSpillsMIR::analyze(
                 enqueue(s);
             }
         }
-        for (size_t w : xf.grownWords) {
-            for (MachineBasicBlock* reader : readersOf[w]) {
-                enqueue(reader);
-            }
-        }
-        xf.grownWords.clear();
     }
 
     // Record pass with converged states.
@@ -1945,24 +1672,31 @@ bool BPFUnifiedSpillsMIR::analyze(
             }
         }
     }
-    for (auto& [off, id] : wordId) {
-        if (needsBounds.test(id)) {
-            needsBoundsOut.insert(off);
-        }
-    }
     return true;
 }
 
 bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
     TII = MF.getSubtarget().getInstrInfo();
     const TargetRegisterInfo* TRI = MF.getSubtarget().getRegisterInfo();
+    const Function& function = MF.getFunction();
 
-    // The target policy is passed to both opt and llc. Inferring this from a
-    // symbol name was tempting but wrong: ordinary programs may legitimately
-    // have a global called `arena`, and a compiler test did. With bpf_arena,
-    // the mapping bounds addresses; the 5.15 map-value model needs explicit
-    // verifier-visible scalar ranges.
-    trackBounds = !bpf::UseArena();
+    if (UnifiedSpillLimit < 0 || UnifiedSpillLimit > 512 || UnifiedSpillLimit % 8) {
+        function.getContext().emitError("bpf-unified-spills: native step-stack cap must be an 8-byte multiple from 0 through 512");
+        return false;
+    }
+
+    int physicalLimit = 512;
+    if (function.getMetadata(bpf::md::AllocationUnit)) {
+        physicalLimit = UnifiedSpillLimit;
+        if (MDNode* metadata = function.getMetadata(bpf::md::NativeStackBudget)) {
+            auto* value = metadata->getNumOperands() == 1 ? mdconst::dyn_extract<ConstantInt>(metadata->getOperand(0)) : nullptr;
+            if (!value || value->getValue().getActiveBits() > 32 || value->getZExtValue() > 512 || value->getZExtValue() % 8) {
+                function.getContext().emitError(Twine("bpf-unified-spills: malformed post-RA native-stack budget on ") + function.getName());
+                return false;
+            }
+            physicalLimit = std::min(physicalLimit, int(value->getZExtValue()));
+        }
+    }
 
     // The tables are instance state, so their initialization guard must be as
     // well. LLVM may construct the pass more than once in one process.
@@ -1970,7 +1704,7 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         for (auto& e : regIdx) {
             e = -1;
         }
-        for (unsigned r = 1; r < TRI->getNumRegs() && r < 1024; r++) {
+        for (unsigned r = 1; r < TRI->getNumRegs() && r < PhysicalRegisterTableSize; r++) {
             StringRef n = TRI->getName(r);
             bool w = n.starts_with("W");
             if ((n.starts_with("R") || w) && n.size() <= 3) {
@@ -1988,51 +1722,43 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         regsDone = true;
     }
 
-    unsigned arenaArithmeticFixed = trackBounds ? 0 : fixArenaPointerArithmetic(MF);
-    if (arenaArithmeticFixed && UnifiedSpillReport) {
-        errs() << "bpf-arena-arith: " << MF.getName() << " repaired " << arenaArithmeticFixed << " pointer operations\n";
-    }
-
-    bool cfgChanged = trackBounds && makeOldVerifierBackedgesExplicit(MF);
+    unsigned arenaArithmeticFixed = fixArenaPointerArithmetic(MF);
+    const bool arenaArithmeticChanged = arenaArithmeticFixed != 0;
 
     int32_t frameLow = 0;
     std::vector<Access> accesses;
-    std::set<int32_t> needsBounds;
     std::vector<StackAddress> stackAddresses;
     std::string bailWhy;
-    bool analyzed = analyze(MF, accesses, needsBounds, stackAddresses, frameLow, bailWhy);
-    const Function& function = MF.getFunction();
+    bool analyzed = analyze(MF, accesses, stackAddresses, frameLow, bailWhy, physicalLimit);
     uint64_t nativeFrameBytes = std::max<uint64_t>(MF.getFrameInfo().getStackSize(), static_cast<uint64_t>(-static_cast<int64_t>(frameLow)));
+    if (!function.getMetadata(bpf::md::AllocationUnit) && nativeFrameBytes > 512) {
+        function.getContext().emitError(Twine("bpf-unified-spills: native function ") + MF.getName() + " exceeds the 512-byte BPF stack");
+        return arenaArithmeticChanged;
+    }
     if (!analyzed) {
-        if (UnifiedSpillReport) {
-            errs() << "bpf-unified-spills: " << MF.getName() << " BAIL: " << bailWhy << "\n";
-        }
         // llc's ordinary BPF stack diagnostic is deliberately raised to the
         // unified fiber-stack limit so this pass can see large physical
         // frames. Never let an analysis bail turn that into an unloadable
-        // object with more than the kernel's 512-byte native stack.
-        if (nativeFrameBytes > 512) {
-            function.getContext().emitError(
-                Twine("bpf-unified-spills: cannot safely relocate ") + MF.getName() + "'s " + Twine(nativeFrameBytes) + "-byte native frame: " + bailWhy
-            );
+        // object beyond its actual call-chain budget. Ordinary native
+        // functions do not own a leased fiber and therefore retain the
+        // kernel's absolute per-function limit instead.
+        uint64_t safeLimit = static_cast<uint64_t>(physicalLimit);
+        if (nativeFrameBytes > safeLimit) {
+            function.getContext().emitError(Twine("bpf-unified-spills: cannot safely relocate ") + MF.getName() + "'s " + Twine(nativeFrameBytes) +
+                "-byte native frame into its " + Twine(safeLimit) + "-byte budget: " + bailWhy);
         }
-        return cfgChanged;
+        return arenaArithmeticChanged;
     }
-    if (!function.getMetadata("bpf.capsule.physical") && nativeFrameBytes > 512) {
-        function.getContext().emitError(Twine("bpf-unified-spills: native function ") + MF.getName() + " exceeds the 512-byte BPF stack");
-        return cfgChanged;
-    }
-    if (-frameLow <= UnifiedSpillLimit) {
+    if (nativeFrameBytes <= static_cast<uint64_t>(physicalLimit)) {
         // Access analysis can prove that all touched offsets fit the hot
         // budget while MachineFrameInfo still contains an opaque or otherwise
         // unobserved object. Never let that residual frame escape above the
         // kernel's absolute stack limit.
         if (nativeFrameBytes > 512) {
             function.getContext().emitError(
-                Twine("bpf-unified-spills: physical function ") + MF.getName() + " retains a native frame exceeding the 512-byte BPF stack"
-            );
+                Twine("bpf-unified-spills: physical function ") + MF.getName() + " retains a native frame exceeding the 512-byte BPF stack");
         }
-        return cfgChanged;
+        return arenaArithmeticChanged;
     }
 
     // Unified transient spill memory is owned by a leased fiber. Ordinary
@@ -2042,47 +1768,47 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
     // Capsule-step budget is smaller. Reject a genuinely oversized native
     // frame explicitly once the backend's preliminary limit is raised to let
     // this post-RA pass inspect large Capsule frames.
-    if (!function.getMetadata("bpf.capsule.physical")) {
-        if (UnifiedSpillReport) {
-            errs() << "bpf-unified-spills: " << MF.getName() << " keeps native frame " << -frameLow << " (no exclusive fiber)\n";
-        }
-        return cfgChanged;
+    if (!function.getMetadata(bpf::md::AllocationUnit)) {
+        return arenaArithmeticChanged;
     }
 
     struct StackAnchor {
         MachineInstr* instruction = nullptr;
         Register base;
-        Register sp;
-        Register abort;
     } anchor;
     for (MachineBasicBlock& block : MF) {
         for (MachineInstr& instruction : block) {
             if (!instruction.isInlineAsm() || instruction.getNumOperands() < 2 || !instruction.getOperand(0).isSymbol() ||
-                !StringRef(instruction.getOperand(0).getSymbolName()).contains("bpf_capsule_stack_anchor")) {
+                !StringRef(instruction.getOperand(0).getSymbolName()).contains(bpf::sym::StackAnchor)) {
                 continue;
             }
             if (anchor.instruction) {
-                report_fatal_error(Twine("bpf-unified-spills: multiple unified-stack anchors in ") + MF.getName());
+                function.getContext().emitError(Twine("bpf-unified-spills: multiple unified-stack anchors in ") + MF.getName());
+                return arenaArithmeticChanged;
             }
-            SmallVector<Register, 3> uses;
+            SmallVector<Register, 1> uses;
             for (const MachineOperand& operand : instruction.operands()) {
                 if (operand.isReg() && operand.isUse() && operand.getReg()) {
                     uses.push_back(operand.getReg());
                 }
             }
-            if (uses.size() != 3) {
-                report_fatal_error(Twine("bpf-unified-spills: malformed unified-stack anchor in ") + MF.getName());
+            if (uses.size() != 1) {
+                function.getContext().emitError(Twine("bpf-unified-spills: malformed unified-stack anchor in ") + MF.getName());
+                return arenaArithmeticChanged;
             }
-            anchor = {&instruction, uses[0], uses[1], uses[2]};
+            anchor = {&instruction, uses[0]};
         }
     }
     if (!anchor.instruction) {
-        report_fatal_error(Twine("bpf-unified-spills: physical function ") + MF.getName() + " needs relocation but has no unified-stack anchor");
+        function.getContext().emitError(Twine("bpf-unified-spills: physical function ") + MF.getName() + " needs relocation but has no unified-stack anchor");
+        return arenaArithmeticChanged;
     }
-    auto* stackSizeMD = function.getMetadata("bpf.capsule.stack.size");
+    auto* stackSizeMD = function.getMetadata(bpf::md::StackSize);
     auto* stackSizeValue = stackSizeMD && stackSizeMD->getNumOperands() == 1 ? mdconst::dyn_extract<ConstantInt>(stackSizeMD->getOperand(0)) : nullptr;
-    if (!stackSizeValue || !stackSizeValue->getZExtValue() || stackSizeValue->getZExtValue() > INT32_MAX) {
-        report_fatal_error(Twine("bpf-unified-spills: malformed unified-stack size on ") + MF.getName());
+    if (!stackSizeValue || !stackSizeValue->getZExtValue() || !isPowerOf2_64(stackSizeValue->getZExtValue()) ||
+        stackSizeValue->getZExtValue() > bpf::MaxFiberStackBytes) {
+        function.getContext().emitError(Twine("bpf-unified-spills: malformed unified-stack size on ") + MF.getName());
+        return arenaArithmeticChanged;
     }
     uint64_t fiberStackSize = stackSizeValue->getZExtValue();
 
@@ -2103,10 +1829,9 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
                     continue;
                 }
                 if (!seen.count(&MI)) {
-                    report_fatal_error(
-                        Twine("bpf-unified-spills: unvisited r10 access in ") + MF.getName() + ": " + TII->getName(MI.getOpcode()) + " off " +
-                        Twine(MI.getOperand(2).getImm())
-                    );
+                    function.getContext().emitError(Twine("bpf-unified-spills: unvisited r10 access in ") + MF.getName() + ": " + TII->getName(MI.getOpcode()) +
+                        " off " + Twine(MI.getOperand(2).getImm()));
+                    return arenaArithmeticChanged;
                 }
             }
         }
@@ -2176,9 +1901,6 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
                 }
             }
             c = allRemat ? SlotClass::Remat : allScalar ? SlotClass::Unified : allArena ? SlotClass::UnifiedArena : SlotClass::Stack;
-            if (c == SlotClass::Unified && needsBounds.count(off)) {
-                c = SlotClass::Stack;
-            }
         }
         int32_t w = off & ~7;
         auto it = wordCls.find(w);
@@ -2241,15 +1963,6 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         }
     }
 
-    if (UnifiedSpillMaxWords >= 0) {
-        int n = 0;
-        for (auto& [w, c] : wordCls) {
-            if (c == SlotClass::Unified && ++n > UnifiedSpillMaxWords) {
-                c = SlotClass::Stack;
-            }
-        }
-    }
-
     // Arena stores temporarily save two registers below the unified-base
     // slot. Plain scalar stores save only one. Reserve the third word whenever
     // an arena-pointer spill survived classification.
@@ -2264,7 +1977,7 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
     // most-accessed words keep their stack slots up to the limit, and only
     // the overflow — cheapest first — goes to unified memory.
     {
-        int capacity = UnifiedSpillLimit / 8 - reservedWords;
+        int capacity = physicalLimit / 8 - reservedWords;
         int stackW = 0;
         for (auto& [w, c] : wordCls) {
             if (c == SlotClass::Stack) {
@@ -2317,12 +2030,25 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         borrowOff = next - 16;
         next -= 8 * reservedWords;
     }
-    if (next < -512) {
-        function.getContext().emitError(
-            Twine("bpf-unified-spills: non-relocatable stack in ") + MF.getName() + " leaves a " + Twine(-next) +
-            "-byte native frame, exceeding the 512-byte BPF limit"
-        );
-        return cfgChanged;
+    if (next < -physicalLimit) {
+        std::string composition;
+        {
+            llvm::SmallPtrSet<const llvm::DISubprogram*, 8> seen;
+            for (const MachineBasicBlock& block : MF) {
+                for (const MachineInstr& instruction : block) {
+                    const DebugLoc& loc = instruction.getDebugLoc();
+                    auto* scope = loc ? dyn_cast_or_null<DILocalScope>(loc.getScope()) : nullptr;
+                    auto* sub = scope ? scope->getSubprogram() : nullptr;
+                    if (sub && seen.insert(sub).second && seen.size() <= 12) {
+                        composition += " ";
+                        composition += sub->getName();
+                    }
+                }
+            }
+        }
+        function.getContext().emitError(Twine("bpf-unified-spills: non-relocatable stack in ") + MF.getName() + " leaves a " + Twine(-next) +
+            "-byte native frame, exceeding its " + Twine(physicalLimit) + "-byte budget; sources:" + composition);
+        return false;
     }
 
     // Rebase each accepted `dst = r10 + oldOff` after stack-word packing.
@@ -2336,9 +2062,9 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         address.add->getOperand(2).setImm(found->second + (address.off - oldWord));
     }
 
-    // Physical groups are dispatcher leaves: a managed call suspends the
-    // current group instead of making another BPF call. They therefore never
-    // nest on one fiber, so every group reuses the low end of that fiber's
+    // Allocation units are dispatcher leaves: a managed call suspends the
+    // current unit instead of making another BPF call. They therefore never
+    // nest on one fiber, so every unit reuses the low end of that fiber's
     // existing stack instead of summing all functions' worst cases.
     int64_t transientSize = 0;
     std::map<int32_t, int64_t> wordTransientOffset;
@@ -2348,10 +2074,12 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
             transientSize += 8;
         }
     }
-    if ((uint64_t)transientSize > fiberStackSize) {
-        report_fatal_error(Twine("bpf-unified-spills: function ") + MF.getName() + " needs more transient spill memory than one unified fiber stack");
+    uint64_t transientReserve = bpf::TransientReserveBytes(fiberStackSize);
+    if ((uint64_t)transientSize > transientReserve) {
+        function.getContext().emitError(Twine("bpf-unified-spills: physical function ") + MF.getName() + " needs " + Twine(transientSize) +
+            " bytes of transient spill storage, exceeding its " + Twine(transientReserve) + "-byte fiber-stack partition");
+        return false;
     }
-
     // Opcode lookup by name for the instructions we emit.
     auto opByName = [&](StringRef n) -> unsigned {
         for (unsigned i = 0; i < TII->getNumOpcodes(); i++) {
@@ -2361,9 +2089,7 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         }
         report_fatal_error(Twine("bpf-unified-spills: no opcode ") + n);
     };
-    static unsigned opSTD = 0, opSTDimm = 0, opSTWimm = 0, opLDD = 0, opLDimm = 0, opADDri = 0, opANDri = 0, opANDri32 = 0, opCast = 0;
-    static unsigned opMOVri32 = 0, opJULTri = 0, opJMP = 0, opRET = 0;
-    if (!opSTD) {
+    if (!emittedOpcodesDone) {
         opSTD = opByName("STD");
         opSTDimm = opByName("STD_imm");
         opSTWimm = opByName("STW_imm");
@@ -2377,6 +2103,7 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         opJULTri = opByName("JULT_ri");
         opJMP = opByName("JMP");
         opRET = opByName("RET");
+        emittedOpcodesDone = true;
     }
     unsigned R10 = regOf[10];
     auto materializeMemoryOffset = [&](MachineBasicBlock& block, MachineBasicBlock::iterator before, const DebugLoc& dl, Register base, int64_t offset) {
@@ -2388,47 +2115,33 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
     };
 
     // --------------------------------------------------------------- rewrite
-    // The memory pass has resolved the anchor's logical stack address to a
-    // verifier pointer for the current backing region. Check once that the
-    // transient low-end extent does not meet the downward-growing managed
-    // stack, then save that ephemeral pointer in the packed native frame.
+    // Save the anchor's backing pointer in the packed native frame. The
+    // anchor register holds the raw full-address stack base — a scalar to
+    // the verifier — while the rewritten accesses below dereference the
+    // reloaded slot directly, so the SAVED value must carry the arena
+    // permission: license a copy in place (the cast truncates, so the
+    // original register is preserved around it), store it, and restore.
+    // Spill slots keep a pointer's verifier type, so every reload below is
+    // licensed for free. No bound check is emitted here: every descent is
+    // bounded at its source (entry prologues and carve sites, against the
+    // reserve this transient extent was validated to fit), so the extent
+    // can never meet the downward-growing stack.
     if (anyUnified) {
-        MachineBasicBlock* check = anchor.instruction->getParent();
-        auto anchorIt = anchor.instruction->getIterator();
-        if (anchorIt == check->begin()) {
-            report_fatal_error(Twine("bpf-unified-spills: unified-stack anchor has no resolvable prefix in ") + MF.getName());
-        }
-        MachineInstr& prefixEnd = *std::prev(anchorIt);
-        MachineBasicBlock* continuation = check->splitAt(prefixEnd, /*UpdateLiveIns=*/true);
-        auto* normal = MF.CreateMachineBasicBlock(check->getBasicBlock());
-        auto* overflow = MF.CreateMachineBasicBlock(check->getBasicBlock());
-        // Keep all compiler-created edges adjacent. A large relocated frame
-        // can contain tens of thousands of instructions; putting overflow at
-        // the function tail makes the conditional exceed BPF's signed
-        // 16-bit branch range. The normal bridge jumps over the tiny error
-        // block to the original continuation.
-        MF.insert(continuation->getIterator(), normal);
-        MF.insert(continuation->getIterator(), overflow);
-
         DebugLoc dl = anchor.instruction->getDebugLoc();
-        BuildMI(check, dl, TII->get(opJULTri)).addReg(anchor.sp).addImm(transientSize).addMBB(overflow);
-        check->removeSuccessor(continuation);
-        check->addSuccessor(normal);
-        check->addSuccessor(overflow);
-
-        BuildMI(normal, dl, TII->get(opJMP)).addMBB(continuation);
-        normal->addSuccessor(continuation);
-
-        overflow->addLiveIn(anchor.abort);
-        // The encoded exit word does not fit one 32-bit immediate: store the
-        // terminal tag into the low half and the signed framework code into
-        // the high half (little-endian).
-        BuildMI(overflow, dl, TII->get(opSTWimm)).addImm(CAPSULE_EXITED).addReg(anchor.abort).addImm(0);
-        BuildMI(overflow, dl, TII->get(opSTWimm)).addImm(CAPSULE_ERROR_STACK_OVERFLOW).addReg(anchor.abort).addImm(4);
-        BuildMI(overflow, dl, TII->get(opMOVri32), wregOf[0]).addImm(0);
-        BuildMI(overflow, dl, TII->get(opRET)).addReg(wregOf[0], RegState::Implicit | RegState::Kill);
-
-        BuildMI(*continuation, anchor.instruction->getIterator(), dl, TII->get(opSTD)).addReg(anchor.base).addReg(R10).addImm(baseOff);
+        MachineBasicBlock& block = *anchor.instruction->getParent();
+        MachineBasicBlock::iterator at = anchor.instruction->getIterator();
+        // Licensing applies to the arena backing only: on the fixed tier the
+        // anchor is a map-value pointer whose permission is native, and the
+        // cast instruction does not exist on those kernels.
+        const bool arenaBacked = function.getParent()->getGlobalVariable(bpf::sym::ArenaMap, /*AllowInternal=*/true) != nullptr;
+        if (arenaBacked) {
+            BuildMI(block, at, dl, TII->get(opSTD)).addReg(anchor.base).addReg(R10).addImm(borrowOff);
+            BuildMI(block, at, dl, TII->get(opCast), anchor.base).addReg(anchor.base).addImm(0).addImm(1);
+        }
+        BuildMI(block, at, dl, TII->get(opSTD)).addReg(anchor.base).addReg(R10).addImm(baseOff);
+        if (arenaBacked) {
+            BuildMI(block, at, dl, TII->get(opLDD), anchor.base).addReg(R10).addImm(borrowOff);
+        }
     }
 
     int unifiedW = 0, stackW = 0, rematW = 0;
@@ -2491,9 +2204,10 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
             if (!a.isStore) {
                 int d = ridx(MI->getOperand(0));
                 Register dstFull = regOf[d];
+                Register base = dstFull;
                 BuildMI(*MBB, MI, dl, TII->get(opLDD), dstFull).addReg(R10).addImm(baseOff);
-                int64_t memoryOffset = materializeMemoryOffset(*MBB, MI->getIterator(), dl, dstFull, k);
-                BuildMI(*MBB, MI, dl, TII->get(opLDD), dstFull).addReg(dstFull).addImm(memoryOffset);
+                int64_t memoryOffset = materializeMemoryOffset(*MBB, MI->getIterator(), dl, base, k);
+                BuildMI(*MBB, MI, dl, TII->get(opLDD), dstFull).addReg(base).addImm(memoryOffset);
                 BuildMI(*MBB, MI, dl, TII->get(opCast), dstFull).addReg(dstFull).addImm(0).addImm(1);
                 MI->eraseFromParent();
             } else {
@@ -2545,9 +2259,10 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
                 // identity on the value, umin/umax back for the verifier.
                 int d = ridx(MI->getOperand(0));
                 Register dstFull = regOf[d];
+                Register base = dstFull;
                 BuildMI(*MBB, MI, dl, TII->get(opLDD), dstFull).addReg(R10).addImm(baseOff);
-                int64_t memoryOffset = materializeMemoryOffset(*MBB, MI->getIterator(), dl, dstFull, k);
-                BuildMI(*MBB, MI, dl, TII->get(MI->getOpcode()), MI->getOperand(0).getReg()).addReg(dstFull).addImm(memoryOffset);
+                int64_t memoryOffset = materializeMemoryOffset(*MBB, MI->getIterator(), dl, base, k);
+                BuildMI(*MBB, MI, dl, TII->get(MI->getOpcode()), MI->getOperand(0).getReg()).addReg(base).addImm(memoryOffset);
                 if (a.width == 8 && a.seen.k == Val::Masked) {
                     if (a.seen.msk <= 0xffffffffull) {
                         BuildMI(*MBB, MI, dl, TII->get(opANDri32), wregOf[d]).addReg(wregOf[d]).addImm((int32_t)(uint32_t)a.seen.msk);
@@ -2581,7 +2296,13 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
                 }
                 BuildMI(*MBB, MI, dl, TII->get(opLDD), RB).addReg(R10).addImm(baseOff);
                 int64_t memoryOffset = materializeMemoryOffset(*MBB, MI->getIterator(), dl, RB, k);
-                BuildMI(*MBB, MI, dl, TII->get(MI->getOpcode())).addReg(MI->getOperand(0).getReg()).addReg(RB).addImm(memoryOffset);
+                MachineInstrBuilder replacement = BuildMI(*MBB, MI, dl, TII->get(MI->getOpcode()));
+                if (info(*MI).kind == OpInfo::StoreImm) {
+                    replacement.addImm(MI->getOperand(0).getImm());
+                } else {
+                    replacement.addReg(MI->getOperand(0).getReg());
+                }
+                replacement.addReg(RB).addImm(memoryOffset);
                 if (save) {
                     BuildMI(*MBB, MI, dl, TII->get(opLDD), RB).addReg(R10).addImm(borrowOff);
                 }
@@ -2600,47 +2321,8 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         }
     }
 
-    if (UnifiedSpillReport) {
-        // Words that had to stay put are the ceiling on what this pass can
-        // do, so say why: an overlapping slot, a value that is not provably
-        // a scalar (a live pointer), or bounds that only the real stack
-        // preserves.
-        int why[3] = {0, 0, 0};
-        int kinds[6] = {0, 0, 0, 0, 0, 0};
-        for (auto& [key, g] : groups) {
-            int32_t w = key.first & ~7;
-            if (wordCls[w] != SlotClass::Stack) {
-                continue;
-            }
-            if (g.forcedStack) {
-                why[0]++;
-            } else if (needsBounds.count(key.first)) {
-                why[2]++;
-            } else {
-                why[1]++;
-                for (Access* a : g.acc) {
-                    kinds[a->seen.k]++;
-                }
-            }
-        }
-        if (why[1]) {
-            errs() << "  non-scalar accesses by kind: bot " << kinds[0] << ", scalar " << kinds[1] << ", masked " << kinds[2] << ", remat " << kinds[3]
-                   << ", arena " << kinds[4] << ", unknown " << kinds[5] << "\n";
-            std::vector<std::pair<unsigned, std::string>> top;
-            for (auto& [name, n] : unknownSources()) {
-                top.push_back({n, name});
-            }
-            std::sort(top.rbegin(), top.rend());
-            errs() << "  values turned opaque by:";
-            for (size_t i = 0; i < top.size() && i < 5; i++) {
-                errs() << " " << top[i].second << "=" << top[i].first;
-            }
-            errs() << "\n";
-            unknownSources().clear();
-        }
-        errs() << "bpf-unified-spills: " << MF.getName() << " frame " << -frameLow << " -> " << -next << " (native " << stackW << " unified " << unifiedW
-               << " remat " << rematW << " words; stayed: " << why[0] << " overlapping, " << why[1] << " non-scalar, " << why[2] << " need bounds)\n";
-    }
+    bpf::stats() << "bpf-unified-spills: " << MF.getName() << ", " << unifiedW << " unified words, " << stackW << " native words, " << rematW
+                 << " rematerialized words\n";
     return true;
 }
 
@@ -2649,15 +2331,19 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
 static RegisterPass<BPFUnifiedSpillsMIR> RegisterUnifiedSpills("bpf-unified-spills", "BPF spill slots to unified fiber stack", false, false);
 
 // `-run-pass` accepts MIR only, which used to force every large program
-// through a stop/serialize/reparse/start sandwich. Registering at the same
-// post-layout point in a normal llc pipeline keeps all MachineFunctions in
-// memory and preserves stock instruction selection, register allocation,
-// branch relaxation, relocation and BTF emission.
+// through a stop/serialize/reparse/start sandwich. Registering directly in
+// the normal llc pipeline keeps all MachineFunctions in memory and preserves
+// stock instruction selection, register allocation, block placement, branch
+// relaxation, relocation and BTF emission.
 static RegisterTargetPassConfigCallback RegisterUnifiedSpillPipeline([](TargetMachine& TM, PassManagerBase&, TargetPassConfig* config) {
     if (UnifiedSpillPipeline && TM.getTargetTriple().isBPF()) {
-        if (UnifiedSpillReport) {
-            errs() << "bpf-unified-spills: inserting after machine block placement\n";
-        }
-        config->insertPass(&MachineBlockPlacementID, &BPFUnifiedSpillsMIR::ID);
+        // Relocate each independently allocated unit after PEI and the late
+        // machine optimizers. Let standard block placement finish each unit
+        // independently, then join their final layouts and repair branches.
+        // Running placement on the joined CFG tail-merges independent exits
+        // and scatters dispatch trees through application bodies.
+        config->insertPass(&GCMachineCodeAnalysisID, bpf::MachineStackBudgetPassID());
+        config->insertPass(bpf::MachineStackBudgetPassID(), &BPFUnifiedSpillsMIR::ID);
+        bpf::AddMachineFlattenPasses(*config, &MachineBlockPlacementID, &MachineBlockPlacementID);
     }
 });

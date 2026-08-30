@@ -16,10 +16,6 @@ if(NOT QUICKJS_BPF_SOURCE_DIR OR NOT EXISTS "${QUICKJS_BPF_SOURCE_DIR}/quickjs.c
         MARKER
         quickjs.c
     )
-    if(NOT fetched_quickjs)
-        message(STATUS "QuickJS example: upstream source unavailable, skipping")
-        return()
-    endif()
     set(QUICKJS_BPF_SOURCE_DIR "${fetched_quickjs}")
 endif()
 
@@ -34,9 +30,8 @@ set(QUICKJS_BPF_INCLUDE_DIRECTORIES ${BPF_CAPSULE_LIBC_DIR} ${BPF_CAPSULE_LIBC_D
 )
 set(QUICKJS_BPF_DEFINITIONS
     CONFIG_VERSION="bpf"
-    # QuickJS gates OS threads, atomics and its stack-limit check on this: a
-    # single-threaded machine with no call stack of its own is exactly the
-    # configuration it describes.
+    # Disable OS-thread atomics, computed-goto dispatch, native stack probing
+    # and malloc_usable_size; Capsule supplies the relevant runtime bounds.
     __EMSCRIPTEN__=1
     _GNU_SOURCE
 )
@@ -46,12 +41,11 @@ set(QUICKJS_BPF_OPTIONS
     -U__SIZEOF_INT128__ -Wno-implicit-function-declaration -Wno-incompatible-pointer-types
     -Wno-return-type
 )
-# Debug info only on our own files: clang crashes emitting it for large
-# third-party sources on this target (see the lua target).
+# Debug info comes from our integration source, not the large upstream files.
 bpf_capsule_bitcode(
     QUICKJS_DRIVER_BC
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/quickjs_bpf.c ${BPF_CAPSULE_LIBC_DIR}/freestanding.c
-            ${BPF_CAPSULE_LIBC_DIR}/tlsf.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
+            ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
             ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
     INCLUDE_DIRECTORIES ${QUICKJS_BPF_INCLUDE_DIRECTORIES}
     COMPILE_DEFINITIONS ${QUICKJS_BPF_DEFINITIONS}
@@ -78,16 +72,10 @@ bpf_capsule_skeleton(
     DEPENDS quickjs_bpf_lib_output
 )
 
-add_executable(quickjs quickjs_host.c ${QUICKJS_SRC} "${CMAKE_CURRENT_BINARY_DIR}/quickjs.skel.h")
-set_source_files_properties(${QUICKJS_SRC} PROPERTIES COMPILE_OPTIONS -w)
-target_include_directories(
-    quickjs PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS}
-                    ${QUICKJS_BPF_SOURCE_DIR}
-)
-target_compile_options(
-    quickjs PRIVATE -Wall -Wextra -Wno-unused-parameter -DCONFIG_VERSION="host" -D_GNU_SOURCE
-)
-target_link_libraries(quickjs PRIVATE PkgConfig::LibBpf m pthread)
+add_executable(quickjs quickjs_host.c "${CMAKE_CURRENT_BINARY_DIR}/quickjs.skel.h")
+target_include_directories(quickjs PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS})
+target_compile_options(quickjs PRIVATE -Wall -Wextra)
+target_link_libraries(quickjs PRIVATE ${BPF_CAPSULE_HOST_TARGET})
 add_dependencies(quickjs quickjs_skeleton)
 
 install(TARGETS quickjs RUNTIME DESTINATION libexec/bpf-capsule/examples/quickjs)

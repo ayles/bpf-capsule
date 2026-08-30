@@ -23,7 +23,7 @@ endif()
 set(PUREDOOM_UPSTREAM_SOURCE_DIR "${PUREDOOM_SOURCE_DIR}")
 
 # PureDOOM has two allocator-layout-dependent rendering paths: I_InitGraphics
-# replaces a zeroed framebuffer with malloc storage, and the vanilla column
+# leaves its newly allocated framebuffer uninitialized, and the vanilla column
 # drawer can sample up to 127 bytes beyond the content of a sparse cached lump.
 # Patch a private build-tree copy so a supplied source checkout is never
 # modified, the distributed changes are identified, and identical inputs
@@ -59,7 +59,7 @@ set(PUREDOOM_SOURCE_DIR "${PUREDOOM_BUILD_SOURCE_DIR}")
 bpf_capsule_bitcode(
     DOOM_BITCODE
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/doom_bpf.c ${BPF_CAPSULE_LIBC_DIR}/freestanding.c
-            ${BPF_CAPSULE_LIBC_DIR}/tlsf.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
+            ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} ${PUREDOOM_SOURCE_DIR} ${BPF_CAPSULE_LIBC_DIR}
                         ${BPF_CAPSULE_LIBC_DIR}/include
     COMPILE_OPTIONS -Wno-unused-function -Wno-unused-variable -Wno-parentheses -Wno-enum-compare -g
@@ -84,7 +84,7 @@ target_include_directories(
                  "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_compile_options(doom PRIVATE -Wall -Wextra -Wno-unused-parameter)
-target_link_libraries(doom PkgConfig::LibBpf)
+target_link_libraries(doom ${BPF_CAPSULE_HOST_TARGET})
 add_dependencies(doom doom_skeleton)
 
 install(TARGETS doom RUNTIME DESTINATION libexec/bpf-capsule/examples/doom)
@@ -100,8 +100,8 @@ install(
           doom_bpf.c
           bpf_ctrl.h
           CMakeLists.txt
-          README.md
           LICENSE
     DESTINATION share/bpf-capsule/examples/doom/source
 )
-install(DIRECTORY patches/ DESTINATION share/bpf-capsule/examples/doom/source/patches)
+install(DIRECTORY patches/ DESTINATION share/bpf-capsule/examples/doom/source/patches
+        FILES_MATCHING PATTERN "*.patch")

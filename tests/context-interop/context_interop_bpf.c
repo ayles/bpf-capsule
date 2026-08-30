@@ -20,7 +20,7 @@ static uint64_t context_interop_checksum(void) {
 #if CONTEXT_INTEROP_YIELD
 
 static uint64_t context_interop_body(void) {
-    context_interop_request.destination = (uint64_t)(unsigned long)context_interop_buffer;
+    context_interop_request.destination = context_interop_buffer;
     context_interop_request.offset = 0;
     context_interop_request.length = CONTEXT_INTEROP_BYTES;
     capsule_yield();
@@ -36,8 +36,7 @@ static __attribute__((always_inline)) int context_interop_copy(struct xdp_md* co
         return -1;
     }
 
-    unsigned char* destination = capsule_memory_pointer(unsigned char, context_interop_request.destination);
-    __builtin_memcpy(destination, data + offset, CONTEXT_INTEROP_BYTES);
+    __builtin_memcpy(context_interop_request.destination, data + offset, CONTEXT_INTEROP_BYTES);
     return 0;
 }
 

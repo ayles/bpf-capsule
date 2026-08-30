@@ -10,8 +10,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use bpf_capsule_rt as _;
 
-// A tiny deterministic PRNG for reproducible weights, so no data has to be
-// shipped in and the native reference computes from the same seed.
+// A deterministic PRNG supplies weights without staging a model.
 struct Rng(u64);
 
 impl Rng {
@@ -94,5 +93,5 @@ pub extern "C" fn rust_run(seed: u64) -> u64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rust_force_panic() -> ! {
-    panic!("bpf-capsule Rust panic regression")
+    panic!("intentional bpf-capsule Rust panic")
 }

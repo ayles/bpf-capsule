@@ -1,0 +1,1 @@
+bpf-lower-capsule-exit: __bpf_capsule_exit must be called directly from managed code

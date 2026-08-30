@@ -9,30 +9,20 @@
 // Making this file loadable is the compiler's job, not the program's.
 #include "expr.h"
 
-// Any robust recursive parser caps its nesting (Lua does; so does every real
-// compiler). The cap is ordinary hygiene, and it also keeps a hostile input
-// from running the software call stack out of frames.
-// One parenthesis level occupies three mutually-recursive parser frames. A
-// cap of 96 therefore fits the 5.15 profile's conservative 384-frame floor,
-// including the driver and evaluator frames, instead of accepting an input
-// that can only end in a managed-stack abort.
-#define EXPR_MAX_NESTING 96
-
-#define EXPR_LLONG_MIN (-9223372036854775807LL - 1)
+// Keep hostile input from exhausting the software stack.
+enum { EXPR_MAX_NESTING = 96 };
 
 struct expr_parser {
     const char* src;
-    unsigned long len;
-    unsigned long pos;
-    unsigned long error_at;
+    size_t len;
+    size_t pos;
+    size_t error_at;
     int failed;
     int nesting;
 };
 
-// Add, subtract and multiply through unsigned arithmetic so overflow wraps
-// instead of being undefined. Both sides of the comparison are Clang, but
-// leaning on matching UB would make "kernel equals host" luck rather than a
-// property; wrapping makes the results equal by definition.
+// Add, subtract and multiply through unsigned arithmetic so overflow has
+// defined wrapping semantics.
 static int64_t wrap_add(int64_t a, int64_t b) {
     return (int64_t)((uint64_t)a + (uint64_t)b);
 }
@@ -115,7 +105,7 @@ static int64_t parse_term(struct expr_parser* p) {
         if (p->failed || (c != '*' && c != '/' && c != '%')) {
             return value;
         }
-        unsigned long at = p->pos;
+        size_t at = p->pos;
         p->pos++;
         int64_t rhs = parse_factor(p);
         if (p->failed) {
@@ -125,10 +115,8 @@ static int64_t parse_term(struct expr_parser* p) {
             value = wrap_mul(value, rhs);
             continue;
         }
-        // Truncating division is defined C only when the divisor is non-zero
-        // and the quotient representable; both violations become an ordinary
-        // parse error so kernel and host cannot diverge on undefined cases.
-        if (rhs == 0 || (value == EXPR_LLONG_MIN && rhs == -1)) {
+        // Division by zero and the one unrepresentable quotient are errors.
+        if (rhs == 0 || (value == INT64_MIN && rhs == -1)) {
             p->failed = 1;
             p->error_at = at;
             return 0;
@@ -151,7 +139,7 @@ static int64_t parse_expr(struct expr_parser* p) {
     }
 }
 
-int expr_eval(const char* src, unsigned long len, int64_t* value_out, unsigned long* error_at) {
+int expr_eval(const char* src, size_t len, int64_t* value_out, size_t* error_at) {
     struct expr_parser p = {
         .src = src,
         .len = len,

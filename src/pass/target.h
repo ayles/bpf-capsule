@@ -5,62 +5,21 @@
 
 #include <cstdint>
 
-// One knob: the oldest kernel the output has to load on. Everything else is
-// derived, in two layers.
-//
-//   version  ->  features    what this kernel actually has
-//   features ->  strategy    what we therefore have to do
-//
-// Keeping those apart matters. Signed division is a cpu-v4 instruction (6.6),
-// not an arena feature (6.9). Collapse both onto one version test and you get
-// the right answer for the versions you happened to try and the wrong one for
-// the next.
-//
-// Individual strategies remain forceable only for compiler experiments; the
-// installed pipeline exposes the kernel floor as its sole compatibility choice.
+// No target capability reaches the pass library: a capability is expressed
+// as which passes bpf-capsule-ld composes into the pipeline, and only that
+// tool converts a --kernel floor into the composition. What remains here is
+// fixed compiler policy every pass agrees on.
 
 namespace bpf {
 
-// major * 1000 + minor, so 6.9 is 6009. Parsed from -bpf-target.
-unsigned Version();
+inline constexpr uint64_t MaxFiberStackBytes = 2u * 1024u * 1024u;
 
-// ------------------------------------------------------------- features
-
-bool HasArena();               // bpf_arena + addr_space_cast              6.9
-bool HasCpuV4();               // sdiv, smod, gotol, ldsx                  6.6
-bool HasArenaSignedLoads();    // ldsx from PTR_TO_ARENA        7.0
-bool HasInsnArrayJumpTables(); // verifier/libbpf support for .jumptables
-
-// ------------------------------------------------------------- strategy
-
-// Data-dependent managed loops run in automatically sized native chunks and
-// suspend only at a chunk boundary. This is resumable on every target and does
-// not ask users to guess a loop budget or change the ABI between kernel tiers.
-bool UseArena();              // else: overlapping array-map regions
-bool LowerSignedDivision();   // no cpu v4: synthesize sdiv/srem
-bool LowerArenaSignedLoads(); // no arena ldsx: unsigned load + ALU sign extension
-bool UseJumpTables();         // else: switches lower as compare trees
-
-// Consequences of the memory model, not of the kernel version.
-bool InternalizeEarly();
-
-// Fixed target policy. These values are compiler invariants rather than a
-// user-facing tuning surface.
-unsigned MaxStepGroups();          // the kernel caps subprograms at 256
-unsigned MaxInlinedInstructions(); // folding a callee in costs frame space
-
-// Bytes reserved in a frame for each variable-length array. The frame is
-// laid out once, so a VLA cannot size itself; it gets this much and a
-// run-time check.
-unsigned DynamicAllocaBytes();
-
-// Runtime routines that run UNMANAGED: ordinary calls, no trampoline round
-// trip, verified once each as global subprograms. Policy lives here because
-// two passes must agree — stackify (does not manage them) and
-// bpf-internalize-runtime (must NOT internalize them, or the verifier walks into every
-// call site). Only branch-light leaves qualify; anything with a real loop
-// (soft-float division) exhausts the budget when checked against unknown
-// arguments.
-bool IsUnmanagedRuntime(llvm::StringRef name);
+// Bytes at the low end of one fiber stack slice that managed stack descent
+// must never enter. The stack has one deliberately simple ownership split:
+// the low half is post-RA transient spill storage and the upper half is
+// managed frames/VLAs. Policy lives here because Stackify folds the boundary
+// (plus the module's largest outgoing push) into every claim/carve check,
+// while the MIR spill pass proves its relocated words fit below it.
+uint64_t TransientReserveBytes(uint64_t fiberStackBytes);
 
 } // namespace bpf

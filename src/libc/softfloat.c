@@ -15,6 +15,8 @@
 // divide rounds once at the end rather than twice, which differs from a true
 // float divide only in cases this environment does not reach.
 
+#include "bpf_capsule.h"
+
 typedef unsigned long long u64;
 typedef long long i64;
 typedef unsigned int u32;
@@ -164,7 +166,7 @@ static __attribute__((always_inline)) int __bpf_f_isinf(u32 x) {
     return ((x >> F_MAN_BITS) & F_EXP_BITS) == F_EXP_BITS && !(x & F_MAN_MASK);
 }
 
-u64 __bpf_dadd(u64 a, u64 b) {
+__attribute__((noinline)) u64 __bpf_dadd(u64 a, u64 b) {
     if (__bpf_d_isnan(a)) {
         return a | (1ull << 51);
     }
@@ -255,7 +257,7 @@ u64 __bpf_dadd(u64 a, u64 b) {
     return __bpf_d_pack(sign, ea, man);
 }
 
-u64 __bpf_dneg(u64 a) {
+__attribute__((always_inline)) u64 __bpf_dneg(u64 a) {
     return a ^ (1ull << 63);
 }
 u64 __bpf_dsub(u64 a, u64 b) {
@@ -272,7 +274,7 @@ static __attribute__((always_inline)) void __bpf_mul64(u64 a, u64 b, u64* hi, u6
     *hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
 }
 
-u64 __bpf_dmul(u64 a, u64 b) {
+__attribute__((noinline)) u64 __bpf_dmul(u64 a, u64 b) {
     if (__bpf_d_isnan(a)) {
         return a | (1ull << 51);
     }
@@ -334,7 +336,7 @@ u64 __bpf_dmul(u64 a, u64 b) {
     return __bpf_d_pack(sign, exp, man);
 }
 
-u64 __bpf_ddiv(u64 a, u64 b) {
+__attribute__((noinline)) u64 __bpf_ddiv(u64 a, u64 b) {
     if (__bpf_d_isnan(a)) {
         return a | (1ull << 51);
     }
@@ -417,8 +419,10 @@ u64 __bpf_ddiv(u64 a, u64 b) {
     return __bpf_d_pack(sign, exp, quo);
 }
 
-// -1 less, 0 equal, 1 greater, 2 unordered.
-int __bpf_dcmp(u64 a, u64 b) {
+// -1 less, 0 equal, 1 greater, 2 unordered. Keep this out of line: inlining
+// the comparison body has reproduced a post-Stackify optimizer miscompile in
+// the Rust workload on both instruction tiers.
+__attribute__((noinline)) int __bpf_dcmp(u64 a, u64 b) {
     if (__bpf_d_isnan(a) || __bpf_d_isnan(b)) {
         return 2;
     }
@@ -440,7 +444,7 @@ int __bpf_dcmp(u64 a, u64 b) {
     return gt ? 1 : -1;
 }
 
-u64 __bpf_i2d(i64 v) {
+CAPSULE_NOSUSPEND u64 __bpf_i2d(i64 v) {
     if (!v) {
         return 0;
     }
@@ -448,7 +452,8 @@ u64 __bpf_i2d(i64 v) {
     u64 u = (u64)v;
     if (v < 0) {
         sign = 1;
-        u = (u64)(-v);
+        // Negate in the unsigned domain so INT64_MIN is defined.
+        u = 0 - u;
     }
     i64 exp = 1023 + 63;
     {
@@ -462,7 +467,7 @@ u64 __bpf_i2d(i64 v) {
     return __bpf_d_pack(sign, exp, man);
 }
 
-u64 __bpf_u2d(u64 u) {
+CAPSULE_NOSUSPEND u64 __bpf_u2d(u64 u) {
     if (!u) {
         return 0;
     }
@@ -477,7 +482,7 @@ u64 __bpf_u2d(u64 u) {
     return __bpf_d_pack(0, exp, man);
 }
 
-i64 __bpf_d2i(u64 a) {
+CAPSULE_NOSUSPEND i64 __bpf_d2i(u64 a) {
     i64 exp = (i64)((a >> MAN_BITS) & EXP_BITS) - 1023;
     if (__bpf_d_isnan(a) || exp < 0) {
         return 0;
@@ -490,7 +495,7 @@ i64 __bpf_d2i(u64 a) {
     return (a >> 63) ? -v : v;
 }
 
-u64 __bpf_d2u(u64 a) {
+CAPSULE_NOSUSPEND u64 __bpf_d2u(u64 a) {
     if (a >> 63) {
         return 0;
     }
@@ -498,7 +503,7 @@ u64 __bpf_d2u(u64 a) {
 }
 
 // Singles: widen, operate, narrow.
-u64 __bpf_f2d(u32 f) {
+__attribute__((noinline)) u64 __bpf_f2d(u32 f) {
     u64 sign = f >> 31;
     i64 exp = (f >> 23) & 0xff;
     u64 man = f & 0x7fffff;
@@ -520,7 +525,7 @@ u64 __bpf_f2d(u32 f) {
     return (sign << 63) | ((u64)(exp - 127 + 1023) << MAN_BITS) | (man << 29);
 }
 
-u32 __bpf_d2f(u64 a) {
+__attribute__((noinline)) u32 __bpf_d2f(u64 a) {
     u64 sign = a >> 63;
     i64 exp = (i64)((a >> MAN_BITS) & EXP_BITS);
     u64 man = a & MAN_MASK;
@@ -563,7 +568,7 @@ u32 __bpf_d2f(u64 a) {
     return (u32)((sign << 31) | ((u64)exp << 23) | m);
 }
 
-u32 __bpf_fadd(u32 a, u32 b) {
+__attribute__((noinline)) u32 __bpf_fadd(u32 a, u32 b) {
     if (__bpf_f_isnan(a)) {
         return (a & 0x80000000u) | 0x7fc00000u;
     }
@@ -654,11 +659,14 @@ u32 __bpf_fadd(u32 a, u32 b) {
     return __bpf_f_pack(sign, ea, man);
 }
 
+__attribute__((always_inline)) u32 __bpf_fneg(u32 a) {
+    return a ^ 0x80000000u;
+}
 u32 __bpf_fsub(u32 a, u32 b) {
-    return __bpf_fadd(a, b ^ 0x80000000u);
+    return __bpf_fadd(a, __bpf_fneg(b));
 }
 
-u32 __bpf_fmul(u32 a, u32 b) {
+__attribute__((noinline)) u32 __bpf_fmul(u32 a, u32 b) {
     if (__bpf_f_isnan(a)) {
         return (a & 0x80000000u) | 0x7fc00000u;
     }
@@ -717,10 +725,11 @@ u32 __bpf_fmul(u32 a, u32 b) {
     return __bpf_f_pack(sign, exp, man);
 }
 
-u32 __bpf_fdiv(u32 a, u32 b) {
+__attribute__((noinline)) u32 __bpf_fdiv(u32 a, u32 b) {
     return __bpf_d2f(__bpf_ddiv(__bpf_f2d(a), __bpf_f2d(b)));
 }
-int __bpf_fcmp(u32 a, u32 b) {
+// This boundary is independently load-bearing for the same reason as dcmp.
+__attribute__((noinline)) int __bpf_fcmp(u32 a, u32 b) {
     return __bpf_dcmp(__bpf_f2d(a), __bpf_f2d(b));
 }
 u32 __bpf_i2f(i64 v) {
@@ -737,7 +746,7 @@ u64 __bpf_f2u(u32 f) {
 }
 
 // Remainder, for the frem the C '%' on doubles turns into.
-u64 __bpf_drem(u64 a, u64 b) {
+__attribute__((noinline)) u64 __bpf_drem(u64 a, u64 b) {
     if (__bpf_d_isnan(a) || __bpf_d_isnan(b) || __bpf_d_isinf(a) || !(b << 1)) {
         return 0x7ff8000000000000ull;
     }
@@ -748,6 +757,6 @@ u64 __bpf_drem(u64 a, u64 b) {
     i64 iq = __bpf_d2i(q); // truncate toward zero
     return __bpf_dsub(a, __bpf_dmul(__bpf_i2d(iq), b));
 }
-u32 __bpf_frem(u32 a, u32 b) {
+__attribute__((noinline)) u32 __bpf_frem(u32 a, u32 b) {
     return __bpf_d2f(__bpf_drem(__bpf_f2d(a), __bpf_f2d(b)));
 }

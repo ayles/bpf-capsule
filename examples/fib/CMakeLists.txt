@@ -26,7 +26,7 @@ target_include_directories(
                 "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_compile_options(fib PRIVATE -Wall -Wextra)
-target_link_libraries(fib PkgConfig::LibBpf)
+target_link_libraries(fib ${BPF_CAPSULE_HOST_TARGET})
 add_dependencies(fib fib_skeleton)
 
 install(TARGETS fib RUNTIME DESTINATION libexec/bpf-capsule/examples/fib)

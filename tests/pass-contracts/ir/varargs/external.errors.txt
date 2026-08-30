@@ -1,0 +1,1 @@
+bpf-expand-varargs: call to declared-only variadic external external is unsupported

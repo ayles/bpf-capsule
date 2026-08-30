@@ -1,0 +1,1 @@
+bpf-capsule-domains: capsule_call inside Capsule function outer

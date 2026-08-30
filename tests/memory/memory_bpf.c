@@ -7,9 +7,28 @@
 
 volatile struct memory_test_result memory_test_output SEC(".data.memtest");
 
+static __attribute__((noinline)) uint32_t program_pointer_high(const void* pointer) {
+    return (uint32_t)((uintptr_t)pointer >> 32);
+}
+
 static void memory_prepare_body(void) {
-    memory_test_output.address = (uint64_t)(unsigned long)capsule_heap_start();
+    unsigned char* heap = capsule_heap_start();
+    memory_test_output.address = heap;
     memory_test_output.capacity = capsule_heap_size();
+    memory_test_output.pointer_high = program_pointer_high(heap);
+
+    // A linked chain whose next pointers the host follows directly. The
+    // nodes sit in index order but link 0 -> 2 -> 1 -> 3, so a host walk
+    // that succeeds proves it read the stored pointers, not the layout.
+    struct memory_test_node* nodes = (struct memory_test_node*)(heap + MEMORY_TEST_NODE_OFFSET);
+    for (unsigned int index = 0; index < MEMORY_TEST_NODE_COUNT; ++index) {
+        nodes[index].value = 0x1000u + index;
+        nodes[index].next = 0;
+    }
+    nodes[0].next = &nodes[2];
+    nodes[2].next = &nodes[1];
+    nodes[1].next = &nodes[3];
+    memory_test_output.chain = &nodes[0];
 }
 
 SEC("syscall")

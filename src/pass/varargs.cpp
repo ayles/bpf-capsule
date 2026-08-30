@@ -18,6 +18,7 @@
 #include "varargs.h"
 
 #include "common.h"
+#include "runtime_symbols.h"
 
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/DataLayout.h>
@@ -50,13 +51,10 @@ bool ValidateVaOps(Function& func, bool hasPack) {
             func.getContext().emitError(&inst, Twine("bpf-expand-varargs: va_start in non-variadic ") + func.getName());
             invalid = true;
         } else if (auto* va = dyn_cast<VAArgInst>(&inst); va && !SupportedSlotType(layout, va->getType())) {
-            func.getContext().emitError(
-                va,
-                Twine(
-                    "bpf-expand-varargs: va_arg wider than the 8-byte BPF "
-                    "variadic slot in "
-                ) + func.getName()
-            );
+            func.getContext().emitError(va,
+                Twine("bpf-expand-varargs: va_arg wider than the 8-byte BPF "
+                      "variadic slot in ") +
+                    func.getName());
             invalid = true;
         }
     }
@@ -71,13 +69,9 @@ void LowerVaOps(Function& func, Value* pack) {
     for (auto&& inst : instructions(func)) {
         if (auto* start = dyn_cast<VAStartInst>(&inst)) {
             if (!pack) {
-                report_fatal_error(
-                    Twine(
-                        "bpf-expand-varargs: va_start in "
-                        "non-variadic "
-                    ) +
-                    func.getName()
-                );
+                report_fatal_error(Twine("bpf-expand-varargs: va_start in "
+                                         "non-variadic ") +
+                    func.getName());
             }
             IRBuilder<> b(start);
             b.CreateStore(pack, start->getArgList());
@@ -130,7 +124,7 @@ PreservedAnalyses ExpandVarargsPass::run(Module& module, ModuleAnalysisManager&)
         // public capsule_call macro can carry arbitrary typed arguments. The
         // immediately following partition pass replaces it with a typed direct
         // call; it is not an external BPF ABI.
-        if (func.getName() == "__bpf_capsule_call") {
+        if (func.getName() == bpf::sym::CallMarker) {
             continue;
         }
 
@@ -146,8 +140,7 @@ PreservedAnalyses ExpandVarargsPass::run(Module& module, ModuleAnalysisManager&)
                 continue;
             }
             call->getContext().emitError(
-                call, Twine("bpf-expand-varargs: call to declared-only variadic external ") + func.getName() + " is unsupported; use a non-variadic wrapper"
-            );
+                call, Twine("bpf-expand-varargs: call to declared-only variadic external ") + func.getName() + " is unsupported; use a non-variadic wrapper");
             invalid = true;
         }
     }
@@ -173,19 +166,16 @@ PreservedAnalyses ExpandVarargsPass::run(Module& module, ModuleAnalysisManager&)
                 invalid = true;
                 continue;
             }
-            unsigned fixed = func->arg_size();
-            for (unsigned index = fixed; index < call->arg_size(); ++index) {
+            unsigned fixedArgumentCount = func->arg_size();
+            for (unsigned index = fixedArgumentCount; index < call->arg_size(); ++index) {
                 Type* type = call->getArgOperand(index)->getType();
                 if (SupportedSlotType(layout, type)) {
                     continue;
                 }
-                call->getFunction()->getContext().emitError(
-                    call,
-                    Twine(
-                        "bpf-expand-varargs: argument wider than the 8-byte "
-                        "BPF variadic slot calling "
-                    ) + func->getName()
-                );
+                call->getFunction()->getContext().emitError(call,
+                    Twine("bpf-expand-varargs: argument wider than the 8-byte "
+                          "BPF variadic slot calling ") +
+                        func->getName());
                 invalid = true;
             }
         }
@@ -208,18 +198,18 @@ PreservedAnalyses ExpandVarargsPass::run(Module& module, ModuleAnalysisManager&)
         params.push_back(PointerType::get(ctx, 0));
         auto* fixedType = FunctionType::get(func->getReturnType(), params, false);
 
-        auto* fixed = Function::Create(fixedType, func->getLinkage(), "", &module);
-        fixed->takeName(func);
-        fixed->copyAttributesFrom(func);
-        fixed->setSubprogram(func->getSubprogram());
-        fixed->splice(fixed->begin(), func);
+        auto* replacement = Function::Create(fixedType, func->getLinkage(), "", &module);
+        replacement->takeName(func);
+        replacement->copyAttributesFrom(func);
+        replacement->setSubprogram(func->getSubprogram());
+        replacement->splice(replacement->begin(), func);
         for (unsigned i = 0; i < func->arg_size(); i++) {
-            func->getArg(i)->replaceAllUsesWith(fixed->getArg(i));
-            fixed->getArg(i)->takeName(func->getArg(i));
+            func->getArg(i)->replaceAllUsesWith(replacement->getArg(i));
+            replacement->getArg(i)->takeName(func->getArg(i));
         }
-        Value* pack = fixed->getArg(fixed->arg_size() - 1);
+        Value* pack = replacement->getArg(replacement->arg_size() - 1);
         pack->setName("vararg.pack");
-        LowerVaOps(*fixed, pack);
+        LowerVaOps(*replacement, pack);
 
         // Rewrite every call site: pack the variadic tail, call the fixed
         // form. Anything but a direct call has no lowering here.
@@ -250,17 +240,15 @@ PreservedAnalyses ExpandVarargsPass::run(Module& module, ModuleAnalysisManager&)
                 if (at->isFloatingPointTy()) {
                     arg = b.CreateBitCast(arg, IntegerType::get(ctx, at->getPrimitiveSizeInBits()));
                 } else {
-                    assert(
-                        (at->isIntegerTy() || at->isPointerTy()) && SupportedSlotType(module.getDataLayout(), at) &&
-                        "variadic argument must be validated before lowering"
-                    );
+                    assert((at->isIntegerTy() || at->isPointerTy()) && SupportedSlotType(module.getDataLayout(), at) &&
+                        "variadic argument must be validated before lowering");
                 }
                 b.CreateStore(arg, b.CreateGEP(i8, buffer, b.getInt64(8 * i)));
             }
             args.push_back(buffer);
             SmallVector<OperandBundleDef> bundles;
             call->getOperandBundlesAsDefs(bundles);
-            auto* replaced = b.CreateCall(fixedType, fixed, args, bundles);
+            auto* replaced = b.CreateCall(fixedType, replacement, args, bundles);
             replaced->setCallingConv(call->getCallingConv());
             replaced->setTailCallKind(call->getTailCallKind());
             SmallVector<AttributeSet> parameterAttributes;
@@ -292,4 +280,12 @@ PreservedAnalyses ExpandVarargsPass::run(Module& module, ModuleAnalysisManager&)
         module.getContext().emitError("bpf-expand-varargs produced an invalid module");
     }
     return PreservedAnalyses::none();
+}
+
+bool RegisterExpandVarargsPass(StringRef name, ModulePassManager& manager) {
+    if (name != "bpf-expand-varargs") {
+        return false;
+    }
+    manager.addPass(ExpandVarargsPass());
+    return true;
 }

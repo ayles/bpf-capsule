@@ -1,0 +1,1 @@
+stackify: reserved accessor has the wrong ABI: __bpf_capsule_current_fiber_index

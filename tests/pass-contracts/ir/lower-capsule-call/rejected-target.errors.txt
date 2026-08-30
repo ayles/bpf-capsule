@@ -1,0 +1,1 @@
+bpf-lower-capsule-call: capsule_call target must be a defined, statically visible function

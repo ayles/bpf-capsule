@@ -1,0 +1,1 @@
+bpf-lower-capsule-call: address of __bpf_capsule_call escapes

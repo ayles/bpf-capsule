@@ -1,0 +1,55 @@
+--- |
+  source_filename = "unified-remat.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  @value = global i64 7, section ".data"
+  
+  declare i64 @callee()
+  
+  define i64 @physical(ptr %stack.base) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 {
+  entry:
+    call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %stack.base)
+    %loaded = load i64, ptr @value, align 8
+    %called = call i64 @callee()
+    %result = add i64 %loaded, %called
+    ret i64 %result
+  }
+  
+  !0 = !{i32 0}
+  !1 = !{i64 1024}
+...
+---
+name:            physical
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+frameInfo:
+  stackSize:       8
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+stack:
+  - { id: 0, type: spill-slot, offset: -8, size: 8, alignment: 8 }
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1
+  
+    INLINEASM &"# bpf_capsule_stack_anchor", sideeffect attdialect, reguse:GPR, killed $r1
+    $r6 = LD_imm64 @value
+    STD killed $r6, $r10, -8
+    JAL @callee, csr, implicit $r11, implicit-def $r11, implicit-def $r0
+    $r1 = LDD $r10, -8
+    $r1 = LDD killed $r1, 0
+    $r0 = ADD_rr killed $r0, killed $r1
+    RET implicit $r0
+...

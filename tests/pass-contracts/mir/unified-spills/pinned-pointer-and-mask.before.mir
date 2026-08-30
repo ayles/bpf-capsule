@@ -1,0 +1,61 @@
+--- |
+  source_filename = "unified-pointer-pin.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  @arena = internal global i64 0, section ".maps"
+  
+  declare i64 @callee()
+  
+  define i64 @physical(ptr %stack.base, ptr %pointer) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 {
+  entry:
+    call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %stack.base)
+    %called = call i64 @callee()
+    %loaded = load i64, ptr %pointer, align 8
+    %with.pointer = add i64 %called, %loaded
+    %result = add i64 %with.pointer, 7
+    ret i64 %result
+  }
+  
+  !0 = !{i32 0}
+  !1 = !{i64 1024}
+...
+---
+name:            physical
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+  - { reg: '$r2' }
+frameInfo:
+  stackSize:       32
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+stack:
+  - { id: 0, type: spill-slot, offset: -24, size: 8, alignment: 8 }
+  - { id: 1, type: spill-slot, offset: -32, size: 8, alignment: 8 }
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1, $r2
+  
+    INLINEASM &"# bpf_capsule_stack_anchor", sideeffect attdialect, reguse:GPR, killed $r1
+    $r6 = MOV_ri 7
+    STD killed $r6, $r10, -32
+    STD killed $r2, $r10, -24
+    JAL @callee, csr, implicit $r11, implicit-def $r11, implicit-def $r0
+    $r1 = LDD $r10, -24
+    $r2 = LDD $r10, -32
+    $r1 = LDD killed $r1, 0
+    $r0 = ADD_rr killed $r0, killed $r1
+    $r0 = ADD_rr killed $r0, killed $r2
+    RET implicit $r0
+...

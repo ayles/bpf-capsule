@@ -1,30 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #pragma once
 
-#include "bpf_capsule_abi.h"
+#include <stddef.h>
 
-#define WASM_ZLIB_GUEST_INPUT_CAPACITY (128u << 10)
-#define WASM_ZLIB_GUEST_OUTPUT_CAPACITY (256u << 10)
+#include "bpf_capsule_types.h"
 
-enum wasm3_stage {
-    WASM3_STAGE_NOT_STARTED = 0,
-    WASM3_STAGE_ENVIRONMENT_READY = 1,
-    WASM3_STAGE_RUNTIME_READY = 2,
-    WASM3_STAGE_MODULE_READY = 3,
-    WASM3_STAGE_INPUT_READY = 4,
-    WASM3_STAGE_COMPLETE = 5,
+enum {
+    WASM_ZLIB_GUEST_INPUT_CAPACITY = 128u << 10,
+    WASM_ZLIB_GUEST_OUTPUT_CAPACITY = 256u << 10,
 };
 
 struct wasm3_bpf_ctrl {
-    uint64_t input_address;
-    uint64_t input_size;
-    uint64_t stage;
-    uint64_t zlib_status;
-    uint64_t zlib_output_size;
-    uint64_t zlib_adler;
+    unsigned char* input;
+    size_t input_size;
+    unsigned char* output;
+    size_t output_capacity;
+    int zlib_status;
+    size_t output_size;
     struct capsule_result capsule;
 };
 
+// Fixed layout of guest_zctrl in wasm32 linear memory.
 struct wasm_zlib_control {
     uint64_t input_len;
     uint64_t status;

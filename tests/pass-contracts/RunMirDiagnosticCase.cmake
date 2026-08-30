@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# A rejected post-selection state is still a readable contract: first prove
+# the checked-in MIR is llc's canonical spelling, then require a clean pass
+# diagnostic rather than an LLVM abort/backtrace.
+
+foreach(required LLC PLUGIN PASS BEFORE ERRORS WORK)
+    if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
+        message(FATAL_ERROR "RunMirDiagnosticCase.cmake needs -D${required}=...")
+    endif()
+endforeach()
+
+file(REMOVE_RECURSE "${WORK}")
+file(MAKE_DIRECTORY "${WORK}")
+execute_process(COMMAND "${LLC}" "-load=${PLUGIN}" -run-pass=none -simplify-mir
+    "${BEFORE}" -o "${WORK}/before.printed.mir"
+    RESULT_VARIABLE result ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "cannot canonicalize MIR ${BEFORE}: ${error}")
+endif()
+file(READ "${BEFORE}" recorded)
+file(READ "${WORK}/before.printed.mir" canonical)
+string(REGEX REPLACE "  ; ModuleID = '[^\n]*'\n" "" recorded "${recorded}")
+string(REGEX REPLACE "  ; ModuleID = '[^\n]*'\n" "" canonical "${canonical}")
+if(NOT recorded STREQUAL canonical)
+    file(WRITE "${WORK}/before.canonical.mir" "${canonical}")
+    message(FATAL_ERROR "${BEFORE} is not canonical; canonical form: ${WORK}/before.canonical.mir")
+endif()
+
+set(command "${LLC}" "-load=${PLUGIN}" "-run-pass=${PASS}" -simplify-mir)
+if(DEFINED EXTRA_ARG AND NOT "${EXTRA_ARG}" STREQUAL "")
+    string(REPLACE "|" ";" extra_args "${EXTRA_ARG}")
+    list(APPEND command ${extra_args})
+endif()
+list(APPEND command "${BEFORE}" -o "${WORK}/unexpected.mir")
+execute_process(COMMAND ${command} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(result EQUAL 0)
+    message(FATAL_ERROR "${PASS} unexpectedly accepted ${BEFORE}")
+endif()
+file(STRINGS "${ERRORS}" required_errors)
+foreach(required IN LISTS required_errors)
+    string(STRIP "${required}" required)
+    if(required STREQUAL "" OR required MATCHES "^#")
+        continue()
+    endif()
+    string(FIND "${error}" "${required}" position)
+    if(position EQUAL -1)
+        message(FATAL_ERROR "diagnostic does not contain '${required}': ${output}${error}")
+    endif()
+endforeach()
+if(error MATCHES "PLEASE submit a bug report" OR error MATCHES "Stack dump:")
+    message(FATAL_ERROR "${PASS} aborted instead of rejecting the input cleanly: ${error}")
+endif()

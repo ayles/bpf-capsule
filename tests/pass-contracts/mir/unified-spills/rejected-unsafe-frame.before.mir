@@ -1,0 +1,45 @@
+--- |
+  source_filename = "unified-spills-rejected-unsafe-frame.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i64 @physical(ptr %stack.base) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 {
+  entry:
+    ret i64 0
+  }
+  
+  !0 = !{i32 0}
+  !1 = !{i64 1024}
+...
+---
+name:            physical
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$r1' }
+frameInfo:
+  stackSize:       24
+  maxAlignment:    8
+  adjustsStack:    true
+  framePointerPolicy: none
+  isCalleeSavedInfoValid: true
+stack:
+  - { id: 0, offset: -24, size: 8, alignment: 8 }
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1
+  
+    INLINEASM &"# bpf_capsule_stack_anchor", sideeffect attdialect, reguse:GPR, $r1
+    $r0 = MOV_ri 1
+    STD killed $r0, $r10, -24
+    $r2 = MOV_rr $r10
+    $r2 = ADD_ri $r2, -24
+    $r2 = ADD_ri $r2, 0
+    $r0 = MOV_ri 0
+    RET implicit $r0
+...

@@ -1,0 +1,1 @@
+stackify: scalar Capsule root scalar_root has a direct call path to context-dependent function

@@ -2,8 +2,8 @@
 #include "memory.h"
 
 #include "common.h"
+#include "runtime_symbols.h"
 #include "bpf_capsule_abi.h"
-#include "target.h"
 
 #include <llvm/ADT/MapVector.h>
 #include <llvm/Analysis/LoopInfo.h>
@@ -23,25 +23,25 @@
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/ReplaceConstant.h>
 #include <llvm/IR/Verifier.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/Error.h>
 #include <llvm/Transforms/Scalar/InferAddressSpaces.h>
 #include <llvm/Transforms/Utils/BasicBlockUtils.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
+#include <cerrno>
 #include <unordered_map>
 
 using namespace llvm;
 
 namespace {
 
-constexpr unsigned ArenaAS = 1;
+cl::opt<unsigned> FixedDirectHeapRegions(
+    "bpf-memory-fixed-direct-regions", cl::desc("Test-only fixed-memory direct-region override"), cl::init(BPF_CAPSULE_DIRECT_MEMORY_REGIONS), cl::Hidden);
 
-// The memory model is the target's choice: arena where the kernel has one,
-// overlapping array-map regions where it does not.
-bool FixedMemoryMode() {
-    return !bpf::UseArena();
-}
+constexpr unsigned ArenaAS = 1;
+constexpr uint64_t BpfMapLookupElemHelperId = 1;
 
 // ---------------------------------------------------------------------------
 // bpf-memory module pass
@@ -71,11 +71,7 @@ bool IsMovableGlobal(GlobalVariable& g) {
 }
 
 bool ShouldArenaizeAllocas(Function& func) {
-    if (bpf::IsCapsuleFunction(func)) {
-        return true;
-    }
-    StringRef name = func.getName();
-    return name.starts_with("bpf_step.") || name.starts_with("bpf_heap_commit_");
+    return bpf::IsCapsuleFunction(func);
 }
 
 // Stackify owns every source-level Capsule alloca: ordinary locals become
@@ -93,7 +89,7 @@ void VerifyStackifyConsumedAllocas(Module& module) {
         }
         for (Instruction& inst : instructions(func)) {
             auto* alloca = dyn_cast<AllocaInst>(&inst);
-            if (!alloca || alloca->getMetadata("bpf.native.alloca")) {
+            if (!alloca || alloca->getMetadata(bpf::md::NativeAlloca)) {
                 continue;
             }
             report_fatal_error(Twine("bpf-memory: stackify left an unowned alloca in ") + func.getName());
@@ -102,13 +98,18 @@ void VerifyStackifyConsumedAllocas(Module& module) {
 }
 
 struct MemoryPass : public PassInfoMixin<MemoryPass> {
+    explicit MemoryPass(bool fixedMemory)
+        : FixedMemory_(fixedMemory) {
+    }
+
+    bool FixedMemory_ = false;
     uint64_t HeapBase_ = 0;
     static constexpr unsigned HeapShift = BPF_CAPSULE_MEMORY_REGION_SHIFT;
     // Linux 5.15 permits at most 64 maps in one loaded call graph. Keep the
     // established 32 data-map budget so runtime maps and application maps
     // retain deterministic headroom instead of failing later at load time.
     static constexpr unsigned MaxDirectHeapRegions = BPF_CAPSULE_DIRECT_MEMORY_REGIONS;
-    static constexpr unsigned MaxHeapRegions = 1u << (32 - HeapShift);
+    static constexpr unsigned MaxHeapRegions = unsigned((1ull << 32) >> HeapShift);
     SmallVector<GlobalVariable*> Regions_;
     GlobalVariable* HeapArray_ = nullptr;
     unsigned TotalRegions_ = 0;
@@ -117,9 +118,14 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     uint64_t SoftwareStackBytes_ = 0;
     uint64_t FiberStackSize_ = 0;
     DenseMap<unsigned, Function*> SoftwareStackAccessors_;
+    Function* StackFault_ = nullptr;
     SmallPtrSet<Instruction*, 32> PromotedStackAccesses_;
     std::unordered_map<Function*, Constant*> FunctionIds_;
-    uint64_t NextFunctionId_ = (uint64_t)BPF_CAPSULE_FUNCTION_TOKEN_BASE + BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT;
+    // Non-managed function identities follow the managed token range: the
+    // 1MiB above window + TOKEN_DISPLACEMENT + TOKEN_LIMIT (both spans are
+    // part of the configure-time PROT_NONE reservation).
+    uint64_t NextFunctionId_ = BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT;
+    SmallVector<uint64_t> FixupSlots_;
 
     static constexpr unsigned ConfigHeapBase = BPF_CAPSULE_OBJECT_CONFIG_HEAP_BASE;
     static constexpr unsigned ConfigHeapBytes = BPF_CAPSULE_OBJECT_CONFIG_HEAP_BYTES;
@@ -129,10 +135,11 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     static constexpr unsigned ConfigStackBytesPerFiber = BPF_CAPSULE_OBJECT_CONFIG_STACK_BYTES_PER_FIBER;
     static constexpr unsigned ConfigMaxFibers = BPF_CAPSULE_OBJECT_CONFIG_MAX_FIBERS;
     static constexpr unsigned ConfigArenaImagePages = BPF_CAPSULE_OBJECT_CONFIG_ARENA_IMAGE_PAGES;
-    static constexpr unsigned ConfigUsesArena = BPF_CAPSULE_OBJECT_CONFIG_USES_ARENA;
+    static constexpr unsigned ConfigMemoryBackend = BPF_CAPSULE_OBJECT_CONFIG_MEMORY_BACKEND;
     static constexpr unsigned ConfigHeapReserved = BPF_CAPSULE_OBJECT_CONFIG_HEAP_RESERVED;
     static constexpr unsigned ConfigAbiMagic = BPF_CAPSULE_OBJECT_CONFIG_ABI_MAGIC;
     static constexpr unsigned ConfigAbiVersion = BPF_CAPSULE_OBJECT_CONFIG_ABI_VERSION;
+    static constexpr unsigned ConfigMemoryViewBase = BPF_CAPSULE_OBJECT_CONFIG_MEMORY_VIEW_BASE;
     static constexpr unsigned ConfigFieldCount = BPF_CAPSULE_OBJECT_CONFIG_FIELD_COUNT;
 
     enum ArenaControlField : unsigned {
@@ -143,18 +150,18 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     };
 
     GlobalVariable* ObjectConfig(Module& module) {
-        auto* config = module.getGlobalVariable("bpf_capsule_config", true);
+        auto* config = module.getGlobalVariable(bpf::sym::Config, true);
         auto* type = config ? dyn_cast<StructType>(config->getValueType()) : nullptr;
-        if (!config || !config->hasSection() || !type || type->getNumElements() != ConfigFieldCount) {
+        if (!config || config->isDeclaration() || !config->hasInitializer()) {
             report_fatal_error("bpf-memory: runtime must define bpf_capsule_config");
         }
-        for (unsigned index = 0; index < ConfigFiberCount; ++index) {
-            if (!type->getElementType(index)->isIntegerTy(64)) {
-                report_fatal_error("bpf-memory: malformed bpf_capsule_config");
-            }
+        if (!config->isConstant() || config->getSection() != bpf::sym::ConfigSection || !type || type->getNumElements() != ConfigFieldCount) {
+            report_fatal_error("bpf-memory: malformed bpf_capsule_config");
         }
-        for (unsigned index = ConfigFiberCount; index < ConfigFieldCount; ++index) {
-            if (!type->getElementType(index)->isIntegerTy(32)) {
+        for (unsigned index = 0; index < ConfigFieldCount; ++index) {
+            // The view base is the one 64-bit field: a host virtual address.
+            unsigned width = index == ConfigMemoryViewBase ? 64 : 32;
+            if (!type->getElementType(index)->isIntegerTy(width)) {
                 report_fatal_error("bpf-memory: malformed bpf_capsule_config");
             }
         }
@@ -162,12 +169,15 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     }
 
     GlobalVariable* ArenaControl(Module& module) {
-        auto* control = module.getGlobalVariable("bpf_capsule_arena_control", true);
+        auto* control = module.getGlobalVariable(bpf::sym::ArenaControl, true);
         auto* type = control ? dyn_cast<StructType>(control->getValueType()) : nullptr;
-        if (!control || !control->hasSection() || !type || type->getNumElements() != ArenaControlFieldCount ||
-            !type->getElementType(ArenaReady)->isIntegerTy(32) || !type->getElementType(ArenaReserved)->isIntegerTy(32) ||
-            !type->getElementType(ArenaVirtualBase)->isIntegerTy(64)) {
+        if (!control || control->isDeclaration() || !control->hasInitializer()) {
             report_fatal_error("bpf-arena: runtime must define bpf_capsule_arena_control");
+        }
+        if (control->isConstant() || control->getSection() != bpf::sym::ArenaControlSection || !control->getInitializer()->isNullValue() || !type ||
+            type->getNumElements() != ArenaControlFieldCount || !type->getElementType(ArenaReady)->isIntegerTy(32) ||
+            !type->getElementType(ArenaReserved)->isIntegerTy(32) || !type->getElementType(ArenaVirtualBase)->isIntegerTy(64)) {
+            report_fatal_error("bpf-arena: malformed bpf_capsule_arena_control");
         }
         return control;
     }
@@ -180,22 +190,45 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return value->getZExtValue();
     }
 
-    uint64_t ConfigureObjectLayout(
-        Module& module, uint64_t heapBase, uint64_t stackBytesPerFiber, uint64_t maxFibers, uint64_t arenaImagePages, uint64_t usesArena, uint64_t stackFloor,
-        uint64_t stackAlignment
-    ) {
+    static bool AlignWithin(uint64_t value, uint64_t alignment, uint64_t limit, uint64_t& result) {
+        if (!isPowerOf2_64(alignment) || value > limit) {
+            return false;
+        }
+        uint64_t remainder = value & (alignment - 1);
+        uint64_t padding = remainder ? alignment - remainder : 0;
+        if (padding > limit - value) {
+            return false;
+        }
+        result = value + padding;
+        return true;
+    }
+
+    uint64_t ConfigureObjectLayout(Module& module, uint64_t heapBase, uint64_t stackBytesPerFiber, uint64_t maxFibers, uint64_t arenaImagePages,
+        uint64_t memoryBackend, uint64_t stackFloor, uint64_t stackAlignment) {
         GlobalVariable* config = ObjectConfig(module);
         Constant* initial = config->getInitializer();
         uint64_t heapBytes = ConfigInteger(initial, ConfigHeapBytes, "heap size");
         uint64_t fiberCount = ConfigInteger(initial, ConfigFiberCount, "fiber count");
         uint64_t declaredStackBytes = ConfigInteger(initial, ConfigStackBytesPerFiber, "fiber stack size");
         uint64_t declaredMaxFibers = ConfigInteger(initial, ConfigMaxFibers, "fiber ceiling");
-        const uint64_t addressLimit = BPF_CAPSULE_FUNCTION_TOKEN_BASE;
+        uint64_t declaredHeapBase = ConfigInteger(initial, ConfigHeapBase, "heap base");
+        uint64_t declaredStackBase = ConfigInteger(initial, ConfigStackBase, "stack base");
+        uint64_t declaredMemoryEnd = ConfigInteger(initial, ConfigMemoryEnd, "memory end");
+        uint64_t declaredArenaImagePages = ConfigInteger(initial, ConfigArenaImagePages, "arena image pages");
+        uint64_t declaredMemoryBackend = ConfigInteger(initial, ConfigMemoryBackend, "memory backend");
+        uint64_t declaredHeapReserved = ConfigInteger(initial, ConfigHeapReserved, "heap reservation");
+        const uint64_t addressLimit = 1ull << 32;
         uint64_t abiMagic = ConfigInteger(initial, ConfigAbiMagic, "ABI magic");
         uint64_t abiVersion = ConfigInteger(initial, ConfigAbiVersion, "ABI version");
         if (declaredStackBytes != stackBytesPerFiber || declaredMaxFibers != maxFibers || abiMagic != BPF_CAPSULE_ABI_MAGIC ||
             abiVersion != BPF_CAPSULE_ABI_VERSION) {
             report_fatal_error("bpf-memory: linked runtime fiber ABI disagrees with the compiler stack size or fiber ceiling");
+        }
+        if (declaredHeapBase || declaredStackBase || declaredMemoryEnd || declaredArenaImagePages || declaredHeapReserved) {
+            report_fatal_error("bpf-memory: linked runtime object layout is not in its pre-compiler state");
+        }
+        if (declaredMemoryBackend != memoryBackend) {
+            report_fatal_error("bpf-memory: linked runtime memory backend disagrees with the selected compiler target");
         }
         if (!fiberCount || fiberCount > maxFibers || !stackBytesPerFiber || heapBase > addressLimit || heapBytes > addressLimit - heapBase) {
             report_fatal_error("bpf-memory: invalid default heap or fiber configuration");
@@ -209,27 +242,29 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             report_fatal_error("bpf-memory: default memory configuration exceeds the 32-bit address domain");
         }
         uint64_t memoryEnd = stackBase + fiberCount * stackBytesPerFiber;
+        if (memoryEnd > UINT32_MAX) {
+            report_fatal_error("bpf-memory: default memory configuration exceeds the 32-bit offset domain");
+        }
         auto* type = cast<StructType>(config->getValueType());
         LLVMContext& ctx = module.getContext();
-        config->setInitializer(
-            ConstantStruct::get(
-                type,
-                {
-                    ConstantInt::get(Type::getInt64Ty(ctx), heapBase),
-                    ConstantInt::get(Type::getInt64Ty(ctx), heapBytes),
-                    ConstantInt::get(Type::getInt64Ty(ctx), stackBase),
-                    ConstantInt::get(Type::getInt64Ty(ctx), memoryEnd),
-                    ConstantInt::get(Type::getInt32Ty(ctx), fiberCount),
-                    ConstantInt::get(Type::getInt32Ty(ctx), stackBytesPerFiber),
-                    ConstantInt::get(Type::getInt32Ty(ctx), maxFibers),
-                    ConstantInt::get(Type::getInt32Ty(ctx), arenaImagePages),
-                    ConstantInt::get(Type::getInt32Ty(ctx), usesArena),
-                    ConstantInt::get(Type::getInt32Ty(ctx), 0),
-                    ConstantInt::get(Type::getInt32Ty(ctx), BPF_CAPSULE_ABI_MAGIC),
-                    ConstantInt::get(Type::getInt32Ty(ctx), BPF_CAPSULE_ABI_VERSION),
-                }
-            )
-        );
+        config->setInitializer(ConstantStruct::get(type,
+            {
+                ConstantInt::get(Type::getInt32Ty(ctx), heapBase),
+                ConstantInt::get(Type::getInt32Ty(ctx), heapBytes),
+                ConstantInt::get(Type::getInt32Ty(ctx), stackBase),
+                ConstantInt::get(Type::getInt32Ty(ctx), memoryEnd),
+                ConstantInt::get(Type::getInt32Ty(ctx), fiberCount),
+                ConstantInt::get(Type::getInt32Ty(ctx), stackBytesPerFiber),
+                ConstantInt::get(Type::getInt32Ty(ctx), maxFibers),
+                ConstantInt::get(Type::getInt32Ty(ctx), arenaImagePages),
+                ConstantInt::get(Type::getInt32Ty(ctx), memoryBackend),
+                ConstantInt::get(Type::getInt32Ty(ctx), 0),
+                ConstantInt::get(Type::getInt32Ty(ctx), BPF_CAPSULE_ABI_MAGIC),
+                ConstantInt::get(Type::getInt32Ty(ctx), BPF_CAPSULE_ABI_VERSION),
+                // The host writes the real view base into the frozen
+                // config before load; the compiled default is no view.
+                ConstantInt::get(Type::getInt64Ty(ctx), 0),
+            }));
         return memoryEnd;
     }
 
@@ -244,15 +279,15 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 (returnsPointer ? !intrinsic->getReturnType()->isPointerTy() : !intrinsic->getReturnType()->isIntegerTy(64))) {
                 report_fatal_error(Twine("bpf-memory: malformed ") + name + " intrinsic");
             }
-            SmallVector<CallBase*> calls;
+            SmallVector<CallInst*> calls;
             for (User* user : intrinsic->users()) {
-                auto* call = dyn_cast<CallBase>(user);
+                auto* call = dyn_cast<CallInst>(user);
                 if (!call || call->getCalledOperand()->stripPointerCasts() != intrinsic) {
-                    report_fatal_error(Twine("bpf-memory: address of ") + name + " escapes");
+                    report_fatal_error(Twine("bpf-memory: ") + name + " must be used by direct calls only");
                 }
                 calls.push_back(call);
             }
-            for (CallBase* call : calls) {
+            for (CallInst* call : calls) {
                 IRBuilder<> b(call);
                 Value* replacement = nullptr;
                 // The host-reserved heap prefix is preload configuration in
@@ -268,15 +303,25 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                         Value* baseSlot = b.CreateStructGEP(arenaControl->getValueType(), arenaControl, ArenaVirtualBase);
                         Value* base = b.CreateLoad(Type::getInt64Ty(module.getContext()), baseSlot, "bpf.arena.base");
                         address = b.CreateAdd(base, address, "bpf.heap.address");
-                        Value* arenaPointer = b.CreateIntToPtr(address, PointerType::get(module.getContext(), ArenaAS), "bpf.heap.arena.pointer");
-                        replacement = b.CreateAddrSpaceCast(arenaPointer, intrinsic->getReturnType(), "bpf.heap.start");
+                        // inttoptr, not addrspacecast: the cast would truncate
+                        // the full-address value representation (see the
+                        // comparison note in the arena transform).
                     } else {
-                        replacement = b.CreateIntToPtr(address, intrinsic->getReturnType(), "bpf.heap.start");
+                        // Fixed tier: the heap pointer carries the mandatory
+                        // pre-load host view base, so published pointers
+                        // dereference on the host as-is. The frozen read folds
+                        // to the baked constant at verification.
+                        Value* viewSlot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
+                        auto* viewBase = b.CreateLoad(Type::getInt64Ty(module.getContext()), viewSlot, "bpf.view.base");
+                        viewBase->setVolatile(true);
+                        address = b.CreateAdd(viewBase, address, "bpf.heap.address");
                     }
+                    replacement = b.CreateIntToPtr(address, intrinsic->getReturnType(), "bpf.heap.start");
                 } else {
                     Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigHeapBytes);
-                    auto* load = b.CreateLoad(Type::getInt64Ty(module.getContext()), slot, "bpf.heap.size");
-                    load->setVolatile(true);
+                    auto* load32 = b.CreateLoad(Type::getInt32Ty(module.getContext()), slot, "bpf.heap.size32");
+                    load32->setVolatile(true);
+                    Value* load = b.CreateZExt(load32, Type::getInt64Ty(module.getContext()), "bpf.heap.size");
                     // Capsule virtual addresses occupy the low 32-bit
                     // domain, and preload configuration rejects any heap
                     // which cannot leave room for its stack bank. Preserve
@@ -284,18 +329,16 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                     // to older verifiers; otherwise allocator size arithmetic
                     // begins with an arbitrary u64 and can exhaust path state.
                     Value* available = b.CreateSub(load, reserved, "bpf.heap.available");
-                    replacement = b.CreateZExt(
-                        b.CreateTrunc(available, Type::getInt32Ty(module.getContext()), "bpf.heap.size32"), Type::getInt64Ty(module.getContext()),
-                        "bpf.heap.size.bounded"
-                    );
+                    replacement = b.CreateZExt(b.CreateTrunc(available, Type::getInt32Ty(module.getContext()), "bpf.heap.size32"),
+                        Type::getInt64Ty(module.getContext()), "bpf.heap.size.bounded");
                 }
                 call->replaceAllUsesWith(replacement);
                 call->eraseFromParent();
             }
             intrinsic->eraseFromParent();
         };
-        lower("__bpf_capsule_heap_start", true);
-        lower("__bpf_capsule_heap_size", false);
+        lower(bpf::sym::HeapStart, true);
+        lower(bpf::sym::HeapSize, false);
     }
 
     void MaterializeSoftwareStackUses(Module& module, GlobalVariable* arenaControl = nullptr) {
@@ -323,21 +366,33 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
             IRBuilder<> b(EntryPrologueInsertionPoint(function));
             Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigStackBase);
-            auto* offset = b.CreateLoad(Type::getInt64Ty(module.getContext()), slot, "bpf.stack.base.offset");
-            offset->setVolatile(true);
+            auto* offset32 = b.CreateLoad(Type::getInt32Ty(module.getContext()), slot, "bpf.stack.base.offset32");
+            offset32->setVolatile(true);
+            Value* offset = b.CreateZExt(offset32, Type::getInt64Ty(module.getContext()), "bpf.stack.base.offset");
             Value* address = offset;
             if (arenaControl) {
                 Value* baseSlot = b.CreateStructGEP(arenaControl->getValueType(), arenaControl, ArenaVirtualBase);
                 Value* base = b.CreateLoad(Type::getInt64Ty(module.getContext()), baseSlot, "bpf.arena.base");
                 address = b.CreateAdd(base, offset, "bpf.stack.address");
-                Value* arenaPointer = b.CreateIntToPtr(address, PointerType::get(module.getContext(), ArenaAS), "bpf.stack.arena.pointer");
-                Value* pointer = b.CreateAddrSpaceCast(arenaPointer, SoftwareStackGlobal_->getType(), "bpf.stack.logical.base");
+                // inttoptr, not addrspacecast: the cast would truncate the
+                // full-address value representation, and frame pointers
+                // derived from this base flow into ordinary compares and
+                // stores.
+                Value* pointer = b.CreateIntToPtr(address, SoftwareStackGlobal_->getType(), "bpf.stack.base.pointer");
                 for (Use* use : uses) {
                     use->set(pointer);
                 }
                 continue;
             }
-            Value* pointer = b.CreateIntToPtr(address, SoftwareStackGlobal_->getType(), "bpf.stack.logical.base");
+            // Fixed tier: the bank address is window + offset, the same
+            // full-pointer representation the arena branch produces; the
+            // frozen window read folds at verification and the fast-path
+            // slice/region derivations see through it (IsViewBaseLoad).
+            Value* viewSlot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
+            auto* viewBase = b.CreateLoad(Type::getInt64Ty(module.getContext()), viewSlot, "bpf.view.base");
+            viewBase->setVolatile(true);
+            address = b.CreateAdd(viewBase, offset, "bpf.stack.address");
+            Value* pointer = b.CreateIntToPtr(address, SoftwareStackGlobal_->getType(), "bpf.stack.base.pointer");
             for (Use* use : uses) {
                 use->set(pointer);
             }
@@ -376,7 +431,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         if (it != FunctionIds_.end()) {
             return it->second;
         }
-        if (NextFunctionId_ > UINT32_MAX) {
+        if (NextFunctionId_ >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + 2ull * BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT) {
             report_fatal_error("bpf-memory: function-token range exhausted");
         }
         auto* id = ConstantExpr::getIntToPtr(ConstantInt::get(IntegerType::getInt64Ty(f->getContext()), NextFunctionId_++), f->getType());
@@ -414,6 +469,67 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
     }
 
+    // The displacement span holding managed function tokens and native
+    // function identities, relative to the window base.
+    static bool IsTokenDisplacement(uint64_t value) {
+        return value >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT &&
+            value < BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + 2ull * BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT;
+    }
+
+    // Function tokens and native function ids are compile-time bare
+    // displacements; every pointer-typed use in code becomes window +
+    // displacement, so a function pointer is an ordinary based capsule
+    // pointer. The frozen window read folds at verification. Deliberately
+    // limited to inttoptr-wrapped constants: a plain 64-bit integer in the
+    // displacement range can be legitimate program data (0x100000000 is an
+    // ordinary size constant), and only pointer-typed tokens take part in
+    // pointer identity. Runs after every transform that can introduce token
+    // constants and, on the arena tier, before the init builder (whose
+    // fixup arithmetic keeps raw displacements on purpose).
+    void RebaseTokenConstantsInCode(Module& module) {
+        LLVMContext& ctx = module.getContext();
+        auto* i64 = Type::getInt64Ty(ctx);
+        GlobalVariable* config = ObjectConfig(module);
+        auto tokenConstant = [](Value* v) -> ConstantInt* {
+            auto* ce = dyn_cast<ConstantExpr>(v);
+            if (!ce || ce->getOpcode() != Instruction::IntToPtr) {
+                return nullptr;
+            }
+            auto* ci = dyn_cast<ConstantInt>(ce->getOperand(0));
+            return ci && IsTokenDisplacement(ci->getZExtValue()) ? ci : nullptr;
+        };
+        for (Function& function : module) {
+            if (function.isDeclaration()) {
+                continue;
+            }
+            SmallVector<std::pair<Use*, ConstantInt*>> uses;
+            for (Instruction& inst : instructions(function)) {
+                for (Use& use : inst.operands()) {
+                    if (auto* ci = tokenConstant(use.get())) {
+                        uses.push_back({&use, ci});
+                    }
+                }
+            }
+            if (uses.empty()) {
+                continue;
+            }
+            IRBuilder<> b(EntryPrologueInsertionPoint(function));
+            Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
+            auto* window = b.CreateLoad(i64, slot, "bpf.view.base");
+            window->setVolatile(true);
+            DenseMap<std::pair<uint64_t, Type*>, Value*> pointers;
+            for (auto&& [use, ci] : uses) {
+                uint64_t displacement = ci->getZExtValue();
+                Value*& pointer = pointers[{displacement, use->get()->getType()}];
+                if (!pointer) {
+                    Value* address = b.CreateAdd(window, ConstantInt::get(i64, displacement), "capsule.token");
+                    pointer = b.CreateIntToPtr(address, use->get()->getType(), "capsule.token.ptr");
+                }
+                use->set(pointer);
+            }
+        }
+    }
+
     // Recursively strip GlobalValue references out of an initializer.
     // Function references become their integer id; other global references are
     // zeroed and recorded as (byte offset, pointer constant) runtime fixups,
@@ -427,7 +543,19 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
 
         if (auto* f = dyn_cast<Function>(c->stripPointerCasts())) {
-            return GetFunctionId(f);
+            // The id is a bare displacement; the init program adds the
+            // window base so the slot holds a based function pointer.
+            fixups.emplace_back(offset, GetFunctionId(f));
+            return Constant::getNullValue(c->getType());
+        }
+
+        // A managed function token (stackify already replaced the function
+        // with its displacement constant): same treatment.
+        if (auto* ce = dyn_cast<ConstantExpr>(c); ce && ce->getOpcode() == Instruction::IntToPtr) {
+            if (auto* ci = dyn_cast<ConstantInt>(ce->getOperand(0)); ci && IsTokenDisplacement(ci->getZExtValue())) {
+                fixups.emplace_back(offset, c);
+                return Constant::getNullValue(c->getType());
+            }
         }
 
         const DataLayout& dl = module.getDataLayout();
@@ -477,6 +605,30 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return c;
     }
 
+    // The compiler cannot bake the load-time window base into pointer
+    // initializers, so it bakes bare displacements and lists every such
+    // 8-byte slot here; bpf_capsule_initialize() adds the window to each.
+    // The table is host-only data: nothing in the program references it.
+    void InstallFixupTable(Module& module) {
+        if (FixupSlots_.empty()) {
+            return;
+        }
+        LLVMContext& ctx = module.getContext();
+        auto* i64 = Type::getInt64Ty(ctx);
+        auto* type = ArrayType::get(i64, FixupSlots_.size());
+        SmallVector<Constant*> slots;
+        for (uint64_t slot : FixupSlots_) {
+            slots.push_back(ConstantInt::get(i64, slot));
+        }
+        auto* table =
+            new GlobalVariable(module, type, /*isConstant=*/true, GlobalValue::ExternalLinkage, ConstantArray::get(type, slots), "bpf_capsule_fixups");
+        table->setSection(bpf::sym::FixupSection);
+        table->setAlignment(Align(8));
+        AttachGlobalDebugInfo(module, *table, "bpf_capsule_fixups");
+        appendToCompilerUsed(module, {table});
+        bpf::stats() << "bpf-memory: " << FixupSlots_.size() << " baked-pointer fixup slots\n";
+    }
+
     void AttachGlobalDebugInfo(Module& module, GlobalVariable& g, StringRef name) {
         if (module.debug_compile_units().empty()) {
             return;
@@ -492,6 +644,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     }
 
     void SetMapMaxEntries(Module& module, GlobalVariable& map, unsigned count) {
+        if (module.debug_compile_units().empty()) {
+            report_fatal_error("bpf-memory: overflow map has no BTF compile unit");
+        }
         SmallVector<DIGlobalVariableExpression*> expressions;
         map.getDebugInfo(expressions);
         if (expressions.size() != 1) {
@@ -520,10 +675,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             auto* subrange = db.getOrCreateSubrange(0, count);
             auto* array = db.createArrayType(uint64_t(count) * element->getSizeInBits(), element->getAlignInBits(), element, db.getOrCreateArray({subrange}));
             auto* newPointer = db.createPointerType(array, pointer->getSizeInBits(), pointer->getAlignInBits());
-            members.push_back(db.createMemberType(
-                mapType, member->getName(), member->getFile(), member->getLine(), member->getSizeInBits(), member->getAlignInBits(), member->getOffsetInBits(),
-                member->getFlags(), newPointer
-            ));
+            members.push_back(db.createMemberType(mapType, member->getName(), member->getFile(), member->getLine(), member->getSizeInBits(),
+                member->getAlignInBits(), member->getOffsetInBits(), member->getFlags(), newPointer));
             replaced = true;
         }
         if (!replaced) {
@@ -549,7 +702,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             std::string name = ("heap" + Twine(index)).str();
             auto* region = new GlobalVariable(module, type, /*isConstant=*/false, GlobalValue::ExternalLinkage, ConstantAggregateZero::get(type), name);
             region->setAlignment(Align(8));
-            region->setSection((".bss.heap" + Twine(index)).str());
+            region->setSection((Twine(bpf::sym::BssHeapSectionPrefix) + Twine(index)).str());
             AttachGlobalDebugInfo(module, *region, name);
             Regions_.push_back(region);
         }
@@ -571,13 +724,13 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         auto* pointer = PointerType::get(ctx, 0);
         b.CreateStore(index, key);
         auto* type = FunctionType::get(pointer, {pointer, pointer}, false);
-        Value* helper = ConstantExpr::getIntToPtr(ConstantInt::get(Type::getInt64Ty(ctx), 1), pointer);
+        Value* helper = ConstantExpr::getIntToPtr(ConstantInt::get(Type::getInt64Ty(ctx), BpfMapLookupElemHelperId), pointer);
         return b.CreateCall(type, helper, {HeapArray_, key}, "bpf.heap.array.value");
     }
 
     static bool IsStackAnchor(const CallBase& call) {
         auto* assembly = dyn_cast<InlineAsm>(call.getCalledOperand());
-        return assembly && assembly->getAsmString().contains("bpf_capsule_stack_anchor");
+        return assembly && assembly->getAsmString().contains(bpf::sym::StackAnchor);
     }
 
     // Resolve the current fiber's physical backing region once at the beginning of the
@@ -585,13 +738,13 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     // bounded trampoline and physical step calls; logical stack pointers stay
     // ordinary offsets in the unified address domain.
     void ResolveFixedStackBacking(Module& module) {
-        Function* intrinsic = module.getFunction("__bpf_capsule_stack_region");
+        Function* intrinsic = module.getFunction(bpf::sym::StackRegion);
         if (!intrinsic) {
             return;
         }
-        SmallVector<CallBase*> calls;
+        SmallVector<CallInst*> calls;
         for (User* user : intrinsic->users()) {
-            auto* call = dyn_cast<CallBase>(user);
+            auto* call = dyn_cast<CallInst>(user);
             if (!call || call->getCalledFunction() != intrinsic) {
                 report_fatal_error("bpf-memory: malformed stack-region intrinsic use");
             }
@@ -609,8 +762,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             report_fatal_error("bpf-memory: software stack is not region-aligned fixed memory");
         }
         const uint64_t fiberCount = SoftwareStackBytes_ / FiberStackSize_;
-        if (!HeapArray_) {
-            report_fatal_error("bpf-memory: software stack lies outside fixed memory");
+        if (!HeapArray_ || Regions_.empty()) {
+            report_fatal_error("bpf-memory: fixed software stack has no physical backing");
         }
         GlobalVariable* config = ObjectConfig(module);
         DenseMap<Function*, AllocaInst*> keys;
@@ -622,25 +775,33 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
             auto insertion = function.getEntryBlock().getFirstInsertionPt();
             key = new AllocaInst(i32, 0, nullptr, Align(4), "bpf.stack.region.key", insertion);
-            key->setMetadata("bpf.native.alloca", MDNode::get(ctx, {}));
+            key->setMetadata(bpf::md::NativeAlloca, MDNode::get(ctx, {}));
             return key;
         };
 
-        for (CallBase* call : calls) {
+        for (CallInst* call : calls) {
             if (call->arg_size() != 1 || !call->getArgOperand(0)->getType()->isIntegerTy(32) || !call->getType()->isPointerTy()) {
                 report_fatal_error("bpf-memory: malformed stack-region intrinsic call");
             }
             Function& function = *call->getFunction();
             IRBuilder<> b(call);
             Value* fiber = call->getArgOperand(0);
+            // Resolving the fiber's stack runs on every capsule entry, so it
+            // has to stay a mask and a lookup. Reading the live fiber count
+            // and dividing by it, then switching over every direct region to
+            // see which one holds the stack, cost 165 instructions in the
+            // trampoline (50 -> 215) and 28% of the measured capsule call.
+            // The compile-time ceiling is what bounds the index, and the
+            // stack bank starts above the direct maps, so neither is needed.
             if (isPowerOf2_64(fiberCount)) {
                 fiber = b.CreateAnd(fiber, ConstantInt::get(i32, fiberCount - 1), "stack.fiber");
             } else {
                 fiber = b.CreateURem(fiber, ConstantInt::get(i32, fiberCount), "stack.fiber");
             }
             Value* stackBaseSlot = b.CreateStructGEP(config->getValueType(), config, ConfigStackBase);
-            auto* stackBase = b.CreateLoad(i64, stackBaseSlot, "stack.base");
-            stackBase->setVolatile(true);
+            auto* stackBase32 = b.CreateLoad(i32, stackBaseSlot, "stack.base32");
+            stackBase32->setVolatile(true);
+            Value* stackBase = b.CreateZExt(stackBase32, i64, "stack.base");
             Value* stackAddress = b.CreateAdd(stackBase, b.CreateMul(b.CreateZExt(fiber, i64), ConstantInt::get(i64, FiberStackSize_)), "stack.address");
             Value* region = b.CreateTrunc(b.CreateLShr(stackAddress, ConstantInt::get(i64, HeapShift)), i32, "stack.region");
             Value* arrayIndex = b.CreateSub(region, ConstantInt::get(i32, Regions_.size()), "stack.array.index");
@@ -677,12 +838,16 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         if (isStore) {
             params.push_back(i64);
         }
-        std::string name = (Twine("bpf_stack_") + (isStore ? "store" : "load") + Twine(bits)).str();
+        std::string name = (Twine(bpf::sym::StackAccessorPrefix) + (isStore ? "store" : "load") + Twine(bits)).str();
+        if (module.getFunction(name)) {
+            report_fatal_error(Twine("bpf-memory: reserved compiler accessor already exists: ") + name);
+        }
         auto* func = Function::Create(FunctionType::get(isStore ? i32 : i64, params, false), GlobalValue::ExternalLinkage, name, module);
         func->setCallingConv(CallingConv::C);
         func->addFnAttr(Attribute::NoInline);
+        func->addFnAttr(bpf::cls::StackAccessor);
         func->getArg(0)->setName("stack_base");
-        func->getArg(0)->addAttr(Attribute::get(ctx, "bpf.capsule.stack.backing"));
+        func->getArg(0)->addAttr(Attribute::get(ctx, bpf::md::StackBacking));
         func->getArg(1)->setName("logical_address");
         if (isStore) {
             func->getArg(2)->setName("value");
@@ -699,9 +864,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         b.CreateCondBr(b.CreateICmpNE(func->getArg(0), ConstantPointerNull::get(pointer)), bounds, invalid);
 
         b.SetInsertPoint(bounds);
-        auto* i32Barrier = InlineAsm::get(FunctionType::get(i32, {i32}, false), "", "=r,0", /*hasSideEffects=*/true);
         Value* low = b.CreateAnd(b.CreateTrunc(func->getArg(1), i32), ConstantInt::get(i32, FiberStackSize_ - 1), "stack.offset");
-        low = b.CreateCall(i32Barrier, {low}, "stack.offset.visible");
+        low = bpf::BuildVerifierOpaqueIdentity(b, low, "stack.offset.visible");
         b.CreateCondBr(b.CreateICmpULE(low, ConstantInt::get(i32, FiberStackSize_ - width)), access, invalid);
 
         b.SetInsertPoint(access);
@@ -719,10 +883,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
 
         if (!module.debug_compile_units().empty()) {
             DIBuilder db(module, false, *module.debug_compile_units_begin());
-            auto* byteType = db.createBasicType("unsigned char", 8, dwarf::DW_ATE_unsigned_char);
-            auto* subrange = db.getOrCreateSubrange(0, FiberStackSize_);
-            auto* regionType = db.createArrayType(FiberStackSize_ * 8, 8, byteType, db.getOrCreateArray({subrange}));
-            SmallVector<Metadata*> signature{BtfGetInt(db, isStore ? 32 : 64, isStore), db.createPointerType(regionType, 64), BtfGetInt(db, 64, false)};
+            SmallVector<Metadata*> signature{BtfGetInt(db, isStore ? 32 : 64, isStore), BtfGetByteArrayPointer(db, FiberStackSize_), BtfGetInt(db, 64, false)};
             if (isStore) {
                 signature.push_back(BtfGetInt(db, 64, false));
             }
@@ -733,12 +894,12 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return func;
     }
 
-    // Keep map lookup state out of the hot direct-region accessor. If an
-    // ARRAY path shares that function, register allocation gives every direct
-    // access the helper path's callee-saved registers and native key slot.
-    // Outlining makes ordinary shard hits leaf functions again while escaped
-    // pointers into overflow (including the logical stack tail) retain the
-    // same unified-memory behavior.
+    // Build the cold ARRAY overflow path separately so the common direct-map
+    // route stays readable, then fold it into its sole caller. Physical
+    // verifier partitions add one intentional frame between the dispatcher
+    // and a managed region; spending another frame on this implementation
+    // detail would overflow BPF's eight-frame call limit in borrowed-context
+    // programs. The cold path is small and has exactly one call site.
     Function* CreateHeapArrayAccessor(Module& module, unsigned bits, bool isStore) {
         LLVMContext& ctx = module.getContext();
         auto* i32 = Type::getInt32Ty(ctx);
@@ -748,10 +909,14 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         if (isStore) {
             params.push_back(i64);
         }
-        std::string name = (Twine("bpf_heap_array_") + (isStore ? "store" : "load") + Twine(bits)).str();
+        std::string name = (Twine(bpf::sym::HeapPrefix) + "array_" + (isStore ? "store" : "load") + Twine(bits)).str();
+        if (module.getFunction(name)) {
+            report_fatal_error(Twine("bpf-memory: reserved compiler accessor already exists: ") + name);
+        }
         auto* func = Function::Create(FunctionType::get(isStore ? i32 : i64, params, false), GlobalValue::ExternalLinkage, name, module);
         func->setCallingConv(CallingConv::C);
         func->addFnAttr(Attribute::NoInline);
+        func->addFnAttr(bpf::cls::HeapAccessor);
         func->getArg(0)->setName("offset");
         if (isStore) {
             func->getArg(1)->setName("value");
@@ -767,12 +932,14 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         IRBuilder<> b(entry);
         auto* key = b.CreateAlloca(i32, nullptr, "bpf.heap.array.key");
         key->setAlignment(Align(4));
-        key->setMetadata("bpf.native.alloca", MDNode::get(ctx, {}));
+        key->setMetadata(bpf::md::NativeAlloca, MDNode::get(ctx, {}));
         Value* offset = func->getArg(0);
         Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - 1));
-        auto* barrier = InlineAsm::get(FunctionType::get(i64, {i64}, false), "", "=r,0", /*hasSideEffects=*/true);
-        low = b.CreateCall(barrier, {low}, "bpf.heap.offset.visible");
-        Value* index = b.CreateTrunc(b.CreateLShr(offset, ConstantInt::get(i64, HeapShift)), i32);
+        low = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.heap.offset.visible");
+        // Derive the region index from the low word: capsule pointers carry
+        // the 4 GiB-aligned host view base in the upper half, and 32-bit
+        // truncation recovers the logical address for free.
+        Value* index = b.CreateLShr(b.CreateTrunc(offset, i32), ConstantInt::get(i32, HeapShift));
         Value* afterDirect = b.CreateICmpUGE(index, ConstantInt::get(i32, Regions_.size()));
         Value* beforeEnd = b.CreateICmpULT(index, ConstantInt::get(i32, TotalRegions_));
         b.CreateCondBr(b.CreateAnd(afterDirect, beforeEnd), lookup, invalid);
@@ -864,16 +1031,15 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         if (isStore) {
             params.push_back(i64);
         }
-        std::string name = (Twine("bpf_heap_") + (isStore ? "store" : "load") + Twine(bits)).str();
+        std::string name = (Twine(bpf::sym::HeapPrefix) + (isStore ? "store" : "load") + Twine(bits)).str();
         Function* func = module.getFunction(name);
-        if (!func) {
-            func = Function::Create(FunctionType::get(isStore ? i32 : i64, params, false), GlobalValue::ExternalLinkage, name, module);
-        } else if (!func->isDeclaration()) {
-            report_fatal_error(Twine("bpf-memory: runtime already defines ") + name);
+        if (func) {
+            report_fatal_error(Twine("bpf-memory: reserved compiler accessor already exists: ") + name);
         }
-        func->setLinkage(GlobalValue::ExternalLinkage);
+        func = Function::Create(FunctionType::get(isStore ? i32 : i64, params, false), GlobalValue::ExternalLinkage, name, module);
         func->setCallingConv(CallingConv::C);
         func->addFnAttr(Attribute::NoInline);
+        func->addFnAttr(bpf::cls::HeapAccessor);
         func->getArg(0)->setName("offset");
         if (isStore) {
             func->getArg(1)->setName("value");
@@ -896,22 +1062,28 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         if (directArraySync) {
             key = b.CreateAlloca(i32, nullptr, "bpf.heap.array.key");
             key->setAlignment(Align(4));
-            key->setMetadata("bpf.native.alloca", MDNode::get(ctx, {}));
+            key->setMetadata(bpf::md::NativeAlloca, MDNode::get(ctx, {}));
         }
         Value* offset = func->getArg(0);
         Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - 1));
-        auto* barrier = InlineAsm::get(
-            FunctionType::get(i64, {i64}, false), "", "=r,0",
-            /*hasSideEffects=*/true
-        );
-        low = b.CreateCall(barrier, {low}, "bpf.heap.offset.visible");
-        Value* index = b.CreateTrunc(b.CreateLShr(offset, ConstantInt::get(i64, HeapShift)), i32);
+        low = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.heap.offset.visible");
+        // Derive the region index from the low word: capsule pointers carry
+        // the 4 GiB-aligned host view base in the upper half, and 32-bit
+        // truncation recovers the logical address for free.
+        Value* index = b.CreateLShr(b.CreateTrunc(offset, i32), ConstantInt::get(i32, HeapShift));
         auto* overflow = hasArray ? BasicBlock::Create(ctx, "array", func, invalid) : invalid;
-        auto* route = b.CreateSwitch(index, overflow, Regions_.size());
+        auto* routeBlock = BasicBlock::Create(ctx, "region.route", func, invalid);
+        auto* firstRegion = BasicBlock::Create(ctx, "region.0", func, invalid);
+        b.CreateCondBr(b.CreateICmpEQ(index, ConstantInt::get(i32, 0)), firstRegion, routeBlock);
+
+        IRBuilder<> routeBuilder(routeBlock);
+        auto* route = routeBuilder.CreateSwitch(index, overflow, Regions_.size() - 1);
 
         for (unsigned regionIndex = 0; regionIndex < Regions_.size(); ++regionIndex) {
-            auto* block = BasicBlock::Create(ctx, "region." + Twine(regionIndex), func, invalid);
-            route->addCase(ConstantInt::get(i32, regionIndex), block);
+            auto* block = regionIndex == 0 ? firstRegion : BasicBlock::Create(ctx, "region." + Twine(regionIndex), func, invalid);
+            if (regionIndex != 0) {
+                route->addCase(ConstantInt::get(i32, regionIndex), block);
+            }
             IRBuilder<> rb(block);
             Value* address = rb.CreateGEP(Type::getInt8Ty(ctx), Regions_[regionIndex], {low});
             if (!isStore) {
@@ -968,14 +1140,21 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             rb.CreateRet(ConstantInt::get(i32, 0));
         }
 
+        // Weighting this switch toward the low regions was measured and does
+        // not pay. The lowering does become the skewed tree it should be --
+        // region 1 drops from five branches to three -- but live time did not
+        // move on any port (lua-xdp 63-64us against 62-63, zlib 29.10 against
+        // 29.35, wasm3 and lua inside their spread). The region search is not
+        // where an access spends its time; the call around it is.
+        CallBase* arrayCall = nullptr;
         if (hasArray) {
             IRBuilder<> ab(overflow);
             SmallVector<Value*> arguments{func->getArg(0)};
             if (isStore) {
                 arguments.push_back(func->getArg(1));
             }
-            Value* result = ab.CreateCall(arrayAccessor, arguments);
-            ab.CreateRet(result);
+            arrayCall = ab.CreateCall(arrayAccessor, arguments);
+            ab.CreateRet(arrayCall);
         }
 
         b.SetInsertPoint(invalid);
@@ -989,6 +1168,16 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
             BtfFunctionAddDebugInfo(db, *func, signature);
             db.finalize();
+        }
+        if (arrayCall) {
+            InlineFunctionInfo info;
+            if (!InlineFunction(*arrayCall, info).isSuccess()) {
+                report_fatal_error(Twine("bpf-memory: cannot inline ARRAY overflow path into ") + func->getName());
+            }
+            if (!arrayAccessor->use_empty()) {
+                report_fatal_error(Twine("bpf-memory: ARRAY overflow accessor has unexpected uses: ") + arrayAccessor->getName());
+            }
+            arrayAccessor->eraseFromParent();
         }
         return func;
     }
@@ -1012,6 +1201,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     bool EmitConstant(Module& module, Constant* c, std::vector<uint8_t>& image, uint64_t at, const DenseMap<GlobalVariable*, uint64_t>& offsets) {
         const DataLayout& dl = module.getDataLayout();
         uint64_t size = dl.getTypeAllocSize(c->getType());
+        if (size > UINT64_MAX - at || at + size > std::numeric_limits<size_t>::max()) {
+            report_fatal_error("bpf-memory: initialized image size is not representable");
+        }
         if (at + size > image.size()) {
             image.resize(at + size, 0);
         }
@@ -1055,10 +1247,28 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
             return true;
         }
-        // A pointer-shaped constant: resolve it to the integer it has become.
+        if (auto* function = dyn_cast<Function>(c->stripPointerCasts())) {
+            return EmitConstant(module, GetFunctionId(function), image, at, offsets);
+        }
+        // A pointer-shaped constant: resolve it to the integer it has
+        // become. An absolute address (or a function token) is baked as the
+        // bare window displacement and its slot recorded, so
+        // bpf_capsule_initialize() can add the load-time window base; a
+        // difference of two addresses is base-independent and stays as-is.
         APInt value(64, 0);
-        if (!ResolvePointerConstant(module, c, offsets, value)) {
+        int addressness = 0;
+        if (!ResolvePointerConstant(module, c, offsets, value, addressness)) {
             return false;
+        }
+        uint64_t resolved = value.getZExtValue();
+        bool absolute = addressness == 1 ||
+            (resolved >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT &&
+                resolved < BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + 2ull * BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT);
+        if (absolute) {
+            if (size != 8) {
+                report_fatal_error("bpf-memory: a baked absolute pointer must occupy a full 8-byte slot");
+            }
+            FixupSlots_.push_back(at);
         }
         for (uint64_t i = 0; i < size; i++) {
             image[at + i] = uint8_t(value.extractBitsAsZExtValue(8, i * 8));
@@ -1066,7 +1276,10 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return true;
     }
 
-    bool ResolvePointerConstant(Module& module, Constant* c, const DenseMap<GlobalVariable*, uint64_t>& offsets, APInt& out) {
+    // addressness counts how many absolute capsule addresses the constant
+    // sums to: a moved global contributes +1, a difference of two addresses
+    // is 0 (relative, base-independent), plain integers are 0.
+    bool ResolvePointerConstant(Module& module, Constant* c, const DenseMap<GlobalVariable*, uint64_t>& offsets, APInt& out, int& addressness) {
         if (auto* ci = dyn_cast<ConstantInt>(c)) {
             out = ci->getValue().zextOrTrunc(64);
             return true;
@@ -1077,13 +1290,14 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 return false;
             }
             out = APInt(64, it->second);
+            addressness += 1;
             return true;
         }
         if (auto* ce = dyn_cast<ConstantExpr>(c)) {
             if (ce->getOpcode() == Instruction::IntToPtr || ce->getOpcode() == Instruction::PtrToInt || ce->getOpcode() == Instruction::BitCast ||
                 ce->getOpcode() == Instruction::AddrSpaceCast || ce->getOpcode() == Instruction::Trunc || ce->getOpcode() == Instruction::ZExt ||
                 ce->getOpcode() == Instruction::SExt) {
-                return ResolvePointerConstant(module, ce->getOperand(0), offsets, out);
+                return ResolvePointerConstant(module, ce->getOperand(0), offsets, out, addressness);
             }
             // -O2 rewrites a table of pointers into a table of 32-bit offsets
             // relative to the table itself (the ".rel" globals), so a
@@ -1092,15 +1306,19 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // computable as either address alone.
             if (ce->getOpcode() == Instruction::Sub || ce->getOpcode() == Instruction::Add) {
                 APInt lhs(64, 0), rhs(64, 0);
-                if (!ResolvePointerConstant(module, ce->getOperand(0), offsets, lhs) || !ResolvePointerConstant(module, ce->getOperand(1), offsets, rhs)) {
+                int lhsAddresses = 0;
+                int rhsAddresses = 0;
+                if (!ResolvePointerConstant(module, ce->getOperand(0), offsets, lhs, lhsAddresses) ||
+                    !ResolvePointerConstant(module, ce->getOperand(1), offsets, rhs, rhsAddresses)) {
                     return false;
                 }
                 out = ce->getOpcode() == Instruction::Sub ? lhs - rhs : lhs + rhs;
+                addressness += ce->getOpcode() == Instruction::Sub ? lhsAddresses - rhsAddresses : lhsAddresses + rhsAddresses;
                 return true;
             }
             if (auto* gep = dyn_cast<GEPOperator>(ce)) {
                 APInt base(64, 0);
-                if (!ResolvePointerConstant(module, cast<Constant>(gep->getPointerOperand()), offsets, base)) {
+                if (!ResolvePointerConstant(module, cast<Constant>(gep->getPointerOperand()), offsets, base, addressness)) {
                     return false;
                 }
                 APInt delta(64, 0);
@@ -1118,6 +1336,11 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         LLVMContext& ctx = module.getContext();
         auto* i64 = Type::getInt64Ty(ctx);
         const DataLayout& dl = module.getDataLayout();
+        const unsigned directRegions = FixedDirectHeapRegions;
+        if (!directRegions || directRegions > MaxDirectHeapRegions) {
+            module.getContext().emitError(Twine("bpf-memory: direct-region count must be in [1, ") + Twine(MaxDirectHeapRegions) + "]");
+            return PreservedAnalyses::none();
+        }
 
         // Value-range facts are invisible to the verifier. -O2 infers `range`
         // return attributes, and the backend then proves a region mask
@@ -1172,7 +1395,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         for (auto&& g : module.globals()) {
             if (IsMovableGlobal(g)) {
                 movable.push_back(&g);
-                if (g.getName() == "bpf_call_stack") {
+                if (g.getName() == bpf::sym::CallStack) {
                     SoftwareStackGlobal_ = &g;
                 }
             }
@@ -1187,27 +1410,18 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 if (!g->getInitializer()->isNullValue()) {
                     return 0;
                 }
-                return g->getName() == "bpf_call_stack" ? 2 : 1;
+                return g->getName() == bpf::sym::CallStack ? 2 : 1;
             };
             return rank(a) < rank(b);
         });
 
         const uint64_t span = uint64_t(1) << HeapShift;
-        if (SoftwareStackGlobal_) {
-            SoftwareStackBytes_ = dl.getTypeAllocSize(SoftwareStackGlobal_->getValueType());
-            if (MDNode* metadata = SoftwareStackGlobal_->getMetadata("bpf.fiber.stack.size")) {
-                if (auto* value = mdconst::dyn_extract<ConstantInt>(metadata->getOperand(0))) {
-                    FiberStackSize_ = value->getZExtValue();
-                }
-            }
-            if (!FiberStackSize_ || !isPowerOf2_64(FiberStackSize_) || FiberStackSize_ > span || SoftwareStackBytes_ % FiberStackSize_) {
-                report_fatal_error("bpf-memory: malformed unified fiber stack bank");
-            }
-        }
+        ConfigureSoftwareStack(dl, span, "bpf-memory", /*required=*/false);
 
         // The first page is left unmapped so a null pointer stays a fault.
         // No global is allowed to straddle a region boundary, which lets an
         // access with a known base resolve its region at compile time.
+        const uint64_t addressLimit = 1ull << 32;
         uint64_t cursor = BPF_CAPSULE_ARENA_PAGE_SIZE;
         DenseMap<GlobalVariable*, uint64_t> offsets;
         for (auto* g : movable) {
@@ -1216,34 +1430,59 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
             uint64_t align = std::max<uint64_t>(g->getAlign().valueOrOne().value(), 8);
             uint64_t size = dl.getTypeAllocSize(g->getValueType());
-            cursor = (cursor + align - 1) & ~(align - 1);
-            if (size <= (uint64_t(1) << HeapShift) && (cursor >> HeapShift) != ((cursor + size - 1) >> HeapShift)) {
-                cursor = ((cursor >> HeapShift) + 1) << HeapShift;
+            if (!AlignWithin(cursor, align, addressLimit, cursor)) {
+                module.getContext().emitError(Twine("bpf-memory: cannot align global ") + g->getName() + " within the Capsule address domain");
+                return PreservedAnalyses::none();
+            }
+            if (size > addressLimit - cursor) {
+                module.getContext().emitError(Twine("bpf-memory: global ") + g->getName() + " exceeds the Capsule address domain");
+                return PreservedAnalyses::none();
+            }
+            if (size && size <= span && (cursor >> HeapShift) != ((cursor + size - 1) >> HeapShift)) {
+                if (!AlignWithin(cursor, span, addressLimit, cursor) || size > addressLimit - cursor) {
+                    module.getContext().emitError(Twine("bpf-memory: global ") + g->getName() + " cannot fit in a fixed-memory region");
+                    return PreservedAnalyses::none();
+                }
             }
             // An object larger than a region cannot be made to fit in one.
             // It still works through the accessor, which picks the region per
             // access, but an access into it has no compile-time region, so
             // record it and keep the fast path away.
-            if (size > (uint64_t(1) << HeapShift)) {
+            if (size > span) {
                 Spanning_.push_back({cursor, cursor + size});
             }
             offsets[g] = cursor;
             cursor += size;
         }
-        HeapBase_ = alignTo(cursor, uint64_t(16));
+        if (!AlignWithin(cursor, 16, addressLimit, HeapBase_)) {
+            module.getContext().emitError("bpf-memory: program storage exceeds the Capsule address domain");
+            return PreservedAnalyses::none();
+        }
         // The public heap is one dynamically sized object, not a statically
         // bounded global.  Even when an access still visibly starts at the
         // constant heap base, its offset may select any configured region.
         // Keep it out of the single-region global fast path.
-        Spanning_.push_back({HeapBase_, BPF_CAPSULE_FUNCTION_TOKEN_BASE});
-        if (std::max<uint64_t>(1, (HeapBase_ + span - 1) / span) > MaxHeapRegions) {
-            module.getContext().emitError(
-                "bpf-memory: program storage exceeds the 32-bit Capsule "
-                "address domain"
-            );
+        Spanning_.push_back({HeapBase_, 1ull << 32});
+        TotalRegions_ = MaxHeapRegions;
+
+        // Reject an image which cannot fit the direct, ELF-initialized map
+        // prefix before allocating its byte vector. Without this preflight a
+        // large initialized array could consume gigabytes in the compiler
+        // only to fail the direct-map budget check afterwards.
+        uint64_t initializedEnd = 0;
+        for (GlobalVariable* global : movable) {
+            if (global == SoftwareStackGlobal_ || global->getInitializer()->isNullValue()) {
+                continue;
+            }
+            uint64_t size = dl.getTypeAllocSize(global->getValueType());
+            initializedEnd = std::max(initializedEnd, offsets.lookup(global) + size);
+        }
+        if (initializedEnd > uint64_t(directRegions) * span) {
+            module.getContext().emitError(Twine("bpf-memory: initialized image exceeds the selected ") + Twine(directRegions) +
+                "-region "
+                "direct-map budget; reduce initialized data");
             return PreservedAnalyses::none();
         }
-        TotalRegions_ = MaxHeapRegions;
 
         std::vector<uint8_t> image;
         for (auto* g : movable) {
@@ -1251,12 +1490,10 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 continue;
             }
             if (!EmitConstant(module, g->getInitializer(), image, offsets[g], offsets)) {
-                {
-                    std::string what;
-                    raw_string_ostream os(what);
-                    g->getInitializer()->print(os);
-                    report_fatal_error(Twine("bpf-memory: cannot lay out initializer of ") + g->getName() + ": " + what.substr(0, 300));
-                }
+                std::string what;
+                raw_string_ostream os(what);
+                g->getInitializer()->print(os);
+                report_fatal_error(Twine("bpf-memory: cannot lay out initializer of ") + g->getName() + ": " + what.substr(0, 300));
             }
         }
 
@@ -1267,25 +1504,23 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         // fixed tier, so the compiler always consumes the proven direct-map
         // budget first and uses the ARRAY only for the remaining capacity.
         unsigned imageRegions = unsigned((image.size() + span - 1) / span);
-        if (imageRegions > MaxDirectHeapRegions) {
-            module.getContext().emitError(
-                "bpf-memory: initialized image exceeds the supported 32-region "
-                "direct-map budget; reduce initialized data"
-            );
+        if (imageRegions > directRegions) {
+            module.getContext().emitError(Twine("bpf-memory: initialized image exceeds the selected ") + Twine(directRegions) +
+                "-region "
+                "direct-map budget; reduce initialized data");
             return PreservedAnalyses::none();
         }
-        unsigned directRegions = MaxDirectHeapRegions;
-        HeapArray_ = module.getGlobalVariable("bpf_heap_array", true);
-        if (!HeapArray_ || !HeapArray_->hasSection()) {
+        HeapArray_ = module.getGlobalVariable(bpf::sym::HeapArray, true);
+        if (!HeapArray_ || HeapArray_->isDeclaration() || !HeapArray_->hasInitializer() || HeapArray_->getSection() != bpf::sym::MapsSection) {
             report_fatal_error("bpf-memory: runtime must define bpf_heap_array");
         }
         if (!SoftwareStackGlobal_) {
             report_fatal_error("bpf-memory: runtime has no unified software stack");
         }
-        uint64_t defaultEnd = ConfigureObjectLayout(
-            module, HeapBase_, FiberStackSize_, SoftwareStackBytes_ / FiberStackSize_, /*arenaImagePages=*/0, /*usesArena=*/0, uint64_t(directRegions) * span,
-            span
-        );
+        uint64_t defaultEnd =
+            ConfigureObjectLayout(module, /*heapBase=*/HeapBase_, /*stackBytesPerFiber=*/FiberStackSize_, /*maxFibers=*/SoftwareStackBytes_ / FiberStackSize_,
+                /*arenaImagePages=*/0, /*memoryBackend=*/BPF_CAPSULE_MEMORY_FIXED, /*stackFloor=*/uint64_t(directRegions) * span,
+                /*stackAlignment=*/span);
         unsigned defaultRegions = unsigned((defaultEnd + span - 1) / span);
         unsigned arrayRegions = defaultRegions - directRegions;
         if (!arrayRegions) {
@@ -1303,13 +1538,74 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         // keeps a loader from having to know the memory model exists at all.
         // Regions with nothing in them stay in .bss so the object stays small.
         InstallImage(module, image);
+        InstallFixupTable(module);
 
-        for (auto* g : movable) {
-            if (g == SoftwareStackGlobal_) {
-                continue;
+        // Every moved global's address materializes as window + offset: the
+        // frozen window read folds to the baked constant at verification, so
+        // bounds tracking is unchanged, and the published pointer value is
+        // the host pointer. One window load per function, one add per
+        // (function, global); the fast-path region derivation sees through
+        // both (IsViewBaseLoad).
+        {
+            SmallVector<Constant*> movableConstants;
+            for (auto* g : movable) {
+                if (g != SoftwareStackGlobal_) {
+                    movableConstants.push_back(g);
+                }
             }
-            g->replaceAllUsesWith(ConstantExpr::getIntToPtr(ConstantInt::get(i64, offsets[g]), g->getType()));
-            g->eraseFromParent();
+            SmallPtrSet<GlobalVariable*, 16> movableSet;
+            for (auto* c : movableConstants) {
+                movableSet.insert(cast<GlobalVariable>(c));
+            }
+            removeFromUsedLists(module, [&](Constant* value) { return movableSet.contains(dyn_cast<GlobalVariable>(value->stripPointerCasts())); });
+            // Cross-references between movable initializers are already
+            // baked into the image (with their slots in the fixup table);
+            // sever them so the only remaining uses are instructions.
+            for (auto* g : movableSet) {
+                g->setInitializer(Constant::getNullValue(g->getValueType()));
+            }
+            for (Function& function : module) {
+                if (!function.isDeclaration()) {
+                    convertUsersOfConstantsToInstructions(movableConstants, &function, /*RemoveDeadConstants=*/false);
+                }
+            }
+            GlobalVariable* config = ObjectConfig(module);
+            DenseMap<Function*, Instruction*> windowLoads;
+            auto windowFor = [&](Function* function) -> Instruction* {
+                Instruction*& load = windowLoads[function];
+                if (!load) {
+                    IRBuilder<> b(EntryPrologueInsertionPoint(*function));
+                    Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
+                    auto* viewBase = b.CreateLoad(i64, slot, "bpf.view.base");
+                    viewBase->setVolatile(true);
+                    load = viewBase;
+                }
+                return load;
+            };
+            for (auto* g : movable) {
+                if (g == SoftwareStackGlobal_) {
+                    continue;
+                }
+                g->removeDeadConstantUsers();
+                DenseMap<Function*, SmallVector<Use*>> byFunction;
+                for (Use& use : g->uses()) {
+                    auto* inst = dyn_cast<Instruction>(use.getUser());
+                    if (!inst) {
+                        report_fatal_error(Twine("bpf-memory: unconverted constant use of moved global ") + g->getName());
+                    }
+                    byFunction[inst->getFunction()].push_back(&use);
+                }
+                for (auto&& [function, uses] : byFunction) {
+                    Instruction* window = windowFor(function);
+                    IRBuilder<> b(window->getParent(), std::next(window->getIterator()));
+                    Value* address = b.CreateAdd(window, ConstantInt::get(i64, offsets[g]), g->getName() + ".addr");
+                    Value* pointer = b.CreateIntToPtr(address, g->getType(), g->getName() + ".ptr");
+                    for (Use* use : uses) {
+                        use->set(pointer);
+                    }
+                }
+                g->eraseFromParent();
+            }
         }
 
         ResolveFixedStackBacking(module);
@@ -1337,7 +1633,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // real one, reached through a region select the underlying-object
             // query cannot see past. Routing it would make each accessor call
             // itself, passing a genuine pointer where an offset belongs.
-            if (!func.isDeclaration() && !func.getName().starts_with("bpf_heap_") && !func.getName().starts_with("bpf_stack_")) {
+            if (!func.isDeclaration() && !bpf::HasFunctionClass(func, bpf::cls::HeapAccessor) && !bpf::HasFunctionClass(func, bpf::cls::StackAccessor)) {
                 RouteAccessesThroughHeap(func);
             }
         }
@@ -1352,17 +1648,22 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         for (auto&& func : module) {
             for (auto&& inst : instructions(func)) {
                 auto* call = dyn_cast<CallBase>(&inst);
-                if (call && call->getCalledFunction() && call->getCalledFunction()->getName().starts_with("bpf_heap_")) {
+                if (call && call->getCalledFunction() && bpf::HasFunctionClass(*call->getCalledFunction(), bpf::cls::HeapAccessor)) {
                     calls++;
                 }
             }
         }
         bpf::stats() << "bpf-memory: " << calls << " accesses through the general accessor\n";
 
-        // Nothing to fix up at run time: a pointer is an offset we computed
-        // here, so pointer-valued initializers are already correct in the
-        // image. Satisfy the hook if an older or external runtime declared it.
-        if (Function* init = module.getFunction("__bpf_capsule_init"); init && init->isDeclaration()) {
+        // No in-kernel initializer on this tier: baked pointer slots are
+        // rebased by the HOST (bpf_capsule_initialize applies the
+        // .rodata.bpffix table). Satisfy the hook if an older or external
+        // runtime declared it.
+        if (Function* init = module.getFunction(bpf::sym::InitRoutine)) {
+            auto* expected = FunctionType::get(Type::getInt32Ty(ctx), false);
+            if (!init->isDeclaration() || init->getFunctionType() != expected) {
+                report_fatal_error("bpf-memory: malformed __bpf_capsule_init declaration");
+            }
             init->setLinkage(GlobalValue::InternalLinkage);
             auto* block = BasicBlock::Create(ctx, "", init);
             IRBuilder<> b(block);
@@ -1374,10 +1675,11 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
         }
 
-        // The runtime header defines accessors for every width and memory
-        // representation so arbitrary input IR needs no generated support
-        // source. Small programs normally use only one or two of them, but an
-        // externally-linked unused definition still lands in the BPF .text
+        RebaseTokenConstantsInCode(module);
+
+        // The pass generates accessors for every scalar width before routing
+        // arbitrary input IR. Small programs normally use only one or two of
+        // them, but an externally-linked unused definition still lands in the BPF .text
         // bundle and costs old-verifier/JIT work. Calls are all explicit by
         // this point, so an unused compiler-runtime definition is genuinely
         // unreachable. Iterate because deleting a dead wrapper can make its
@@ -1386,7 +1688,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         for (;;) {
             SmallVector<Function*> dead;
             for (Function& func : module) {
-                if (!func.isDeclaration() && func.use_empty() && func.getName().starts_with("bpf_heap_")) {
+                if (!func.isDeclaration() && func.use_empty() && bpf::HasFunctionClass(func, bpf::cls::HeapAccessor)) {
                     dead.push_back(&func);
                 }
             }
@@ -1414,6 +1716,23 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     // for a frame slot, and the shape C emits for a global array subscript.
     // The layout guarantees no object straddles a region, so the base's region
     // is the access's region.
+    // The window base is the config record's only 64-bit field; a 64-bit
+    // load from the config global can be nothing else. Address tracing
+    // treats it as zero: the window is 4GiB-aligned, so it contributes
+    // nothing to any low-word offset derivation.
+    bool IsViewBaseLoad(Value* v) const {
+        auto* load = dyn_cast<LoadInst>(v);
+        if (!load || !load->getType()->isIntegerTy(64)) {
+            return false;
+        }
+        auto* pointer = load->getPointerOperand();
+        if (auto* gep = dyn_cast<GEPOperator>(pointer)) {
+            pointer = gep->getPointerOperand();
+        }
+        auto* g = dyn_cast<GlobalVariable>(pointer);
+        return g && g->getName() == bpf::sym::Config;
+    }
+
     std::optional<unsigned> TraceRegion(Value* v) {
         for (unsigned hops = 0; hops < 16; hops++) {
             if (auto* gep = dyn_cast<GEPOperator>(v)) {
@@ -1426,6 +1745,16 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 continue;
             }
             if (auto* add = dyn_cast<BinaryOperator>(v); add && add->getOpcode() == Instruction::Add) {
+                // The window base contributes only high bits; the flat
+                // offset is on the other side.
+                if (IsViewBaseLoad(add->getOperand(0))) {
+                    v = add->getOperand(1);
+                    continue;
+                }
+                if (IsViewBaseLoad(add->getOperand(1))) {
+                    v = add->getOperand(0);
+                    continue;
+                }
                 // The constant base is on whichever side is not the index.
                 if (isa<ConstantInt>(add->getOperand(1))) {
                     v = add->getOperand(0);
@@ -1463,6 +1792,42 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     // identity, so follow only SSA arithmetic and PHIs back to an executable
     // call.  Those rare offsets get an explicit verifier-visible range test;
     // ordinary offsets retain the branch-free mask fast path.
+    // An offset that mixes in a constant large enough to look like a pointer
+    // displacement is the case that needs laundering. The verifier keeps a
+    // register's "off" across the arithmetic that turns a pointer back into a
+    // scalar, and adjust_ptr_min_max_vals() rejects an offset register whose
+    // "off" exceeds BPF_MAX_VAR_OFF (2^29). Doom reaches that with an ordinary
+    // angle: ANG90 is 0x40000000, so (angle + ANG90) >> ANGLETOFINESHIFT
+    // carries 2^30 into an array index and the access after it is refused with
+    // "map_value pointer offset 1073741824 is not allowed". A smaller constant
+    // cannot reach the limit, so the guard is not worth emitting for it.
+    bool MixesPointerSizedConstant(Value* root) const {
+        constexpr uint64_t PointerOffsetLimit = uint64_t(1) << 29;
+        SmallVector<Value*, 16> work{root};
+        SmallPtrSet<Value*, 32> seen;
+        while (!work.empty()) {
+            Value* value = work.pop_back_val();
+            if (!seen.insert(value).second) {
+                continue;
+            }
+            if (auto* constant = dyn_cast<ConstantInt>(value)) {
+                if (constant->getValue().getLimitedValue() >= PointerOffsetLimit) {
+                    return true;
+                }
+                continue;
+            }
+            if (isa<LoadInst>(value) || isa<Argument>(value) || isa<AllocaInst>(value) || isa<GlobalValue>(value)) {
+                continue;
+            }
+            if (auto* user = dyn_cast<User>(value)) {
+                for (Value* operand : user->operands()) {
+                    work.push_back(operand);
+                }
+            }
+        }
+        return false;
+    }
+
     bool DependsOnExecutableCall(Value* root) const {
         SmallVector<Value*, 16> work{root};
         SmallPtrSet<Value*, 32> seen;
@@ -1622,22 +1987,32 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         if (!anchor) {
             return promoted;
         }
+        Argument* fiberControl = nullptr;
+        Argument* stackBase = nullptr;
+        for (Argument& argument : func.args()) {
+            if (argument.hasAttribute(bpf::md::Control)) {
+                fiberControl = &argument;
+            }
+            if (argument.hasAttribute(bpf::md::StackBacking)) {
+                stackBase = &argument;
+            }
+        }
+        if (!stackBase || !stackBase->getType()->isPointerTy()) {
+            report_fatal_error(Twine("bpf-memory: physical stack anchor in ") + func.getName() + " has no stack-base argument");
+        }
         uint64_t stackSpan = FiberStackSize_;
         Module& module = *func.getParent();
         MapVector<Value*, SmallVector<SoftwareStackAccess>> groups;
         for (Instruction& inst : instructions(func)) {
-            Value* ptr = nullptr;
-            if (auto* load = dyn_cast<LoadInst>(&inst)) {
-                ptr = load->getPointerOperand();
-            } else if (auto* store = dyn_cast<StoreInst>(&inst)) {
-                ptr = store->getPointerOperand();
-            } else if (auto* rmw = dyn_cast<AtomicRMWInst>(&inst)) {
-                ptr = rmw->getPointerOperand();
-            } else if (auto* cx = dyn_cast<AtomicCmpXchgInst>(&inst)) {
-                ptr = cx->getPointerOperand();
-            }
-            if (!ptr || !IsSoftwareStackAddress(ptr)) {
+            if (!isa<LoadInst, StoreInst, AtomicRMWInst, AtomicCmpXchgInst>(inst)) {
                 continue;
+            }
+            Value* ptr = MemoryPointerOperand(&inst).first;
+            if (!IsSoftwareStackAddress(ptr)) {
+                continue;
+            }
+            if (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst)) {
+                report_fatal_error("bpf-memory: unsupported atomic operation reached the Capsule software stack");
             }
             auto path = DecomposeSoftwareStackAddress(module, ptr);
             if (!path || !isa<Instruction>(path->first)) {
@@ -1659,8 +2034,15 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         // path trades one cold block for verifier scalability. Capture the
         // choice before adding guards so it stays consistent for the whole
         // physical function.
-        constexpr unsigned LargePhysicalStepInstructions = 2048;
-        const bool terminateInvalidStackPath = func.getInstructionCount() >= LargePhysicalStepInstructions;
+        constexpr unsigned LargeAllocationUnitInstructions = 2048;
+        // A flatten unit is deliberately small only while LLVM allocates it.
+        // MachineFlatten later joins thousands of such units into the real
+        // step. Choosing the select form from the temporary instruction count
+        // lets Linux 5.15 retain every impossible invalid-offset state and
+        // re-explore the flattened suffix from each one. The metadata is the
+        // cross-pass size contract: terminate those states before they reach
+        // the joined verifier CFG.
+        const bool terminateInvalidStackPath = func.getMetadata(bpf::md::FlattenUnit) || func.getInstructionCount() >= LargeAllocationUnitInstructions;
         for (auto&& [root, group] : groups) {
             int64_t minimum = std::numeric_limits<int64_t>::max();
             int64_t maximum = std::numeric_limits<int64_t>::min();
@@ -1703,11 +2085,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (minimum) {
                 raw = b.CreateAdd(raw, ConstantInt::getSigned(i64, minimum));
             }
-            auto* barrier = InlineAsm::get(FunctionType::get(i64, {i64}, false), "", "=r,0", /*hasSideEffects=*/true);
-            Value* visible = b.CreateCall(barrier, {raw}, "bpf.stack.offset.visible");
+            Value* visible = bpf::BuildVerifierOpaqueIdentity(b, raw, "bpf.stack.offset.visible");
             Value* low = b.CreateAnd(b.CreateTrunc(visible, i32), ConstantInt::get(i32, stackSpan - 1));
-            auto* lowBarrier = InlineAsm::get(FunctionType::get(i32, {i32}, false), "", "=r,0", /*hasSideEffects=*/true);
-            Value* visibleLow = b.CreateCall(lowBarrier, {low}, "bpf.stack.low.visible");
+            Value* visibleLow = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.stack.low.visible");
             Value* inRange = b.CreateICmpULE(visibleLow, ConstantInt::get(i32, stackSpan - extent));
 
             Value* boundedLow = visibleLow;
@@ -1722,17 +2102,49 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 b.SetInsertPoint(prefix);
                 b.CreateCondBr(inRange, valid, invalid);
 
-                if (!func.getReturnType()->isIntegerTy(32) || anchor->arg_size() < 3) {
-                    report_fatal_error(Twine("bpf-memory: malformed physical stack anchor in ") + func.getName());
+                if (!func.getReturnType()->isIntegerTy(32) || !fiberControl || !fiberControl->getType()->isPointerTy()) {
+                    report_fatal_error(Twine("bpf-memory: physical step in ") + func.getName() + " has no fiber-control argument");
                 }
                 IRBuilder<> ib(invalid);
-                ib.CreateAlignedStore(ConstantInt::get(i64, bpf::ExitWordValue(CAPSULE_ERROR_MEMORY_FAULT)), anchor->getArgOperand(2), Align(8));
-                ib.CreateRet(ConstantInt::get(i32, 0));
+                // Thousands of independently allocated units are flattened
+                // into one physical step. Keep the verifier-terminating exit
+                // local, but share its error publication instead of cloning a
+                // 64-bit constant and store into every unit.
+                if (!StackFault_) {
+                    StackFault_ = Function::Create(
+                        FunctionType::get(i32, {fiberControl->getType()}, false), GlobalValue::InternalLinkage, "__bpf_capsule_stack_fault", module);
+                    StackFault_->setCallingConv(CallingConv::C);
+                    StackFault_->addFnAttr(Attribute::NoInline);
+                    StackFault_->getArg(0)->addAttr(Attribute::get(ctx, bpf::md::Control));
+                    StackFault_->getArg(0)->setName("fiber_control");
+                    BasicBlock* entry = BasicBlock::Create(ctx, "entry", StackFault_);
+                    BasicBlock* publish = BasicBlock::Create(ctx, "publish", StackFault_);
+                    BasicBlock* done = BasicBlock::Create(ctx, "done", StackFault_);
+                    IRBuilder<> fb(entry);
+                    fb.CreateCondBr(
+                        fb.CreateICmpNE(StackFault_->getArg(0), ConstantPointerNull::get(cast<PointerType>(fiberControl->getType()))), publish, done);
+                    fb.SetInsertPoint(publish);
+                    fb.CreateAlignedStore(ConstantInt::get(i64, bpf::OutcomeValue(CAPSULE_ERROR_MEMORY_FAULT)), StackFault_->getArg(0), Align(8));
+                    fb.CreateBr(done);
+                    fb.SetInsertPoint(done);
+                    fb.CreateRet(ConstantInt::get(i32, 0));
+                    if (!module.debug_compile_units().empty()) {
+                        DIBuilder db(module, false, *module.debug_compile_units_begin());
+                        constexpr uint64_t controlBytes = sizeof(struct __bpf_capsule_fiber_control);
+                        BtfFunctionAddDebugInfo(db, *StackFault_, {BtfGetInt(db, 32, true), BtfGetByteArrayPointer(db, controlBytes)});
+                        db.finalize();
+                    }
+                }
+                CallInst* fault = ib.CreateCall(StackFault_, {fiberControl});
+                if (DISubprogram* subprogram = func.getSubprogram()) {
+                    fault->setDebugLoc(DILocation::get(ctx, 0, 0, subprogram));
+                }
+                ib.CreateRet(fault);
                 b.SetInsertPoint(&*valid->getFirstInsertionPt());
             } else {
                 boundedLow = b.CreateSelect(inRange, visibleLow, ConstantInt::get(i32, 0), "bpf.stack.low.bounded");
             }
-            Value* nativeRoot = b.CreateGEP(i8, anchor->getArgOperand(0), {b.CreateZExt(boundedLow, i64)}, "bpf.stack.native");
+            Value* nativeRoot = b.CreateGEP(i8, stackBase, {b.CreateZExt(boundedLow, i64)}, "bpf.stack.native");
 
             for (const SoftwareStackAccess& access : group) {
                 uint64_t displacement = uint64_t(access.Offset - minimum);
@@ -1769,28 +2181,12 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (promoted.contains(&inst)) {
                 continue;
             }
-            Value* ptr = nullptr;
-            if (auto* load = dyn_cast<LoadInst>(&inst)) {
-                ptr = load->getPointerOperand();
-            } else if (auto* store = dyn_cast<StoreInst>(&inst)) {
-                ptr = store->getPointerOperand();
-            } else if (auto* rmw = dyn_cast<AtomicRMWInst>(&inst)) {
-                ptr = rmw->getPointerOperand();
-            } else if (auto* cx = dyn_cast<AtomicCmpXchgInst>(&inst)) {
-                ptr = cx->getPointerOperand();
-            }
-            if (ptr && IsSoftwareStackAddress(ptr) && dominators.dominates(anchor, &inst)) {
+            if (isa<LoadInst, StoreInst, AtomicRMWInst, AtomicCmpXchgInst>(inst) && IsSoftwareStackAddress(MemoryPointerOperand(&inst).first) &&
+                dominators.dominates(anchor, &inst)) {
                 fallback.push_back(&inst);
             }
         }
 
-        Argument* stackBase = nullptr;
-        for (Argument& arg : func.args()) {
-            if (arg.hasAttribute("bpf.capsule.stack.backing")) {
-                stackBase = &arg;
-                break;
-            }
-        }
         if (!fallback.empty() && !stackBase) {
             report_fatal_error(Twine("bpf-memory: cached stack access in ") + func.getName() + " has no stack-base argument");
         }
@@ -1904,11 +2300,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             offset = b.CreateAdd(offset, index);
         }
 
-        auto* barrier = InlineAsm::get(
-            FunctionType::get(i64, {i64}, false), "", "=r,0",
-            /*hasSideEffects=*/true
-        );
-        Value* visible = b.CreateCall(barrier, {offset}, "bpf.global.offset.visible");
+        Value* visible = bpf::BuildVerifierOpaqueIdentity(b, offset, "bpf.global.offset.visible");
         Value* inRange = b.CreateICmpULE(visible, ConstantInt::get(i64, objectSize - accessSize));
         Value* bounded = b.CreateSelect(inRange, visible, ConstantInt::get(i64, 0), "bpf.global.offset.bounded");
         result = b.CreateGEP(Type::getInt8Ty(module.getContext()), global, {bounded});
@@ -1928,6 +2320,38 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return cast<AtomicCmpXchgInst>(inst)->getCompareOperand()->getType();
     }
 
+    std::pair<Value*, unsigned> MemoryPointerOperand(Instruction* inst) {
+        if (auto* load = dyn_cast<LoadInst>(inst)) {
+            return {load->getPointerOperand(), LoadInst::getPointerOperandIndex()};
+        }
+        if (auto* store = dyn_cast<StoreInst>(inst)) {
+            return {store->getPointerOperand(), StoreInst::getPointerOperandIndex()};
+        }
+        if (auto* rmw = dyn_cast<AtomicRMWInst>(inst)) {
+            return {rmw->getPointerOperand(), AtomicRMWInst::getPointerOperandIndex()};
+        }
+        auto* exchange = cast<AtomicCmpXchgInst>(inst);
+        return {exchange->getPointerOperand(), AtomicCmpXchgInst::getPointerOperandIndex()};
+    }
+
+    void ConfigureSoftwareStack(const DataLayout& layout, uint64_t maximumSliceBytes, StringRef pass, bool required) {
+        if (!SoftwareStackGlobal_) {
+            if (required) {
+                report_fatal_error(Twine(pass) + ": runtime has no unified software stack");
+            }
+            return;
+        }
+        SoftwareStackBytes_ = layout.getTypeAllocSize(SoftwareStackGlobal_->getValueType());
+        if (MDNode* metadata = SoftwareStackGlobal_->getMetadata(bpf::md::FiberStackSize)) {
+            if (auto* value = mdconst::dyn_extract<ConstantInt>(metadata->getOperand(0))) {
+                FiberStackSize_ = value->getZExtValue();
+            }
+        }
+        if (!FiberStackSize_ || !isPowerOf2_64(FiberStackSize_) || FiberStackSize_ > maximumSliceBytes || SoftwareStackBytes_ % FiberStackSize_) {
+            report_fatal_error(Twine(pass) + ": malformed unified fiber stack bank");
+        }
+    }
+
     void BoundSectionedGlobalAccess(Instruction* inst, Value* ptr, unsigned ptrIdx, GlobalVariable* global) {
         Module& module = *inst->getModule();
         IRBuilder<> b(inst);
@@ -1943,7 +2367,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         SmallPtrSet<Value*, 8> seen;
         Value* value = ptr;
         while (seen.insert(value).second) {
-            if (auto* instruction = dyn_cast<Instruction>(value); instruction && instruction->getMetadata("bpf.capsule.sectioned.bounded")) {
+            if (auto* instruction = dyn_cast<Instruction>(value); instruction && instruction->getMetadata(bpf::md::SectionedBounded)) {
                 return true;
             }
             if (auto* gep = dyn_cast<GEPOperator>(value)) {
@@ -1971,22 +2395,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
         }
         for (Instruction* inst : work) {
-            unsigned ptrIdx;
-            Value* ptr;
-            if (auto* load = dyn_cast<LoadInst>(inst)) {
-                ptr = load->getPointerOperand();
-                ptrIdx = LoadInst::getPointerOperandIndex();
-            } else if (auto* store = dyn_cast<StoreInst>(inst)) {
-                ptr = store->getPointerOperand();
-                ptrIdx = StoreInst::getPointerOperandIndex();
-            } else if (auto* rmw = dyn_cast<AtomicRMWInst>(inst)) {
-                ptr = rmw->getPointerOperand();
-                ptrIdx = AtomicRMWInst::getPointerOperandIndex();
-            } else {
-                auto* cx = cast<AtomicCmpXchgInst>(inst);
-                ptr = cx->getPointerOperand();
-                ptrIdx = AtomicCmpXchgInst::getPointerOperandIndex();
-            }
+            auto [ptr, ptrIdx] = MemoryPointerOperand(inst);
             auto* global = dyn_cast<GlobalVariable>(getUnderlyingObject(ptr));
             if (!global || !global->hasSection()) {
                 continue;
@@ -1998,18 +2407,20 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
     }
 
-    // The program supplies one accessor per access width; anything wider or
-    // odd (vectors, i128) is left alone and will fail loudly at load time
-    // rather than silently reading the wrong bytes.
+    // The compiler supplies one accessor per scalar access width. A wider or
+    // aggregate access surviving the earlier scalarization pipeline is a
+    // compiler-contract failure; reject it here instead of emitting a raw
+    // scalar-as-pointer access and deferring the explanation to the verifier.
     Function* Accessor(Module& module, Type* type, bool isStore) {
         uint64_t bits = module.getDataLayout().getTypeStoreSizeInBits(type);
-        if (!type->isIntegerTy() && !type->isPointerTy()) {
-            return nullptr;
+        if ((!type->isIntegerTy() && !type->isPointerTy()) || (bits != 8 && bits != 16 && bits != 32 && bits != 64)) {
+            std::string spelling;
+            raw_string_ostream out(spelling);
+            type->print(out);
+            report_fatal_error(Twine("bpf-memory: unsupported virtual ") + (isStore ? "store" : "load") + " type " + out.str() +
+                "; scalarization left an invalid memory access");
         }
-        if (bits != 8 && bits != 16 && bits != 32 && bits != 64) {
-            return nullptr;
-        }
-        std::string name = (isStore ? "bpf_heap_store" : "bpf_heap_load") + std::to_string(bits);
+        std::string name = (Twine(bpf::sym::HeapPrefix) + (isStore ? "store" : "load") + Twine(bits)).str();
         Function* func = module.getFunction(name);
         if (!func || func->isDeclaration()) {
             report_fatal_error(Twine("bpf-memory: the program must define ") + name);
@@ -2040,7 +2451,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 continue; // nothing to ship: leave it zero-filled in .bss
             }
             Regions_[r]->setInitializer(ConstantDataArray::get(ctx, content));
-            Regions_[r]->setSection((".data.heap" + Twine(r)).str());
+            Regions_[r]->setSection((Twine(bpf::sym::DataHeapSectionPrefix) + Twine(r)).str());
             installed++;
         }
         bpf::stats() << "bpf-memory: " << installed << " of " << Regions_.size() << " regions carry initialized data\n";
@@ -2066,22 +2477,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (PromotedStackAccesses_.contains(inst)) {
                 continue;
             }
-            unsigned ptrIdx;
-            Value* ptr;
-            if (auto* load = dyn_cast<LoadInst>(inst)) {
-                ptr = load->getPointerOperand();
-                ptrIdx = LoadInst::getPointerOperandIndex();
-            } else if (auto* store = dyn_cast<StoreInst>(inst)) {
-                ptr = store->getPointerOperand();
-                ptrIdx = StoreInst::getPointerOperandIndex();
-            } else if (auto* rmw = dyn_cast<AtomicRMWInst>(inst)) {
-                ptr = rmw->getPointerOperand();
-                ptrIdx = AtomicRMWInst::getPointerOperandIndex();
-            } else {
-                auto* cx = cast<AtomicCmpXchgInst>(inst);
-                ptr = cx->getPointerOperand();
-                ptrIdx = AtomicCmpXchgInst::getPointerOperandIndex();
-            }
+            auto [ptr, ptrIdx] = MemoryPointerOperand(inst);
 
             Value* base = getUnderlyingObject(ptr);
             if (isa<AllocaInst>(base)) {
@@ -2101,6 +2497,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // getUnderlyingObject().
             if (verifierNative.contains(ptr)) {
                 continue;
+            }
+            if (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst)) {
+                report_fatal_error("bpf-memory: unsupported atomic operation reached Capsule virtual memory");
             }
 
             DebugLoc loc = inst->getDebugLoc();
@@ -2127,7 +2526,23 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // type, while packed binary formats can place fields at offsets
             // aligned only by luck, so the mask quietly cleared offset bits.
             if (std::optional<unsigned> region = TraceRegion(ptr)) {
-                bool callDerivedOffset = DependsOnExecutableCall(ptr);
+                // Whether the offset came through a call is not what decides
+                // this. A register that once held a pointer keeps a non-zero
+                // `off` in the verifier even after arithmetic turns it back
+                // into a scalar, and `adjust_ptr_min_max_vals` sanity-checks
+                // the offset register as well as the pointer, rejecting
+                // anything past BPF_MAX_VAR_OFF. Doom reaches that with an
+                // ordinary angle: ANG90 is 0x40000000, so `(angle + ANG90) >>
+                // ANGLETOFINESHIFT` leaves 2^30 behind and the array access
+                // after it is refused with "map_value pointer offset
+                // 1073741824 is not allowed". The masked value's range is
+                // fine; what the guard really does is hand the address
+                // arithmetic a freshly defined scalar. Tying that to a call
+                // was a proxy that held only while every such offset happened
+                // to cross one -- inlining or repacking the region removes the
+                // call and silently removes the guard with it. A constant
+                // offset needs nothing; anything else gets the guard.
+                bool callDerivedOffset = DependsOnExecutableCall(ptr) || MixesPointerSizedConstant(ptr);
                 // The fixed-map memory model needs the AND to reach the BPF
                 // instruction stream even when LLVM can prove it redundant.
                 // That proof can be stronger than an older verifier's: 5.15,
@@ -2136,11 +2551,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 // Make the input opaque before masking.  The tied empty asm
                 // emits no instruction; its only run-time cost is the AND
                 // that the verifier actually needs to see.
-                auto* barrier = InlineAsm::get(
-                    FunctionType::get(i64, {i64}, false), "", "=r,0",
-                    /*hasSideEffects=*/true
-                );
-                Value* visibleOffset = b.CreateCall(barrier, {offset}, "bpf.map.offset.visible");
+                Value* visibleOffset = bpf::BuildVerifierOpaqueIdentity(b, offset, "bpf.map.offset.visible");
                 // Express the region offset as ALU32, then zero-extend it.
                 // Older verifiers can retain a stale signed 64-bit bound from
                 // arithmetic that produced `offset` even after a 64-bit AND;
@@ -2150,11 +2561,15 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 Value* masked32 = b.CreateAnd(narrowOffset, ConstantInt::get(Type::getInt32Ty(ctx), (1u << HeapShift) - 1));
                 Value* bounded32 = masked32;
                 if (callDerivedOffset) {
-                    auto* maskBarrier =
-                        InlineAsm::get(FunctionType::get(Type::getInt32Ty(ctx), {Type::getInt32Ty(ctx)}, false), "", "=r,0", /*hasSideEffects=*/true);
-                    Value* visibleMasked = b.CreateCall(maskBarrier, {masked32}, "bpf.map.masked.visible");
-                    Value* inRange = b.CreateICmpULT(visibleMasked, ConstantInt::get(Type::getInt32Ty(ctx), 1u << HeapShift));
-                    bounded32 = b.CreateSelect(inRange, visibleMasked, ConstantInt::get(Type::getInt32Ty(ctx), 0), "bpf.map.offset.bounded");
+                    // The empty asm above cannot help here: it emits no
+                    // instruction, so the verifier's view of the register is
+                    // unchanged. The compare and select do emit one, and their
+                    // result is a freshly defined scalar -- which is the point,
+                    // not the range check itself.
+                    auto* i32Ty = Type::getInt32Ty(ctx);
+                    Value* visibleMasked = bpf::BuildVerifierOpaqueIdentity(b, masked32, "bpf.map.masked.visible");
+                    Value* inRange = b.CreateICmpULT(visibleMasked, ConstantInt::get(i32Ty, 1u << HeapShift));
+                    bounded32 = b.CreateSelect(inRange, visibleMasked, ConstantInt::get(i32Ty, 0), "bpf.map.offset.bounded");
                 }
                 Value* masked = b.CreateZExt(bounded32, i64);
                 inst->setOperand(ptrIdx, b.CreateGEP(Type::getInt8Ty(ctx), Regions_[*region], {masked}));
@@ -2164,21 +2579,17 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (auto* load = dyn_cast<LoadInst>(inst)) {
                 Type* type = load->getType();
                 Function* accessor = Accessor(module, type, /*isStore=*/false);
-                if (!accessor) {
-                    continue;
-                }
-                auto* raw = b.CreateCall(accessor, {offset});
-                raw->setDebugLoc(loc);
-                Value* value = type->isPointerTy() ? b.CreateIntToPtr(raw, type) : b.CreateZExtOrTrunc(raw, type);
+                Value* raw = b.CreateCall(accessor, {offset});
+                cast<Instruction>(raw)->setDebugLoc(loc);
+                IRBuilder<> resultBuilder(load);
+                resultBuilder.SetCurrentDebugLocation(loc);
+                Value* value = type->isPointerTy() ? resultBuilder.CreateIntToPtr(raw, type) : resultBuilder.CreateZExtOrTrunc(raw, type);
                 load->replaceAllUsesWith(value);
                 load->eraseFromParent();
             } else if (auto* store = dyn_cast<StoreInst>(inst)) {
                 Value* value = store->getValueOperand();
                 Type* type = value->getType();
                 Function* accessor = Accessor(module, type, /*isStore=*/true);
-                if (!accessor) {
-                    continue;
-                }
                 Value* raw = type->isPointerTy() ? b.CreatePtrToInt(value, i64) : b.CreateZExtOrTrunc(value, i64);
                 b.CreateCall(accessor, {offset, raw})->setDebugLoc(loc);
                 store->eraseFromParent();
@@ -2187,7 +2598,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     }
 
     PreservedAnalyses run(Module& module, ModuleAnalysisManager&) {
-        if (FixedMemoryMode()) {
+        if (FixedMemory_) {
             return runFixedMemory(module);
         }
         LLVMContext& ctx = module.getContext();
@@ -2213,7 +2624,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         std::vector<GlobalVariable*> zeroGlobals;
         for (auto&& g : module.globals()) {
             if (IsMovableGlobal(g)) {
-                if (g.getName() == "bpf_call_stack") {
+                if (g.getName() == bpf::sym::CallStack) {
                     SoftwareStackGlobal_ = &g;
                     continue;
                 }
@@ -2230,16 +2641,30 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
         }
 
+        // `used` retention has served its purpose by this point (the last
+        // globaldce runs before this pass); the bit-preserving inttoptr
+        // replacement below is not a valid used-list member, so moved
+        // globals leave those arrays instead of corrupting them.
+        SmallPtrSet<GlobalVariable*, 16> movableSet(movable.begin(), movable.end());
+        removeFromUsedLists(module, [&](Constant* value) { return movableSet.contains(dyn_cast<GlobalVariable>(value->stripPointerCasts())); });
+
         for (auto* g : movable) {
             if (g->getInitializer()->isNullValue()) {
                 zeroGlobals.push_back(g);
                 continue;
             }
             auto* ng = new GlobalVariable(
-                module, g->getValueType(), g->isConstant(), g->getLinkage(), g->getInitializer(), "", nullptr, GlobalVariable::NotThreadLocal, ArenaAS
-            );
+                module, g->getValueType(), g->isConstant(), g->getLinkage(), g->getInitializer(), "", nullptr, GlobalVariable::NotThreadLocal, ArenaAS);
             ng->setAlignment(g->getAlign());
-            g->replaceAllUsesWith(ConstantExpr::getAddrSpaceCast(ng, g->getType()));
+            // Ordinary-pointer uses must carry the same full relocated
+            // address the backend's lddw materializes, in every context.  An
+            // addrspacecast constant is unreliable for that: the selector
+            // folds it in some positions (full address) and emits the
+            // truncating machine cast in others (low half), splitting one
+            // constant into two 64-bit forms.  The inttoptr(ptrtoint) pair
+            // is bit-preserving by definition and LLVM never folds it into
+            // an addrspacecast across address spaces.
+            g->replaceAllUsesWith(ConstantExpr::getIntToPtr(ConstantExpr::getPtrToInt(ng, Type::getInt64Ty(module.getContext())), g->getType()));
             std::string name = g->getName().str();
             g->eraseFromParent();
             ng->setName(name);
@@ -2247,28 +2672,35 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
 
         const DataLayout& dl = module.getDataLayout();
-        uint64_t virtualSize = 0;
+        const uint64_t addressLimit = 1ull << 32;
+        // Match the fixed-memory address contract: logical page zero never
+        // contains a program object. The arena VMA is constrained to one
+        // low-32-bit window, but its low word may itself be zero (in
+        // particular when the kernel rounds a mapping up to a 4 GiB
+        // boundary). Starting the sparse layout at one page keeps every
+        // object and the public heap distinct from the null pointer for
+        // either libbpf placement of the initialized arena image.
+        uint64_t virtualSize = BPF_CAPSULE_ARENA_PAGE_SIZE;
         ZeroOffsets zeroOffsets;
         for (auto* g : zeroGlobals) {
             uint64_t align = std::max<uint64_t>(g->getAlign().valueOrOne().value(), dl.getABITypeAlign(g->getValueType()).value());
-            virtualSize = (virtualSize + align - 1) & ~(align - 1);
+            if (!AlignWithin(virtualSize, align, addressLimit, virtualSize)) {
+                module.getContext().emitError(Twine("bpf-arena: cannot align sparse global ") + g->getName() + " within the Capsule address domain");
+                return PreservedAnalyses::none();
+            }
             zeroOffsets[g] = virtualSize;
             uint64_t size = dl.getTypeAllocSize(g->getValueType());
+            if (size > addressLimit - virtualSize) {
+                module.getContext().emitError(Twine("bpf-arena: sparse global ") + g->getName() + " exceeds the Capsule address domain");
+                return PreservedAnalyses::none();
+            }
             virtualSize += size;
         }
-        HeapBase_ = alignTo(virtualSize, uint64_t(16));
-        if (!SoftwareStackGlobal_) {
-            report_fatal_error("bpf-arena: runtime has no unified software stack");
+        if (!AlignWithin(virtualSize, 16, addressLimit, HeapBase_)) {
+            module.getContext().emitError("bpf-arena: sparse program storage exceeds the Capsule address domain");
+            return PreservedAnalyses::none();
         }
-        SoftwareStackBytes_ = dl.getTypeAllocSize(SoftwareStackGlobal_->getValueType());
-        if (MDNode* metadata = SoftwareStackGlobal_->getMetadata("bpf.fiber.stack.size")) {
-            if (auto* value = mdconst::dyn_extract<ConstantInt>(metadata->getOperand(0))) {
-                FiberStackSize_ = value->getZExtValue();
-            }
-        }
-        if (!FiberStackSize_ || SoftwareStackBytes_ % FiberStackSize_) {
-            report_fatal_error("bpf-arena: malformed unified fiber stack bank");
-        }
+        ConfigureSoftwareStack(dl, BPF_CAPSULE_MEMORY_REGION_SIZE, "bpf-arena", /*required=*/true);
 
         // Arena-private storage is not a userspace data-map ABI. Keeping its
         // source debug attachment makes bpftool skeletons spell the complete
@@ -2298,30 +2730,49 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         // the sparse allocation share the arena, so conservatively account
         // for alignment regardless of the backend's eventual symbol order.
         uint64_t initializedBytes = 0;
+        constexpr uint64_t MaxArenaBytes = uint64_t(BPF_CAPSULE_MAX_ARENA_PAGES) * BPF_CAPSULE_ARENA_PAGE_SIZE;
         for (GlobalVariable* global : moved) {
             uint64_t align = std::max<uint64_t>(global->getAlign().valueOrOne().value(), dl.getABITypeAlign(global->getValueType()).value());
+            if (align - 1 > MaxArenaBytes - initializedBytes) {
+                module.getContext().emitError("bpf-arena: initialized image exceeds the 32-bit arena capacity");
+                return PreservedAnalyses::none();
+            }
             initializedBytes += align - 1;
-            initializedBytes += dl.getTypeAllocSize(global->getValueType());
+            uint64_t size = dl.getTypeAllocSize(global->getValueType());
+            if (size > MaxArenaBytes - initializedBytes) {
+                module.getContext().emitError("bpf-arena: initialized image exceeds the 32-bit arena capacity");
+                return PreservedAnalyses::none();
+            }
+            initializedBytes += size;
         }
         uint64_t initializedPages = (initializedBytes + BPF_CAPSULE_ARENA_PAGE_SIZE - 1) >> BPF_CAPSULE_ARENA_PAGE_SHIFT;
         constexpr uint64_t MaxArenaPages = BPF_CAPSULE_MAX_ARENA_PAGES;
-        uint64_t defaultEnd = ConfigureObjectLayout(
-            module, HeapBase_, FiberStackSize_, SoftwareStackBytes_ / FiberStackSize_, initializedPages, /*usesArena=*/1,
-            /*stackFloor=*/0, BPF_CAPSULE_ARENA_PAGE_SIZE
-        );
+        // The stack bank's flat offset must be slice-aligned: sp/fp are full
+        // pointer values and the compiler recovers a slice offset by masking
+        // (the published virtual_base is aligned the same way below).
+        uint64_t defaultEnd =
+            ConfigureObjectLayout(module, /*heapBase=*/HeapBase_, /*stackBytesPerFiber=*/FiberStackSize_, /*maxFibers=*/SoftwareStackBytes_ / FiberStackSize_,
+                /*arenaImagePages=*/initializedPages, /*memoryBackend=*/BPF_CAPSULE_MEMORY_ARENA, /*stackFloor=*/0,
+                /*stackAlignment=*/std::max<uint64_t>(BPF_CAPSULE_ARENA_PAGE_SIZE, FiberStackSize_));
         uint64_t virtualPages = (defaultEnd + BPF_CAPSULE_ARENA_PAGE_SIZE - 1) >> BPF_CAPSULE_ARENA_PAGE_SHIFT;
-        if (virtualPages + initializedPages > MaxArenaPages) {
-            module.getContext().emitError(
-                Twine("bpf-arena: default memory needs ") + Twine(virtualPages + initializedPages) + " pages (32-bit arena limit " + Twine(MaxArenaPages) + ")"
-            );
+        // The sparse allocation is over-allocated by one slice so the
+        // published virtual_base can be aligned up to a FiberStackSize_
+        // boundary (the kernel's placement is only page-aligned).
+        uint64_t alignmentSlackPages = BPF_CAPSULE_ARENA_SLICE_SLACK_PAGES(FiberStackSize_);
+        if (virtualPages + initializedPages + alignmentSlackPages > MaxArenaPages) {
+            module.getContext().emitError(Twine("bpf-arena: default memory needs ") + Twine(virtualPages + initializedPages + alignmentSlackPages) +
+                " pages (32-bit arena limit " + Twine(MaxArenaPages) + ")");
             return PreservedAnalyses::none();
         }
-        auto* arena = module.getGlobalVariable("arena", true);
-        if (!arena || !arena->hasSection()) {
+        auto* arena = module.getGlobalVariable(bpf::sym::ArenaMap, true);
+        if (!arena || arena->isDeclaration() || !arena->hasInitializer() || arena->getSection() != bpf::sym::MapsSection) {
             report_fatal_error("bpf-arena: runtime must define arena map");
         }
-        unsigned arenaPages = unsigned(std::max<uint64_t>(1, virtualPages + initializedPages));
+        unsigned arenaPages = unsigned(std::max<uint64_t>(1, virtualPages + initializedPages + alignmentSlackPages));
         SetMapMaxEntries(module, *arena, arenaPages);
+        // Before the init builder: its fixup arithmetic keeps the raw
+        // displacement constants on purpose.
+        RebaseTokenConstantsInCode(module);
         ProduceInitGlobalsFunction(module, fixups, arenaControl, zeroOffsets);
         // Constants retained only by the temporary fixup list can keep their
         // source globals alive. The generated instructions no longer need it.
@@ -2330,30 +2781,19 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         bpf::stats() << "bpf-arena: " << moved.size() << " initialized globals, " << (HeapBase_ >> 20) << " MiB static zero prefix, " << virtualPages
                      << " default sparse pages (heap and active fiber stacks selected before load)\n";
 
-        // A moved global is represented in ordinary program IR as
-        // `addrspacecast (ptr addrspace(1) @global to ptr)`.  LLVM's BPF
-        // selector can fold the outer cast away when that constant is one
-        // side of an equality comparison, while the dynamic side remains the
-        // low-32-bit scalar arena address.  The resulting BPF compares an
-        // arena pointer with its scalar offset and can never find an equal
-        // address (a backwards scan over a moved array exposed this).
-        //
-        // Compare both operands in the arena address space whenever a
-        // non-null equality is anchored by a value whose underlying object
-        // is already arena-typed.  The conversion is injective over the
-        // arena's 32-bit address domain, so eq/ne semantics are unchanged.
-        CanonicalizeArenaPointerComparisons(module);
-
-        // ptrtoint itself emits no BPF instruction, so a subtraction of two
-        // such values can remain PTR_TO_ARENA in the verifier even though the
-        // C result is a scalar pointer difference.  Normalize that exact
-        // operation before later integer arithmetic sees it.  Do not rewrite
-        // arbitrary ptrtoint operations: runtimes such as QuickJS deliberately
-        // preserve the complete pointer bit pattern in tagged integer values.
-        ScalarizePointerDifferences(module);
-
-        // Replace sparse globals only after no later transformation can refer
-        // to their soon-to-be-deleted GlobalVariable objects.
+        // Pointer comparisons need no adjustment: every producer of an
+        // ordinary program pointer carries the same full-user-address
+        // representation.  The published base is the allocator's raw return,
+        // derived pointers are integer arithmetic on it, moved initialized
+        // globals materialize as inttoptr(ptrtoint) around their lddw
+        // relocation, and stores/loads move registers verbatim.  Native BPF
+        // arena semantics, in other words.  Do NOT reintroduce address-space
+        // casts on value paths: arena->ordinary truncates to 32 bits and
+        // ordinary->arena rebuilds the upper half, so a cast on one side of
+        // an equality (the constant side folds!) makes equal addresses
+        // compare unequal — that asymmetry was the QuickJS ident-buffer and
+        // DOOM wad-handle corruption.  Casts are access-path instructions
+        // only.
         MaterializeZeroGlobalUses(module, zeroGlobals, zeroOffsets, arenaControl);
         MaterializeSoftwareStackUses(module, arenaControl);
         LowerHeapIntrinsics(module, arenaControl);
@@ -2362,35 +2802,23 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (func.isDeclaration() || !func.hasSection()) {
                 continue;
             }
-            if (func.getName() == "bpf_capsule_init") {
+            if (func.getName() == bpf::sym::InitProgram) {
                 continue;
             }
             Instruction* first = EntryPrologueInsertionPoint(func);
             IRBuilder<> initBuilder(first);
-            Value* initFailed = nullptr;
-            Value* initStatus = nullptr;
-            if (func.getSection().starts_with("syscall")) {
-                // BPF_PROG_TYPE_SYSCALL is sleepable, so it can retain the
-                // loader-independent allocation fallback.
-                Function* init = module.getFunction("__bpf_capsule_init");
-                initStatus = initBuilder.CreateCall(init);
-                initFailed = initBuilder.CreateICmpNE(initStatus, ConstantInt::get(initStatus->getType(), 0));
-            } else {
-                // bpf_arena_alloc_pages is sleepable-only on kernels where
-                // non-sleepable program types (notably XDP) can otherwise use
-                // an arena. Allocation is already performed by the generated
-                // syscall initializer that bpf_capsule_finish_initialization()
-                // runs after object load. Keep a real arena-map relocation in
-                // this program so the verifier associates the same arena with
-                // it, then fail closed until the initializer publishes ready=2.
-                auto* associate =
-                    InlineAsm::get(FunctionType::get(Type::getVoidTy(module.getContext()), {arena->getType()}, false), "", "r", /*hasSideEffects=*/true);
-                initBuilder.CreateCall(associate, {arena});
-                Value* ready = initBuilder.CreateStructGEP(arenaControl->getValueType(), arenaControl, ArenaReady);
-                Value* state = initBuilder.CreateLoad(Type::getInt32Ty(module.getContext()), ready, "bpf.arena.ready");
-                initFailed = initBuilder.CreateICmpNE(state, ConstantInt::get(Type::getInt32Ty(module.getContext()), 2));
-                initStatus = ConstantInt::getSigned(Type::getInt32Ty(module.getContext()), -11);
-            }
+            // bpf_capsule_initialize() is the one place allocation happens:
+            // every entry — sleepable or not — fails closed until the
+            // generated syscall initializer publishes ready=2; there is no
+            // lazy fallback. Keep a real arena-map relocation in this
+            // program so the verifier associates the same arena with it.
+            auto* associate =
+                InlineAsm::get(FunctionType::get(Type::getVoidTy(module.getContext()), {arena->getType()}, false), "", "r", /*hasSideEffects=*/true);
+            initBuilder.CreateCall(associate, {arena});
+            Value* ready = initBuilder.CreateStructGEP(arenaControl->getValueType(), arenaControl, ArenaReady);
+            Value* state = initBuilder.CreateLoad(Type::getInt32Ty(module.getContext()), ready, "bpf.arena.ready");
+            Value* initFailed = initBuilder.CreateICmpNE(state, ConstantInt::get(Type::getInt32Ty(module.getContext()), 2));
+            Value* initStatus = ConstantInt::getSigned(Type::getInt32Ty(module.getContext()), -EAGAIN);
             Instruction* failTerm = SplitBlockAndInsertIfThen(initFailed, first, false);
             IRBuilder<> failBuilder(failTerm);
             if (func.getReturnType()->isVoidTy()) {
@@ -2422,72 +2850,23 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return PreservedAnalyses::none();
     }
 
-    void CanonicalizeArenaPointerComparisons(Module& module) {
-        LLVMContext& ctx = module.getContext();
-        auto* arenaPtr = PointerType::get(ctx, ArenaAS);
-        SmallVector<ICmpInst*> work;
-
-        auto anchoredInArena = [](Value* value) {
-            Value* base = getUnderlyingObject(value);
-            return base->getType()->isPointerTy() && base->getType()->getPointerAddressSpace() == ArenaAS;
-        };
-        auto mayBeProgramPointer = [](Value* value) {
-            Value* base = getUnderlyingObject(value);
-            if (isa<AllocaInst>(base)) {
-                return false;
-            }
-            if (auto* global = dyn_cast<GlobalVariable>(base)) {
-                return !global->hasSection();
-            }
-            return true;
-        };
-
-        for (Function& func : module) {
-            if (func.isDeclaration()) {
-                continue;
-            }
-            for (Instruction& inst : instructions(func)) {
-                auto* cmp = dyn_cast<ICmpInst>(&inst);
-                if (!cmp || !cmp->isEquality() || !cmp->getOperand(0)->getType()->isPointerTy() ||
-                    cmp->getOperand(0)->getType()->getPointerAddressSpace() != 0 || isa<ConstantPointerNull>(cmp->getOperand(0)) ||
-                    isa<ConstantPointerNull>(cmp->getOperand(1))) {
-                    continue;
-                }
-                if ((anchoredInArena(cmp->getOperand(0)) || anchoredInArena(cmp->getOperand(1))) && mayBeProgramPointer(cmp->getOperand(0)) &&
-                    mayBeProgramPointer(cmp->getOperand(1))) {
-                    work.push_back(cmp);
-                }
-            }
-        }
-
-        for (ICmpInst* cmp : work) {
-            IRBuilder<> b(cmp);
-            Value* lhs = b.CreateAddrSpaceCast(cmp->getOperand(0), arenaPtr);
-            Value* rhs = b.CreateAddrSpaceCast(cmp->getOperand(1), arenaPtr);
-            Value* replacement = b.CreateICmp(cmp->getPredicate(), lhs, rhs, cmp->getName());
-            if (auto* inst = dyn_cast<Instruction>(replacement)) {
-                inst->setDebugLoc(cmp->getDebugLoc());
-            }
-            cmp->replaceAllUsesWith(replacement);
-            cmp->eraseFromParent();
-        }
-    }
-
     using ZeroOffsets = DenseMap<GlobalVariable*, uint64_t>;
 
     Value* DynamicArenaAddress(IRBuilder<>& b, Value* base, uint64_t offset, PointerType* type) {
         auto* i64 = Type::getInt64Ty(b.getContext());
         Value* address = offset ? b.CreateAdd(base, ConstantInt::get(i64, offset), "bpf.arena.address") : base;
-        auto* arenaType = PointerType::get(b.getContext(), ArenaAS);
-        Value* arenaPointer = b.CreateIntToPtr(address, arenaType, "bpf.arena.typed");
         if (type->getAddressSpace() == ArenaAS) {
-            return arenaPointer;
+            auto* arenaType = PointerType::get(b.getContext(), ArenaAS);
+            return b.CreateIntToPtr(address, arenaType, "bpf.arena.typed");
         }
-        // Preserve the source-level address-space-0 type. CastUnsafeAccesses
-        // recognizes this exact arena->ordinary wrapper and unwraps it at a
-        // dereference, leaving one ordinary->arena conversion rather than a
-        // backend-inferred round trip.
-        return b.CreateAddrSpaceCast(arenaPointer, type, "bpf.arena.program.pointer");
+        // Build the ordinary program pointer from the integer directly. An
+        // arena->ordinary address-space cast is NOT bit-preserving (it is the
+        // truncating machine instruction); inttoptr emits nothing and keeps
+        // the full-address representation shared with relocated globals.
+        // CastUnsafeAccesses recognizes the inttoptr wrapper at a dereference
+        // and rebuilds the arena-typed pointer from the same integer for
+        // free.
+        return b.CreateIntToPtr(address, type, "bpf.arena.program.pointer");
     }
 
     bool ReferencesZeroGlobal(Constant* value, const ZeroOffsets& offsets) {
@@ -2518,6 +2897,20 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         if (auto* global = dyn_cast<GlobalVariable>(value)) {
             if (auto found = offsets.find(global); found != offsets.end()) {
                 return DynamicArenaAddress(b, base, found->second, cast<PointerType>(global->getType()));
+            }
+        }
+        // A function token or native function id: window + displacement,
+        // with the window base read from the frozen config.
+        if (auto* ce = dyn_cast<ConstantExpr>(value); ce && ce->getOpcode() == Instruction::IntToPtr) {
+            if (auto* ci = dyn_cast<ConstantInt>(ce->getOperand(0)); ci && IsTokenDisplacement(ci->getZExtValue())) {
+                Module& module = *b.GetInsertBlock()->getModule();
+                GlobalVariable* config = ObjectConfig(module);
+                auto* i64 = Type::getInt64Ty(module.getContext());
+                Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
+                auto* window = b.CreateLoad(i64, slot, "bpf.view.base");
+                window->setVolatile(true);
+                Value* address = b.CreateAdd(window, ConstantInt::get(i64, ci->getZExtValue()), "capsule.token");
+                return b.CreateIntToPtr(address, value->getType(), "capsule.token.ptr");
             }
         }
         if (!ReferencesZeroGlobal(value, offsets)) {
@@ -2600,24 +2993,26 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
     }
 
-    void ProduceInitGlobalsFunction(
-        Module& module, ArrayRef<std::pair<GlobalVariable*, std::pair<uint64_t, Constant*>>> fixups, GlobalVariable* arenaControl,
-        const ZeroOffsets& zeroOffsets
-    ) {
-        std::string name = "__bpf_capsule_init";
+    void ProduceInitGlobalsFunction(Module& module, ArrayRef<std::pair<GlobalVariable*, std::pair<uint64_t, Constant*>>> fixups, GlobalVariable* arenaControl,
+        const ZeroOffsets& zeroOffsets) {
+        std::string name = bpf::sym::InitRoutine.str();
         Function* decl = module.getFunction(name);
         if (decl && !decl->isDeclaration()) {
             report_fatal_error("__bpf_capsule_init already defined");
         }
 
         LLVMContext& ctx = module.getContext();
-        auto* func = Function::Create(FunctionType::get(Type::getInt32Ty(ctx), false), Function::InternalLinkage, name + ".impl", module);
+        auto* initType = FunctionType::get(Type::getInt32Ty(ctx), false);
+        if (decl && decl->getFunctionType() != initType) {
+            report_fatal_error("bpf-arena: malformed __bpf_capsule_init declaration");
+        }
+        auto* func = Function::Create(initType, Function::InternalLinkage, name + ".impl", module);
         func->setCallingConv(CallingConv::C);
         func->addFnAttr(Attribute::NoInline);
         // Late physical spill relocation may use lane zero here. The 0->1->2
         // state transition below excludes every managed entry until this
         // function has returned, so it cannot overlap a fiber-zero step.
-        func->setMetadata("bpf.capsule.init", MDNode::get(ctx, {}));
+        func->setMetadata(bpf::md::Init, MDNode::get(ctx, {}));
 
         auto* block = BasicBlock::Create(ctx, "entry", func);
         auto* claim = BasicBlock::Create(ctx, "claim", func);
@@ -2628,21 +3023,19 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         auto* done = BasicBlock::Create(ctx, "done", func);
         IRBuilder<> b(block);
 
-        auto* arena = module.getGlobalVariable("arena", true);
+        auto* arena = module.getGlobalVariable(bpf::sym::ArenaMap, true);
         if (!arena) {
             report_fatal_error("bpf-arena: runtime must define arena");
         }
         Value* ready = b.CreateStructGEP(arenaControl->getValueType(), arenaControl, ArenaReady);
         Value* virtualBase = b.CreateStructGEP(arenaControl->getValueType(), arenaControl, ArenaVirtualBase);
         auto* readyType = Type::getInt32Ty(ctx);
-        auto* allocPages = module.getFunction("bpf_arena_alloc_pages");
+        auto* ptr = PointerType::get(ctx, 0);
+        auto* arenaPtr = PointerType::get(ctx, ArenaAS);
+        auto* allocType = FunctionType::get(arenaPtr, {ptr, arenaPtr, Type::getInt32Ty(ctx), Type::getInt32Ty(ctx), Type::getInt64Ty(ctx)}, false);
+        auto* allocPages = module.getFunction(bpf::sym::ArenaAllocPages);
         if (!allocPages) {
-            auto* ptr = PointerType::get(ctx, 0);
-            auto* arenaPtr = PointerType::get(ctx, ArenaAS);
-            allocPages = Function::Create(
-                FunctionType::get(arenaPtr, {ptr, arenaPtr, Type::getInt32Ty(ctx), Type::getInt32Ty(ctx), Type::getInt64Ty(ctx)}, false),
-                Function::ExternalLinkage, "bpf_arena_alloc_pages", module
-            );
+            allocPages = Function::Create(allocType, Function::ExternalLinkage, bpf::sym::ArenaAllocPages, module);
             allocPages->setCallingConv(CallingConv::C);
             allocPages->setSection(".ksyms");
             if (!module.debug_compile_units().empty()) {
@@ -2650,25 +3043,29 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 auto* voidType = db.createUnspecifiedType("void");
                 auto* pointerType = db.createPointerType(voidType, 64);
                 BtfFunctionAddDebugInfo(
-                    db, *allocPages, {pointerType, pointerType, pointerType, BtfGetInt(db, 32, false), BtfGetInt(db, 32, true), BtfGetInt(db, 64, false)}
-                );
+                    db, *allocPages, {pointerType, pointerType, pointerType, BtfGetInt(db, 32, false), BtfGetInt(db, 32, true), BtfGetInt(db, 64, false)});
                 db.finalize();
             }
+        } else if (!allocPages->isDeclaration() || allocPages->getFunctionType() != allocType || allocPages->getSection() != ".ksyms") {
+            report_fatal_error("bpf-arena: malformed bpf_arena_alloc_pages declaration");
         }
-        Value* isReady = b.CreateICmpEQ(b.CreateLoad(readyType, ready), ConstantInt::get(readyType, 2));
+        // This is both the ready-state read and the acquire half of the
+        // initializer's publication protocol. Pointer fixups and
+        // virtual_base are written before the release xchg to state 2; an
+        // ordinary load here would let another CPU observe 2 while still
+        // seeing stale initialized storage.
+        Value* published = b.CreateAtomicRMW(AtomicRMWInst::Add, ready, ConstantInt::get(readyType, 0), Align(4), AtomicOrdering::SequentiallyConsistent);
+        Value* isReady = b.CreateICmpEQ(published, ConstantInt::get(readyType, 2));
         b.CreateCondBr(isReady, done, claim);
 
         // Loading an arena object and entering two programs concurrently used
         // to let both allocate a different sparse span and overwrite the
-        // shared base. Elect exactly one initializer. A concurrent fallback
-        // entry returns -EAGAIN. Applications normally perform this transition
-        // explicitly with bpf_capsule_finish_initialization(), before exposing
-        // any application entry.
+        // shared base. Elect exactly one initializer. A concurrent initializer
+        // returns -EAGAIN. Applications perform this transition explicitly
+        // with bpf_capsule_initialize(), before exposing any application entry.
         b.SetInsertPoint(claim);
-        auto* claimed = b.CreateAtomicCmpXchg(
-            ready, ConstantInt::get(readyType, 0), ConstantInt::get(readyType, 1), Align(4), AtomicOrdering::SequentiallyConsistent,
-            AtomicOrdering::SequentiallyConsistent
-        );
+        auto* claimed = b.CreateAtomicCmpXchg(ready, ConstantInt::get(readyType, 0), ConstantInt::get(readyType, 1), Align(4),
+            AtomicOrdering::SequentiallyConsistent, AtomicOrdering::SequentiallyConsistent);
         claimed->setWeak(false);
         Value* won = b.CreateExtractValue(claimed, 1, "bpf.arena.init.won");
         Value* previous = b.CreateExtractValue(claimed, 0, "bpf.arena.init.previous");
@@ -2682,49 +3079,68 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         b.SetInsertPoint(allocate);
         GlobalVariable* config = ObjectConfig(module);
         Value* memoryEndSlot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryEnd);
-        auto* memoryEnd = b.CreateLoad(Type::getInt64Ty(ctx), memoryEndSlot, "bpf.memory.end");
-        memoryEnd->setVolatile(true);
-        Value* selectedPages = b.CreateLShr(
-            b.CreateAdd(memoryEnd, ConstantInt::get(Type::getInt64Ty(ctx), BPF_CAPSULE_ARENA_PAGE_SIZE - 1)),
-            ConstantInt::get(Type::getInt64Ty(ctx), BPF_CAPSULE_ARENA_PAGE_SHIFT), "bpf.arena.selected.pages"
-        );
+        auto* memoryEnd32 = b.CreateLoad(Type::getInt32Ty(ctx), memoryEndSlot, "bpf.memory.end32");
+        memoryEnd32->setVolatile(true);
+        Value* memoryEnd = b.CreateZExt(memoryEnd32, Type::getInt64Ty(ctx), "bpf.memory.end");
+        Value* selectedPages = b.CreateLShr(b.CreateAdd(memoryEnd, ConstantInt::get(Type::getInt64Ty(ctx), BPF_CAPSULE_ARENA_PAGE_SIZE - 1)),
+            ConstantInt::get(Type::getInt64Ty(ctx), BPF_CAPSULE_ARENA_PAGE_SHIFT), "bpf.arena.selected.pages");
+        // One slice of slack lets the published base align up to a
+        // FiberStackSize_ boundary below.
+        uint64_t sliceSlackPages = BPF_CAPSULE_ARENA_SLICE_SLACK_PAGES(FiberStackSize_);
+        if (sliceSlackPages) {
+            selectedPages = b.CreateAdd(selectedPages, ConstantInt::get(Type::getInt64Ty(ctx), sliceSlackPages), "bpf.arena.padded.pages");
+        }
         Value* pages = b.CreateTrunc(selectedPages, Type::getInt32Ty(ctx));
-        Value* allocation = b.CreateCall(
-            allocPages,
+        Value* allocation = b.CreateCall(allocPages,
             {
                 arena,
                 ConstantPointerNull::get(PointerType::get(ctx, ArenaAS)),
                 pages,
                 ConstantInt::getSigned(Type::getInt32Ty(ctx), -1),
                 ConstantInt::get(Type::getInt64Ty(ctx), 0),
-            }
-        );
+            });
         Value* allocated = b.CreateICmpNE(allocation, Constant::getNullValue(allocation->getType()));
         b.CreateCondBr(allocated, initialize, failed);
 
         b.SetInsertPoint(initialize);
-        // Convert the returned arena pointer to the low scalar address used
-        // by ordinary program pointers. Address-space casts restore the arena
-        // high bits at each memory access.
-        Value* allocationScalar =
-            b.CreatePtrToInt(b.CreateAddrSpaceCast(allocation, PointerType::get(ctx, 0), "bpf.arena.low.pointer"), Type::getInt64Ty(ctx), "bpf.arena.low");
+        // Publish the allocation as the full user virtual address, aligned
+        // up to a FiberStackSize_ boundary (the over-allocation above pays
+        // for the skipped prefix): the stack-slice mask in stackify is
+        // exact only from an aligned base. Reading the pointer register as
+        // an integer emits no cast; an address-space cast here would be the
+        // truncating machine instruction and would put every derived
+        // pointer in a different 64-bit form than lddw-relocated
+        // initialized globals, making equal addresses compare unequal. One
+        // representation, native semantics: the JIT only reads the low 32
+        // bits at accesses, and userspace can dereference published
+        // pointers verbatim.
+        Value* allocationScalar = b.CreatePtrToInt(allocation, Type::getInt64Ty(ctx), "bpf.arena.base.word");
+        if (sliceSlackPages) {
+            allocationScalar = b.CreateAnd(b.CreateAdd(allocationScalar, ConstantInt::get(Type::getInt64Ty(ctx), FiberStackSize_ - 1)),
+                ConstantInt::get(Type::getInt64Ty(ctx), ~(FiberStackSize_ - 1)), "bpf.arena.base.aligned");
+        }
         b.CreateStore(allocationScalar, virtualBase);
         for (auto&& [g, fix] : fixups) {
             auto&& [offset, value] = fix;
             auto* slot = b.CreatePtrAdd(g, ConstantInt::get(Type::getInt64Ty(ctx), offset));
-            b.CreateStore(MaterializeZeroConstant(b, value, allocationScalar, zeroOffsets), slot);
+            auto* store = b.CreateStore(MaterializeZeroConstant(b, value, allocationScalar, zeroOffsets), slot);
+            // A pointer initializer can live in a packed aggregate. The
+            // aggregate byte offset, not the pointer's natural ABI alignment,
+            // is the store contract. Preserve the strongest alignment the
+            // global base and this offset actually guarantee.
+            store->setAlignment(commonAlignment(g->getAlign().valueOrOne(), offset));
         }
         b.CreateAtomicRMW(AtomicRMWInst::Xchg, ready, ConstantInt::get(readyType, 2), Align(4), AtomicOrdering::SequentiallyConsistent);
         b.CreateBr(done);
 
         b.SetInsertPoint(busy);
-        b.CreateRet(ConstantInt::getSigned(Type::getInt32Ty(ctx), -11));
+        b.CreateRet(ConstantInt::getSigned(Type::getInt32Ty(ctx), -EAGAIN));
 
         b.SetInsertPoint(failed);
         // Allocation failures are retryable. Publish the failure only through
         // this invocation's return value and leave the object uninitialized.
         b.CreateAtomicRMW(AtomicRMWInst::Xchg, ready, ConstantInt::get(readyType, 0), Align(4), AtomicOrdering::SequentiallyConsistent);
-        b.CreateRet(ConstantInt::getSigned(Type::getInt32Ty(ctx), -12));
+        b.CreateRet(ConstantInt::getSigned(Type::getInt32Ty(ctx), -ENOMEM));
 
         b.SetInsertPoint(done);
         b.CreateRet(ConstantInt::get(Type::getInt32Ty(ctx), 0));
@@ -2743,12 +3159,12 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
 
         // libbpf has no global-constructor hook for an arena object. Expose a
         // tiny test-run program so the host wrapper can complete allocation
-        // and pointer fixups before returning the loaded object. Entry
-        // prologues retain the same call as a stock-loader fallback.
-        if (module.getFunction("bpf_capsule_init")) {
+        // and pointer fixups before returning the loaded object. Application
+        // entry prologues fail closed until this program publishes readiness.
+        if (module.getFunction(bpf::sym::InitProgram)) {
             report_fatal_error("bpf_capsule_init already defined");
         }
-        auto* entry = Function::Create(FunctionType::get(Type::getInt32Ty(ctx), false), Function::ExternalLinkage, "bpf_capsule_init", module);
+        auto* entry = Function::Create(FunctionType::get(Type::getInt32Ty(ctx), false), Function::ExternalLinkage, bpf::sym::InitProgram, module);
         entry->setCallingConv(CallingConv::C);
         entry->setSection("syscall");
         entry->addFnAttr(Attribute::NoInline);
@@ -2759,77 +3175,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             DIBuilder debugBuilder(module, false, *module.debug_compile_units_begin());
             BtfFunctionAddDebugInfo(debugBuilder, *entry, {BtfGetInt(debugBuilder, 32, true)});
             debugBuilder.finalize();
-        }
-    }
-
-    void ScalarizePointerDifferences(Module& module) {
-        LLVMContext& ctx = module.getContext();
-        auto* arenaPtr = PointerType::get(ctx, ArenaAS);
-        SmallVector<BinaryOperator*> work;
-
-        // ptrtoint may be either an instruction (the dynamic operand) or a
-        // ConstantExpr (typically the address of a moved global).  Treat both
-        // uniformly: requiring PtrToIntInst on both sides missed ordinary
-        // expressions such as `dynamic_ptr - global_array`.
-        auto pointerOperand = [](Value* value) -> Value* {
-            auto* op = dyn_cast<Operator>(value);
-            return op && op->getOpcode() == Instruction::PtrToInt ? op->getOperand(0) : nullptr;
-        };
-
-        for (Function& func : module) {
-            if (func.isDeclaration()) {
-                continue;
-            }
-            for (Instruction& inst : instructions(func)) {
-                auto* sub = dyn_cast<BinaryOperator>(&inst);
-                if (!sub || sub->getOpcode() != Instruction::Sub) {
-                    continue;
-                }
-                Value* lhs = pointerOperand(sub->getOperand(0));
-                Value* rhs = pointerOperand(sub->getOperand(1));
-                if (!lhs || !rhs || cast<PointerType>(lhs->getType())->getAddressSpace() == ArenaAS ||
-                    cast<PointerType>(rhs->getType())->getAddressSpace() == ArenaAS) {
-                    continue;
-                }
-
-                auto isArenaProgramPointer = [](Value* pointer) {
-                    Value* base = getUnderlyingObject(pointer);
-                    if (isa<AllocaInst>(base)) {
-                        return false;
-                    }
-                    auto* global = dyn_cast<GlobalVariable>(base);
-                    return !global || !global->hasSection();
-                };
-                if (!isArenaProgramPointer(lhs) || !isArenaProgramPointer(rhs)) {
-                    continue;
-                }
-                work.push_back(sub);
-            }
-        }
-
-        for (BinaryOperator* sub : work) {
-            Value* lhs = pointerOperand(sub->getOperand(0));
-            Value* rhs = pointerOperand(sub->getOperand(1));
-            IRBuilder<> b(sub);
-            Value* lhsScalar = b.CreatePtrToInt(b.CreateAddrSpaceCast(lhs, arenaPtr), sub->getType());
-            Value* rhsScalar = b.CreatePtrToInt(b.CreateAddrSpaceCast(rhs, arenaPtr), sub->getType());
-            // An addrspacecast may reconstruct the kernel's high arena bits.
-            // The BPF backend does not always reconstruct both operands
-            // symmetrically, so subtract their unsigned low-32 addresses as
-            // i64 scalars. The arena cannot cross a 32-bit boundary; this
-            // therefore preserves both forward differences above 2 GiB and
-            // negative backward differences without a modulo/sign ambiguity.
-            auto* i32 = Type::getInt32Ty(ctx);
-            Value* lhsLow = b.CreateZExt(b.CreateTrunc(lhsScalar, i32), Type::getInt64Ty(ctx));
-            Value* rhsLow = b.CreateZExt(b.CreateTrunc(rhsScalar, i32), Type::getInt64Ty(ctx));
-            Value* rawDifference = b.CreateSub(lhsLow, rhsLow, sub->getName() + ".raw");
-            Value* replacement =
-                sub->getType() == i32 ? b.CreateTrunc(rawDifference, i32, sub->getName()) : b.CreateSExtOrTrunc(rawDifference, sub->getType(), sub->getName());
-            if (auto* inst = dyn_cast<Instruction>(replacement)) {
-                inst->setDebugLoc(sub->getDebugLoc());
-            }
-            sub->replaceAllUsesWith(replacement);
-            sub->eraseFromParent();
         }
     }
 
@@ -2859,17 +3204,56 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             return true;
         };
 
-        // Cast a shared address expression once per basic block, then rebuild
-        // its GEP suffix in the arena address space.  Casting the final pointer
+        // Rebuild access chains in the arena address space so each access
+        // compiles to bare reg+offset addressing.  Casting the final pointer
         // independently at every access is semantically correct, but the ARM64
-        // BPF JIT expands each cast into arena-base reconstruction.  A common
-        // three-byte codec copy consequently paid that sequence six times per
-        // iteration.  Only do this inside an actual native loop and when at
-        // least two accesses share a root: rebuilding an acyclic or one-use
-        // GEP duplicates static code without enough runtime amortization.
-        // Stopping at PHIs/selects keeps the rewrite local and dominance-
-        // trivial; the cast still applies the arena's required low-32-bit
-        // canonicalization once before any derived address is dereferenced.
+        // BPF JIT expands each cast into arena-base reconstruction.  Roots the
+        // rewrite can resolve (wrappers, constants, arena-typed values) share
+        // one licensed alias per function; loop-shared roots of unknown
+        // provenance are cast once per block; only isolated unknown pointers
+        // pay the per-access fallback cast.  Stopping at PHIs/selects keeps
+        // the rewrite local and dominance-trivial.
+        //
+        // One licensed arena alias per root per function.  The verifier's
+        // permission to dereference arena memory (PTR_TO_ARENA) is granted
+        // only by a real address-space cast instruction and then propagates
+        // through pointer arithmetic and spills.  Emitting that cast once,
+        // immediately after the root's definition (or at function entry for
+        // constant roots), lets every derived access compile to bare
+        // reg+offset addressing with no per-access cast — and, unlike the
+        // historical design, without ever leaking the cast's truncated value
+        // form into program-visible pointers: the alias exists purely on the
+        // access path.
+        // Direction matters for cost, not for permission: both machine cast
+        // directions grant PTR_TO_ARENA, but ordinary->arena reconstructs the
+        // user address (five JIT instructions) while arena->ordinary is one
+        // zero-extending move.  Route the raw bits into the arena space for
+        // free and take the cheap licensing cast; the truncated low-word
+        // result addresses identically (the JIT only reads the low half) and
+        // never reaches program-visible pointers.
+        DenseMap<Value*, Value*> licensedRoots;
+        auto licensedRoot = [&](Value* root, const Twine& name) -> Value* {
+            Value*& slot = licensedRoots[root];
+            if (slot) {
+                return slot;
+            }
+            BasicBlock::iterator insertion;
+            DebugLoc loc;
+            if (auto* inst = dyn_cast<Instruction>(root)) {
+                insertion = std::next(inst->getIterator());
+                loc = inst->getDebugLoc();
+            } else {
+                insertion = func.getEntryBlock().getFirstInsertionPt();
+            }
+            IRBuilder<> rb(insertion->getParent(), insertion);
+            Value* word = rb.CreatePtrToInt(root, Type::getInt64Ty(ctx), name + ".word");
+            Value* arena = rb.CreateIntToPtr(word, ptrAs1, name + ".span");
+            auto* cast = CastInst::Create(Instruction::AddrSpaceCast, arena, PointerType::get(ctx, 0), name, insertion);
+            cast->setDebugLoc(loc);
+            slot = cast;
+            return cast;
+        };
+
         DenseMap<BasicBlock*, DenseMap<Value*, Value*>> arenaByBlock;
         auto arenaPointer = [&](auto&& self, Value* ptr, Instruction* before) -> Value* {
             if (ptr->getType()->getPointerAddressSpace() == ArenaAS) {
@@ -2884,17 +3268,48 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             Value* converted = nullptr;
             if (auto* cast = dyn_cast<AddrSpaceCastOperator>(ptr); cast && cast->getPointerOperand()->getType()->getPointerAddressSpace() == ArenaAS) {
                 converted = cast->getPointerOperand();
-            } else if (auto* gep = dyn_cast<GetElementPtrInst>(ptr)) {
+            } else if (auto* op = dyn_cast<Operator>(ptr); op && op->getOpcode() == Instruction::IntToPtr) {
+                // The full-address program-pointer wrapper (and any pointer
+                // manufactured from an integer): all accesses share the
+                // root's one licensed alias.  A bare inttoptr rebuild would
+                // be cheaper still but is verifier-unsound: it carries no
+                // license, and whether the access verifies would depend on
+                // accidental dataflow (a register-allocator spill of the
+                // pre-license integer surfaces as an unlicensed scalar).
+                converted = licensedRoot(ptr, ptr->getName() + ".arena");
+            } else if (auto* gep = dyn_cast<GEPOperator>(ptr)) {
+                // GEPOperator covers constant-expression GEPs too: a moved
+                // global's address wrapper composed with constant offsets
+                // must be rebuilt as instructions for the same reason as the
+                // inttoptr case above.
                 Value* base = self(self, gep->getPointerOperand(), before);
                 SmallVector<Value*, 4> indices(gep->idx_begin(), gep->idx_end());
                 auto* rebuilt = GetElementPtrInst::Create(gep->getSourceElementType(), base, indices, gep->getName() + ".arena", before->getIterator());
                 rebuilt->setNoWrapFlags(gep->getNoWrapFlags());
-                rebuilt->setDebugLoc(gep->getDebugLoc());
+                if (auto* inst = dyn_cast<Instruction>(ptr)) {
+                    rebuilt->setDebugLoc(inst->getDebugLoc());
+                } else {
+                    rebuilt->setDebugLoc(before->getDebugLoc());
+                }
                 converted = rebuilt;
+            } else if (isa<Constant>(ptr)) {
+                // Any other constant: a folded constant expression as the
+                // access pointer would reach the verifier as an unlicensed
+                // scalar lddw, so it too takes one licensed alias at entry.
+                converted = licensedRoot(ptr, ptr->getName() + ".arena");
             } else {
-                converted = b.CreateAddrSpaceCast(ptr, ptrAs1, ptr->getName() + ".arena");
-                if (auto* cast = dyn_cast<Instruction>(converted)) {
-                    cast->setDebugLoc(before->getDebugLoc());
+                // Unknown provenance (loaded pointer, PHI, call result): pay
+                // the licensing cast at this use.  Same cheap form as the
+                // roots — raw bits into the arena space, one zero-extending
+                // licensing move — instead of the historical
+                // user-address-reconstructing cast pair.
+                Value* word = b.CreatePtrToInt(ptr, Type::getInt64Ty(ctx), ptr->getName() + ".word");
+                Value* span = b.CreateIntToPtr(word, ptrAs1, ptr->getName() + ".span");
+                converted = b.CreateAddrSpaceCast(span, PointerType::get(ctx, 0), ptr->getName() + ".arena");
+                for (Value* value : {word, span, converted}) {
+                    if (auto* inst = dyn_cast<Instruction>(value)) {
+                        inst->setDebugLoc(before->getDebugLoc());
+                    }
                 }
             }
             cache[ptr] = converted;
@@ -2908,46 +3323,83 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
         }
 
-        auto pointerOperand = [](Instruction* inst) {
-            if (auto* load = dyn_cast<LoadInst>(inst)) {
-                return std::pair<Value*, unsigned>{load->getPointerOperand(), LoadInst::getPointerOperandIndex()};
-            }
-            if (auto* store = dyn_cast<StoreInst>(inst)) {
-                return std::pair<Value*, unsigned>{store->getPointerOperand(), StoreInst::getPointerOperandIndex()};
-            }
-            if (auto* rmw = dyn_cast<AtomicRMWInst>(inst)) {
-                return std::pair<Value*, unsigned>{rmw->getPointerOperand(), AtomicRMWInst::getPointerOperandIndex()};
-            }
-            auto* cx = cast<AtomicCmpXchgInst>(inst);
-            return std::pair<Value*, unsigned>{cx->getPointerOperand(), AtomicCmpXchgInst::getPointerOperandIndex()};
-        };
         auto addressRoot = [](Value* ptr) {
-            while (auto* gep = dyn_cast<GetElementPtrInst>(ptr)) {
+            while (auto* gep = dyn_cast<GEPOperator>(ptr)) {
                 ptr = gep->getPointerOperand();
             }
             return ptr;
         };
+        // A root the rebuilding recursion resolves without a machine cast:
+        // the integer-built program-pointer wrapper, an arena-typed value, or
+        // an ordinary wrapper around one.  Rebuilding from such a root emits
+        // zero instructions (inttoptr and GEPs fold into reg+offset
+        // addressing), where the generic fallback pays a real address-space
+        // cast at every access.  Only pointers of unknown provenance — loads,
+        // PHIs, call results — need that cast.
+        auto rebuildableRoot = [](Value* root) {
+            if (root->getType()->isPointerTy() && root->getType()->getPointerAddressSpace() == ArenaAS) {
+                return true;
+            }
+            if (auto* op = dyn_cast<Operator>(root); op && op->getOpcode() == Instruction::IntToPtr) {
+                return true;
+            }
+            if (auto* cast = dyn_cast<AddrSpaceCastOperator>(root)) {
+                return cast->getPointerOperand()->getType()->getPointerAddressSpace() == ArenaAS;
+            }
+            return isa<Constant>(root);
+        };
         DenseMap<BasicBlock*, DenseMap<Value*, unsigned>> rootUses;
         for (Instruction* inst : work) {
-            auto [ptr, ptrIdx] = pointerOperand(inst);
+            auto [ptr, ptrIdx] = MemoryPointerOperand(inst);
             if (loops.getLoopFor(inst->getParent()) && needsCast(ptr)) {
                 rootUses[inst->getParent()][addressRoot(ptr)]++;
             }
         }
 
         for (auto* inst : work) {
-            auto [ptr, ptrIdx] = pointerOperand(inst);
+            auto [ptr, ptrIdx] = MemoryPointerOperand(inst);
+            // An access whose address is provably null exists only on a
+            // dynamically dead undefined-behavior path that inlining exposed
+            // to constant folding. It cannot carry arena provenance through
+            // register spills, so mirror the fixed tier's invalid-address
+            // policy instead: reads produce zero, writes are dropped. The
+            // path stays structurally intact and still never executes.
+            if (isa<ConstantPointerNull>(getUnderlyingObject(ptr)) && (isa<LoadInst>(inst) || isa<StoreInst>(inst))) {
+                if (auto* load = dyn_cast<LoadInst>(inst)) {
+                    load->replaceAllUsesWith(Constant::getNullValue(load->getType()));
+                }
+                inst->eraseFromParent();
+                continue;
+            }
             if (!needsCast(ptr)) {
                 continue;
             }
-            if (rootUses[inst->getParent()].lookup(addressRoot(ptr)) >= 2) {
+            if (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst)) {
+                report_fatal_error("bpf-arena: unsupported atomic operation reached Capsule virtual memory");
+            }
+            if (isa<Constant>(ptr) || rebuildableRoot(addressRoot(ptr)) || rootUses[inst->getParent()].lookup(addressRoot(ptr)) >= 2) {
+                // Rebuildable roots and constants must take the rebuilding
+                // path unconditionally.  For constants, a folded
+                // constant-expression access pointer bypasses the backend's
+                // cast insertion (only global-rooted constants get licensed
+                // there) and reaches the verifier as an unlicensed scalar
+                // lddw.  For rebuildable roots the rewrite is free, while the
+                // fallback would spend a machine cast per access — the frame
+                // and sparse-global traffic that used to ride the (unsound)
+                // wrapper/fallback cast cancellation.
                 inst->setOperand(ptrIdx, arenaPointer(arenaPointer, ptr, inst));
                 continue;
             }
             IRBuilder<> b(inst);
-            Value* casted = b.CreateAddrSpaceCast(ptr, ptrAs1);
-            if (auto* cast = dyn_cast<Instruction>(casted)) {
-                cast->setDebugLoc(inst->getDebugLoc());
+            // Same cheap licensing form as the shared paths above: raw bits
+            // into the arena space, one zero-extending licensing move.
+            Value* word = b.CreatePtrToInt(ptr, Type::getInt64Ty(ctx), ptr->getName() + ".word");
+            Value* span = b.CreateIntToPtr(word, ptrAs1, ptr->getName() + ".span");
+            Value* casted = b.CreateAddrSpaceCast(span, PointerType::get(ctx, 0), ptr->getName() + ".arena");
+            for (Value* value : {word, span, casted}) {
+                if (auto* cast = dyn_cast<Instruction>(value)) {
+                    cast->setDebugLoc(inst->getDebugLoc());
+                }
             }
             inst->setOperand(ptrIdx, casted);
         }
@@ -2957,9 +3409,13 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
 } // namespace
 
 bool RegisterMemoryPass(llvm::StringRef name, llvm::ModulePassManager& manager) {
-    if (name != "bpf-memory") {
-        return false;
+    if (name == "bpf-memory-fixed") {
+        manager.addPass(MemoryPass(true));
+        return true;
     }
-    manager.addPass(MemoryPass());
-    return true;
+    if (name == "bpf-memory-arena" || name == "bpf-memory") {
+        manager.addPass(MemoryPass(false));
+        return true;
+    }
+    return false;
 }

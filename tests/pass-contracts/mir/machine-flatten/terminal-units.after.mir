@@ -1,0 +1,82 @@
+--- |
+  source_filename = "machine-flatten-contract.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i32 @root(i32 %value) !bpf.capsule.flatten.root !0 !bpf.capsule.flattened.units !1 {
+  entry:
+    %is.zero = icmp eq i32 %value, 0
+    br i1 %is.zero, label %call.unit0, label %call.unit1
+  
+  call.unit0:                                       ; preds = %entry
+    %from.unit0 = call i32 @unit0(i32 %value)
+    ret i32 %from.unit0
+  
+  call.unit1:                                       ; preds = %entry
+    %from.unit1 = call i32 @unit1(i32 %value)
+    ret i32 %from.unit1
+  
+  unit0.body:                                       ; No predecessors!
+    unreachable
+  
+  unit1.body:                                       ; No predecessors!
+    unreachable
+  }
+  
+  define available_externally i32 @unit0(i32 %value) !bpf.capsule.flatten.unit !0 {
+  unit0.body:
+    ret i32 10
+  }
+  
+  define available_externally i32 @unit1(i32 %value) !bpf.capsule.flatten.unit !0 {
+  unit1.body:
+    ret i32 20
+  }
+  
+  !0 = !{i32 0}
+  !1 = !{i32 2}
+...
+---
+name:            root
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+liveins:
+  - { reg: '$w1' }
+frameInfo:
+  maxAlignment:    1
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+  maxCallFrameSize: 0
+  isCalleeSavedInfoValid: true
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    successors: %bb.1(0x30000000), %bb.2(0x50000000)
+    liveins: $w1
+  
+    JEQ_ri_32 $w1, 0, %bb.1
+    JMP %bb.2
+  
+  bb.1.call.unit0:
+    liveins: $w1
+  
+    JMP %bb.3
+  
+  bb.2.call.unit1:
+    liveins: $w1
+  
+    JMP %bb.4
+  
+  bb.3.unit0.body:
+    $w0 = MOV_ri_32 10
+    RET implicit $w0
+  
+  bb.4.unit1.body:
+    $w0 = MOV_ri_32 20
+    RET implicit $w0
+...

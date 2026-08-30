@@ -1,0 +1,1 @@
+stackify: setjmp/longjmp may only be called from Capsule code, not native_setjmp

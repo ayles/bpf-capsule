@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// zlib inflate in the kernel — the toolchain's second program.
+// Stock zlib inflate in the kernel.
 //
 // The host deflates a buffer with its own zlib, writes it directly into a
 // heap reservation, and the kernel inflates it with stock zlib sources
 // compiled through the BPF Capsule pipeline.
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <limits.h>
 
 #include "bpf_capsule.h"
 
@@ -14,26 +15,29 @@
 
 struct zlib_bpf_ctrl zctrl SEC(".data.zctrl");
 
-static unsigned long workspace_used;
+struct bump_allocator {
+    unsigned char* base;
+    size_t used;
+};
 
-static int valid_u32_range(uint64_t address, uint64_t size) {
-    return address <= (uInt)-1 && size <= (uInt)-1 && address + size <= 1ull << 32;
+// Capsule pointers are full user virtual addresses; validate only what
+// zlib's uInt lengths require and that the span does not wrap.
+static int valid_u32_range(const void* pointer, size_t size) {
+    uintptr_t address = (uintptr_t)pointer;
+    return pointer && size <= UINT_MAX && address <= UINTPTR_MAX - size;
 }
 
 static voidpf zalloc_bump(voidpf opaque, uInt items, uInt size) {
-    (void)opaque;
-    unsigned long bytes = (unsigned long)items * size;
-    if ((items && bytes / items != size) || bytes > ~0ul - 7ul) {
+    struct bump_allocator* allocator = opaque;
+    size_t bytes = (size_t)items * size;
+    size_t aligned = (bytes + 7u) & ~(size_t)7u;
+    size_t capacity = ZLIB_WORKSPACE_BYTES;
+    if (allocator->used > capacity || aligned > capacity - allocator->used) {
         return 0;
     }
-    unsigned long aligned = (bytes + 7ul) & ~7ul;
-    unsigned long capacity = (unsigned long)zctrl.workspace_capacity;
-    if (workspace_used > capacity || aligned > capacity - workspace_used) {
-        return 0;
-    }
-    unsigned int address = (unsigned int)zctrl.workspace_address + (unsigned int)workspace_used;
-    workspace_used += aligned;
-    return (voidpf)(unsigned long)address;
+    unsigned char* address = allocator->base + allocator->used;
+    allocator->used += aligned;
+    return address;
 }
 static void zfree_noop(voidpf opaque, voidpf addr) {
     (void)opaque;
@@ -41,44 +45,41 @@ static void zfree_noop(voidpf opaque, voidpf addr) {
 }
 
 SEC("syscall")
-int zlib_drain() {
+int zlib_drain(void) {
     zctrl.capsule = capsule_continue_void(zctrl.capsule.continuation);
     return 0;
 }
 
 static void zlib_run_body(void) {
-    zctrl.status = (uint64_t)(int64_t)Z_STREAM_ERROR;
+    zctrl.status = Z_STREAM_ERROR;
     zctrl.output_size = 0;
-    zctrl.adler = 0;
-    if (!zctrl.input_size || !valid_u32_range(zctrl.input_address, zctrl.input_size) || !zctrl.output_capacity ||
-        !valid_u32_range(zctrl.output_address, zctrl.output_capacity) || !zctrl.workspace_capacity ||
-        !valid_u32_range(zctrl.workspace_address, zctrl.workspace_capacity)) {
+    if (!zctrl.input_size || !valid_u32_range(zctrl.input, zctrl.input_size) || !zctrl.output_capacity ||
+        !valid_u32_range(zctrl.output, zctrl.output_capacity) || !valid_u32_range(zctrl.workspace, ZLIB_WORKSPACE_BYTES)) {
         return;
     }
 
-    workspace_used = 0;
+    struct bump_allocator allocator = {.base = zctrl.workspace};
     z_stream s = {0};
+    s.opaque = &allocator;
     s.zalloc = zalloc_bump;
     s.zfree = zfree_noop;
-    s.next_in = capsule_memory_pointer(Bytef, zctrl.input_address);
+    s.next_in = zctrl.input;
     s.avail_in = (uInt)zctrl.input_size;
-    s.next_out = capsule_memory_pointer(Bytef, zctrl.output_address);
+    s.next_out = zctrl.output;
     s.avail_out = (uInt)zctrl.output_capacity;
-    int r = inflateInit2(&s, 15);
+    int r = inflateInit(&s);
     if (r == Z_OK) {
         r = inflate(&s, Z_FINISH);
     }
-    zctrl.status = (uint64_t)(int64_t)r;
+    zctrl.status = r;
     zctrl.output_size = s.total_out;
-    // inflate() has already run stock zlib's checksum over every produced
-    // byte.  Recomputing it here put a second full 2 MiB Adler pass inside the
-    // BPF timing while the matched native uncompress() performed only the
-    // normal one, making the compiler appear roughly 25% slower than it was.
-    zctrl.adler = s.adler;
+    if (s.state) {
+        (void)inflateEnd(&s);
+    }
 }
 
 SEC("syscall")
-int zlib_run() {
+int zlib_run(void) {
     zctrl.capsule = capsule_call_void(zlib_run_body);
     return 0;
 }

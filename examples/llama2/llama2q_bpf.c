@@ -1,21 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Transformer inference in the kernel — llama2.c, unmodified, through the
-// same pipeline.
-//
-// This is the first program whose whole point is floating point, so it is
-// what bpf-soft-float exists for: every multiply-accumulate in every matmul,
-// the softmax, the RMS norms and the rotary embeddings all become integer
-// work. The host reserves the exact model image in Capsule memory, the
-// weights point straight into that image as they would with mmap, and the
-// kernel greedily samples token IDs that the host compares against the same
-// code compiled natively.
+// Transformer inference in the kernel: stock llama2.c's Q8 runner reads a
+// quantized checkpoint directly from Capsule memory.
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
 #include "bpf_capsule.h"
 #include "llama2_ctrl.h"
-
-#include <stdint.h>
 
 // run.c's main() wants argv and a clock; the rest of the file is the model.
 #define main llama2_unused_main
@@ -24,49 +14,50 @@
 
 struct llama2_bpf_ctrl qctrl SEC(".data.qctrl");
 
-#define QMAX_STEPS 32
-
-int qtokens[QMAX_STEPS] SEC(".bss.qtokens");
-
 SEC("syscall")
-int llama2q_drain() {
+int llama2q_drain(void) {
     qctrl.capsule = capsule_continue_void(qctrl.capsule.continuation);
     return 0;
 }
 
 static void llama2q_run_body(void) {
-    qctrl.status = LLAMA2_STAGE_STARTED;
-    unsigned char* qmodel_image = capsule_memory_pointer(unsigned char, qctrl.model_address);
+    qctrl.generated_tokens = 0;
+    if (!qctrl.model || qctrl.model_size < 256 || !qctrl.requested_tokens) {
+        return;
+    }
+    const unsigned char* qmodel_image = qctrl.model;
 
     // Version 2 checkpoints put magic, version, config, the shared-classifier
     // flag and the group size in a 256-byte header; the group size is global
     // because every quantized tensor is read against it.
-    Transformer t;
-    Config* p = &t.config;
-    for (unsigned i = 0; i < sizeof(Config); i++) {
-        ((char*)p)[i] = (char)qmodel_image[8 + i];
+    uint32_t magic = 0, version = 0;
+    memcpy(&magic, qmodel_image, sizeof(magic));
+    memcpy(&version, qmodel_image + sizeof(magic), sizeof(version));
+    if (magic != 0x616b3432 || version != 2) {
+        return;
     }
+    Transformer t = {0};
+    Config* p = &t.config;
+    memcpy(p, qmodel_image + 8, sizeof(*p));
     unsigned char shared_classifier = qmodel_image[8 + sizeof(Config)];
-    int group_size;
-    for (unsigned i = 0; i < sizeof(int); i++) {
-        ((char*)&group_size)[i] = (char)qmodel_image[9 + sizeof(Config) + i];
+    int group_size = 0;
+    memcpy(&group_size, qmodel_image + 9 + sizeof(Config), sizeof(group_size));
+    if (p->dim <= 0 || (p->dim & 1) || p->hidden_dim <= 0 || p->n_layers <= 0 || p->n_heads <= 0 || p->n_kv_heads <= 0 || p->n_heads % p->n_kv_heads ||
+        p->dim % p->n_heads || ((p->dim / p->n_heads) & 1) || p->vocab_size <= 1 || p->seq_len <= 0 || shared_classifier > 1 || group_size <= 0 ||
+        p->dim % group_size || p->hidden_dim % group_size) {
+        return;
     }
     GS = group_size;
-    qctrl.status = LLAMA2_STAGE_CONFIGURED;
 
     memory_map_weights(&t.weights, p, qmodel_image + 256, shared_classifier);
-    qctrl.status = LLAMA2_STAGE_WEIGHTS_READY;
-
     malloc_run_state(&t.state, p);
-    qctrl.status = LLAMA2_STAGE_STATE_READY;
 
     // Greedy decoding from the BOS token: no sampler state, so the ids are a
     // pure function of the weights and the arithmetic.
     int token = 1;
-    uint64_t sum = 0;
-    int steps = (int)qctrl.steps;
-    if (steps > QMAX_STEPS) {
-        steps = QMAX_STEPS;
+    int steps = (int)qctrl.requested_tokens;
+    if (steps > LLAMA2_MAX_TOKENS) {
+        steps = LLAMA2_MAX_TOKENS;
     }
     // The KV caches are seq_len entries deep; past that, positions wrap into
     // garbage. The host clamps the same way, so both sides agree on count.
@@ -76,17 +67,30 @@ static void llama2q_run_body(void) {
     for (int pos = 0; pos < steps; pos++) {
         float* logits = forward(&t, token, pos);
         token = sample_argmax(logits, p->vocab_size);
+        // Keep the mask in emitted BPF so the verifier can see the map bound
+        // after the managed loop has been lowered into continuations.
         int at = pos;
         asm volatile("" : "+r"(at));
-        qtokens[at & (QMAX_STEPS - 1)] = token;
-        sum = sum * 1000003ull + (uint64_t)(unsigned)token;
+        qctrl.tokens[at & (LLAMA2_MAX_TOKENS - 1)] = token;
     }
-    qctrl.tok_sum = sum;
-    qctrl.status = LLAMA2_STAGE_COMPLETE;
+    free_run_state(&t.state);
+    free(t.weights.q_tokens);
+    free(t.weights.token_embedding_table);
+    free(t.weights.wq);
+    free(t.weights.wk);
+    free(t.weights.wv);
+    free(t.weights.wo);
+    free(t.weights.w1);
+    free(t.weights.w2);
+    free(t.weights.w3);
+    if (t.weights.wcls != t.weights.q_tokens) {
+        free(t.weights.wcls);
+    }
+    qctrl.generated_tokens = (unsigned int)steps;
 }
 
 SEC("syscall")
-int llama2q_run() {
+int llama2q_run(void) {
     qctrl.capsule = capsule_call_void(llama2q_run_body);
     return 0;
 }

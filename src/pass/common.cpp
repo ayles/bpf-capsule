@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include "common.h"
+#include "runtime_symbols.h"
 
+#include <llvm/Analysis/ValueTracking.h>
+#include <llvm/IR/CFG.h>
+#include <llvm/IR/InlineAsm.h>
 #include <llvm/IR/InstIterator.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/Module.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/ErrorHandling.h>
 #include <llvm/Support/MathExtras.h>
@@ -10,26 +16,45 @@ using namespace llvm;
 
 static cl::opt<bool> CapsuleVerbose("bpf-capsule-verbose", cl::desc("Print per-pass transformation statistics to stderr"), cl::init(false));
 
-raw_ostream& bpf::stats() {
-    return CapsuleVerbose ? errs() : nulls();
+bool bpf::verbose() {
+    return CapsuleVerbose;
 }
 
-Value* bpf::ExitWordPointer(IRBuilderBase& builder, Function& owner) {
+raw_ostream& bpf::stats() {
+    return verbose() ? errs() : nulls();
+}
+
+bool bpf::IsFiberControlLayout(const StructType* control) {
+    return control && control->getNumElements() == BPF_CAPSULE_FIBER_CONTROL_FIELD_COUNT &&
+        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_STATUS)->isIntegerTy(32) &&
+        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_CODE)->isIntegerTy(32) &&
+        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_GENERATION)->isIntegerTy(64) &&
+        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_SP)->isIntegerTy(64) && control->getElementType(BPF_CAPSULE_FIBER_CONTROL_FP)->isIntegerTy(64) &&
+        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_PC)->isIntegerTy(32) &&
+        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_RETURN_SIZE)->isIntegerTy(32);
+}
+
+Value* bpf::BuildVerifierOpaqueIdentity(IRBuilderBase& builder, Value* value, StringRef name) {
+    auto* type = FunctionType::get(value->getType(), {value->getType()}, false);
+    auto* barrier = InlineAsm::get(type, "", "=r,0", /*hasSideEffects=*/true);
+    return builder.CreateCall(barrier, {value}, name);
+}
+
+Value* bpf::OutcomePointer(IRBuilderBase& builder, Function& owner) {
     Module& module = *owner.getParent();
     LLVMContext& ctx = module.getContext();
-    GlobalVariable* controls = module.getGlobalVariable("bpf_capsule_fibers", true);
+    GlobalVariable* controls = module.getGlobalVariable(bpf::sym::FiberControls, true);
     auto* array = controls ? dyn_cast<ArrayType>(controls->getValueType()) : nullptr;
     auto* control = array ? dyn_cast<StructType>(array->getElementType()) : nullptr;
-    if (!control || control->getNumElements() < 1 || !control->getElementType(0)->isIntegerTy(64)) {
-        report_fatal_error("bpf-capsule: runtime is missing fiber exit control");
+    if (!control || control->getNumElements() < 2 || !control->getElementType(0)->isIntegerTy(32) || !control->getElementType(1)->isIntegerTy(32)) {
+        report_fatal_error("bpf-capsule: runtime is missing the fiber {status, code} pair");
     }
-    Value* fiber = ConstantInt::get(Type::getInt32Ty(ctx), 0);
-    if (MDNode* physical = owner.getMetadata("bpf.capsule.physical")) {
+    if (MDNode* physical = owner.getMetadata(bpf::md::AllocationUnit)) {
         auto* index = physical->getNumOperands() == 1 ? mdconst::dyn_extract<ConstantInt>(physical->getOperand(0)) : nullptr;
         if (!index || index->getZExtValue() >= owner.arg_size()) {
             report_fatal_error("bpf-capsule: malformed physical fiber metadata");
         }
-        fiber = owner.getArg(index->getZExtValue());
+        Value* fiber = owner.getArg(index->getZExtValue());
         uint64_t count = array->getNumElements();
         fiber = builder.CreateZExtOrTrunc(fiber, Type::getInt32Ty(ctx), "capsule.fiber");
         if (isPowerOf2_64(count)) {
@@ -37,12 +62,66 @@ Value* bpf::ExitWordPointer(IRBuilderBase& builder, Function& owner) {
         } else {
             fiber = builder.CreateURem(fiber, ConstantInt::get(Type::getInt32Ty(ctx), count), "capsule.fiber.index");
         }
-    } else if (IsCapsuleFunction(owner)) {
-        FunctionCallee accessor = module.getOrInsertFunction("__bpf_capsule_exit_word_ptr", FunctionType::get(PointerType::get(ctx, 0), false));
-        return builder.CreateCall(accessor, {}, "capsule.exit.word.ptr");
+        Value* state = builder.CreateInBoundsGEP(array, controls, {ConstantInt::get(Type::getInt32Ty(ctx), 0), fiber});
+        return builder.CreateStructGEP(control, state, 0, "capsule.outcome.ptr");
     }
-    Value* state = builder.CreateInBoundsGEP(array, controls, {ConstantInt::get(Type::getInt32Ty(ctx), 0), fiber});
-    return builder.CreateStructGEP(control, state, 0, "capsule.exit.word.ptr");
+    if (IsCapsuleFunction(owner)) {
+        FunctionCallee accessor = module.getOrInsertFunction(bpf::sym::OutcomePointer, FunctionType::get(PointerType::get(ctx, 0), false));
+        return builder.CreateCall(accessor, {}, "capsule.outcome.ptr");
+    }
+    report_fatal_error(Twine("bpf-capsule: native function ") + owner.getName() + " has no current fiber for an exit");
+}
+
+Value* bpf::BuildOutcomeValue(IRBuilderBase& builder, Value* code) {
+    Type* i64 = Type::getInt64Ty(builder.getContext());
+    Value* wide = builder.CreateSExtOrTrunc(code, i64);
+    return builder.CreateOr(builder.CreateShl(wide, 32), ConstantInt::get(i64, CAPSULE_EXITED));
+}
+
+void bpf::TerminateWithOutcome(Instruction& point, Value* word) {
+    Function& function = *point.getFunction();
+    BasicBlock& block = *point.getParent();
+
+    IRBuilder<> builder(&point);
+    StoreInst* store = builder.CreateStore(word, OutcomePointer(builder, function));
+    store->setMetadata(md::OutcomeStore, MDNode::get(function.getContext(), {}));
+
+    SmallPtrSet<BasicBlock*, 4> oldSuccessors;
+    oldSuccessors.insert_range(successors(&block));
+    for (BasicBlock* successor : oldSuccessors) {
+        successor->removePredecessor(&block);
+    }
+
+    for (Instruction* instruction = &point; instruction;) {
+        Instruction* next = instruction->getNextNode();
+        if (!instruction->use_empty()) {
+            instruction->replaceAllUsesWith(PoisonValue::get(instruction->getType()));
+        }
+        instruction->eraseFromParent();
+        instruction = next;
+    }
+
+    function.removeFnAttr(Attribute::NoReturn);
+    IRBuilder<> returnBuilder(&block);
+    if (function.getReturnType()->isVoidTy()) {
+        returnBuilder.CreateRetVoid();
+    } else {
+        returnBuilder.CreateRet(Constant::getNullValue(function.getReturnType()));
+    }
+}
+
+SmallVector<CallInst*, 4> bpf::FirstTrapCalls(Function& function) {
+    SmallVector<CallInst*, 4> traps;
+    for (BasicBlock& block : function) {
+        for (Instruction& instruction : block) {
+            auto* call = dyn_cast<CallInst>(&instruction);
+            if (call && (call->getIntrinsicID() == Intrinsic::trap || call->getIntrinsicID() == Intrinsic::debugtrap)) {
+                traps.push_back(call);
+                break;
+            }
+        }
+    }
+    return traps;
 }
 
 bool bpf::IsVerifierCall(const CallBase& call) {
@@ -67,8 +146,8 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
     // from the object it names are ordinary program data.
     SmallPtrSet<Value*, 16> pointerProducingMemory;
     for (Argument& arg : func.args()) {
-        bool borrowed = arg.hasAttribute("bpf.capsule.borrowed") || (IsNativeFunction(func) && arg.getType()->isPointerTy());
-        if (borrowed || arg.hasAttribute("bpf.capsule.stack.backing") || arg.hasAttribute("bpf.capsule.control")) {
+        bool borrowed = arg.hasAttribute(bpf::md::Borrowed) || (IsNativeFunction(func) && arg.getType()->isPointerTy());
+        if (borrowed || arg.hasAttribute(bpf::md::StackBacking) || arg.hasAttribute(bpf::md::Control)) {
             native.insert(&arg);
         }
         if (borrowed) {
@@ -91,7 +170,7 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
         }
     }
 
-    auto contains = [](const SmallPtrSetImpl<Value*>& values, Value* value) {
+    auto isOrDerivesFrom = [](const SmallPtrSetImpl<Value*>& values, Value* value) {
         SmallPtrSet<Value*, 8> visiting;
         auto derived = [&](auto&& self, Value* current) -> bool {
             if (values.contains(current)) {
@@ -124,16 +203,17 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
         for (Instruction& inst : instructions(func)) {
             bool derived = false;
             if (auto* phi = dyn_cast<PHINode>(&inst)) {
-                derived = phi->getNumIncomingValues() != 0 &&
-                    llvm::all_of(phi->incoming_values(), [&](Value* incoming) { return contains(pointerProducingMemory, incoming) || isZero(incoming); });
+                derived = phi->getNumIncomingValues() != 0 && llvm::all_of(phi->incoming_values(), [&](Value* incoming) {
+                    return isOrDerivesFrom(pointerProducingMemory, incoming) || isZero(incoming);
+                });
             } else if (auto* select = dyn_cast<SelectInst>(&inst)) {
-                derived = (contains(pointerProducingMemory, select->getTrueValue()) || isZero(select->getTrueValue())) &&
-                    (contains(pointerProducingMemory, select->getFalseValue()) || isZero(select->getFalseValue()));
+                derived = (isOrDerivesFrom(pointerProducingMemory, select->getTrueValue()) || isZero(select->getTrueValue())) &&
+                    (isOrDerivesFrom(pointerProducingMemory, select->getFalseValue()) || isZero(select->getFalseValue()));
             } else if (isa<GetElementPtrInst>(&inst) || isa<CastInst>(&inst) || isa<FreezeInst>(&inst)) {
-                derived = llvm::any_of(inst.operands(), [&](Value* operand) { return contains(pointerProducingMemory, operand); });
+                derived = llvm::any_of(inst.operands(), [&](Value* operand) { return isOrDerivesFrom(pointerProducingMemory, operand); });
             } else if (auto* binary = dyn_cast<BinaryOperator>(&inst)) {
-                bool leftMemory = contains(pointerProducingMemory, binary->getOperand(0));
-                bool rightMemory = contains(pointerProducingMemory, binary->getOperand(1));
+                bool leftMemory = isOrDerivesFrom(pointerProducingMemory, binary->getOperand(0));
+                bool rightMemory = isOrDerivesFrom(pointerProducingMemory, binary->getOperand(1));
                 derived =
                     binary->getOpcode() == Instruction::Add ? leftMemory != rightMemory : binary->getOpcode() == Instruction::Sub && leftMemory && !rightMemory;
             }
@@ -153,18 +233,18 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
         for (Instruction& inst : instructions(func)) {
             bool candidate = false;
             if (auto* load = dyn_cast<LoadInst>(&inst)) {
-                candidate = contains(pointerProducingMemory, load->getPointerOperand());
+                candidate = isOrDerivesFrom(pointerProducingMemory, load->getPointerOperand());
             } else if (auto* phi = dyn_cast<PHINode>(&inst)) {
                 candidate = phi->getNumIncomingValues() != 0 &&
-                    llvm::all_of(phi->incoming_values(), [&](Value* incoming) { return contains(contextCandidates, incoming) || isZero(incoming); });
+                    llvm::all_of(phi->incoming_values(), [&](Value* incoming) { return isOrDerivesFrom(contextCandidates, incoming) || isZero(incoming); });
             } else if (auto* select = dyn_cast<SelectInst>(&inst)) {
-                candidate = (contains(contextCandidates, select->getTrueValue()) || isZero(select->getTrueValue())) &&
-                    (contains(contextCandidates, select->getFalseValue()) || isZero(select->getFalseValue()));
+                candidate = (isOrDerivesFrom(contextCandidates, select->getTrueValue()) || isZero(select->getTrueValue())) &&
+                    (isOrDerivesFrom(contextCandidates, select->getFalseValue()) || isZero(select->getFalseValue()));
             } else if (isa<CastInst>(&inst) || isa<FreezeInst>(&inst)) {
-                candidate = llvm::any_of(inst.operands(), [&](Value* operand) { return contains(contextCandidates, operand); });
+                candidate = llvm::any_of(inst.operands(), [&](Value* operand) { return isOrDerivesFrom(contextCandidates, operand); });
             } else if (auto* binary = dyn_cast<BinaryOperator>(&inst)) {
-                bool left = contains(contextCandidates, binary->getOperand(0));
-                bool right = contains(contextCandidates, binary->getOperand(1));
+                bool left = isOrDerivesFrom(contextCandidates, binary->getOperand(0));
+                bool right = isOrDerivesFrom(contextCandidates, binary->getOperand(1));
                 candidate = binary->getOpcode() == Instruction::Add ? left != right : binary->getOpcode() == Instruction::Sub && left && !right;
             }
             if (candidate) {
@@ -200,23 +280,23 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
         for (Instruction& inst : instructions(func)) {
             bool derived = false;
             if (auto* load = dyn_cast<LoadInst>(&inst)) {
-                derived = load->getType()->isPointerTy() && contains(pointerProducingMemory, load->getPointerOperand());
+                derived = load->getType()->isPointerTy() && isOrDerivesFrom(pointerProducingMemory, load->getPointerOperand());
             } else if (auto* phi = dyn_cast<PHINode>(&inst)) {
                 derived = phi->getNumIncomingValues() != 0 &&
-                    llvm::all_of(phi->incoming_values(), [&](Value* incoming) { return contains(native, incoming) || isZero(incoming); });
+                    llvm::all_of(phi->incoming_values(), [&](Value* incoming) { return isOrDerivesFrom(native, incoming) || isZero(incoming); });
             } else if (auto* select = dyn_cast<SelectInst>(&inst)) {
-                derived = (contains(native, select->getTrueValue()) || isZero(select->getTrueValue())) &&
-                    (contains(native, select->getFalseValue()) || isZero(select->getFalseValue()));
+                derived = (isOrDerivesFrom(native, select->getTrueValue()) || isZero(select->getTrueValue())) &&
+                    (isOrDerivesFrom(native, select->getFalseValue()) || isZero(select->getFalseValue()));
             } else if (isa<GetElementPtrInst>(&inst) || isa<CastInst>(&inst) || isa<FreezeInst>(&inst)) {
-                derived = llvm::any_of(inst.operands(), [&](Value* operand) { return contains(native, operand); });
+                derived = llvm::any_of(inst.operands(), [&](Value* operand) { return isOrDerivesFrom(native, operand); });
             } else if (auto* binary = dyn_cast<BinaryOperator>(&inst)) {
-                bool left = contains(native, binary->getOperand(0));
-                bool right = contains(native, binary->getOperand(1));
+                bool left = isOrDerivesFrom(native, binary->getOperand(0));
+                bool right = isOrDerivesFrom(native, binary->getOperand(1));
                 derived = binary->getOpcode() == Instruction::Add ? left != right : binary->getOpcode() == Instruction::Sub && left && !right;
             } else if (auto* insert = dyn_cast<InsertValueInst>(&inst)) {
-                derived = contains(native, insert->getAggregateOperand()) || contains(native, insert->getInsertedValueOperand());
+                derived = isOrDerivesFrom(native, insert->getAggregateOperand()) || isOrDerivesFrom(native, insert->getInsertedValueOperand());
             } else if (auto* extract = dyn_cast<ExtractValueInst>(&inst)) {
-                derived = contains(native, extract->getAggregateOperand());
+                derived = isOrDerivesFrom(native, extract->getAggregateOperand());
             }
             if (derived) {
                 changed |= native.insert(&inst).second;
@@ -250,27 +330,34 @@ DIType* BtfGetInt(DIBuilder& builder, size_t sizeInBits, bool isSigned) {
             report_fatal_error(Twine("BPF Capsule cannot describe a ") + Twine(sizeInBits) + "-bit integer in BTF");
     }
 
-    return builder.createBasicType(
-        std::string(isSigned || sizeInBits == 1 ? "" : "unsigned ") + name, sizeInBits,
+    return builder.createBasicType(std::string(isSigned || sizeInBits == 1 ? "" : "unsigned ") + name, sizeInBits,
         sizeInBits == 1 ? dwarf::DW_ATE_boolean
             : isSigned  ? dwarf::DW_ATE_signed
-                        : dwarf::DW_ATE_unsigned
-    );
+                        : dwarf::DW_ATE_unsigned);
+}
+
+DIType* BtfGetByteArrayPointer(DIBuilder& builder, uint64_t sizeBytes) {
+    auto* byteType = builder.createBasicType("unsigned char", 8, dwarf::DW_ATE_unsigned_char);
+    auto* subrange = builder.getOrCreateSubrange(0, sizeBytes);
+    auto* arrayType = builder.createArrayType(sizeBytes * 8u, 8, byteType, builder.getOrCreateArray({subrange}));
+    return builder.createPointerType(arrayType, 64);
 }
 
 void BtfFunctionAddDebugInfo(DIBuilder& debugBuilder, Function& func, ArrayRef<Metadata*> paramTypes) {
     auto debugCU = *func.getParent()->debug_compile_units_begin();
     auto debugType = debugBuilder.createSubroutineType(debugBuilder.getOrCreateTypeArray(paramTypes));
-    auto debugFunction = debugBuilder.createFunction(
-        debugCU, func.getName(), func.getName(), debugCU->getFile(), 0, debugType, 0, DINode::FlagZero,
-        func.isDeclaration() ? DISubprogram::SPFlagZero : DISubprogram::SPFlagDefinition
-    );
+    auto debugFunction = debugBuilder.createFunction(debugCU, func.getName(), func.getName(), debugCU->getFile(), 0, debugType, 0, DINode::FlagZero,
+        func.isDeclaration() ? DISubprogram::SPFlagZero : DISubprogram::SPFlagDefinition);
+    SmallVector<Metadata*> retainedArguments;
     for (auto&& [i, arg] : enumerate(func.args())) {
         if (i + 1 >= debugFunction->getType()->getTypeArray().size()) {
             break;
         }
-        debugBuilder.createParameterVariable(debugFunction, arg.getName(), i + 1, debugCU->getFile(), 0, debugFunction->getType()->getTypeArray()[i + 1], true);
+        auto* variable = debugBuilder.createParameterVariable(
+            debugFunction, arg.getName(), i + 1, debugCU->getFile(), 0, debugFunction->getType()->getTypeArray()[i + 1], true);
+        retainedArguments.push_back(variable);
     }
+    debugFunction->replaceRetainedNodes(MDNode::get(func.getContext(), retainedArguments));
     func.setSubprogram(debugFunction);
 
     for (auto&& block : func) {
@@ -278,4 +365,57 @@ void BtfFunctionAddDebugInfo(DIBuilder& debugBuilder, Function& func, ArrayRef<M
             inst.setDebugLoc(DILocation::get(func.getContext(), 0, 0, func.getSubprogram()));
         }
     }
+}
+
+void bpf::MaterializeFunctionClasses(llvm::Module& module) {
+    using namespace llvm;
+    constexpr StringLiteral flag{"bpf.capsule.classes"};
+    if (module.getModuleFlag(flag)) {
+        return;
+    }
+    module.addModuleFlag(Module::ModFlagBehavior::Error, flag, 1);
+    auto* annotations = module.getGlobalVariable("llvm.global.annotations");
+    if (!annotations || !annotations->hasInitializer()) {
+        return;
+    }
+    auto* array = dyn_cast<ConstantArray>(annotations->getInitializer());
+    if (!array) {
+        return;
+    }
+    // Consume the capsule entries: the annotations array holds pointers to
+    // the annotated functions, and leaving those references in place pins
+    // always-inline glue bodies past DCE (the domain checker then reports
+    // them reachable from both worlds).
+    SmallVector<Constant*> kept;
+    SmallVector<Function*> consumed;
+    for (Use& operand : array->operands()) {
+        auto* entry = dyn_cast<ConstantStruct>(operand.get());
+        auto* function = entry && entry->getNumOperands() >= 2 ? dyn_cast<Function>(entry->getOperand(0)->stripPointerCasts()) : nullptr;
+        StringRef text;
+        if (function && getConstantStringInfo(entry->getOperand(1)->stripPointerCasts(), text) && text.starts_with("capsule.")) {
+            function->addFnAttr(text);
+            consumed.push_back(function);
+            continue;
+        }
+        kept.push_back(cast<Constant>(operand.get()));
+    }
+    if (kept.size() == array->getNumOperands()) {
+        return;
+    }
+    annotations->eraseFromParent();
+    // The orphaned initializer constants still hold uses of the consumed
+    // functions; purge them or hasAddressTaken keeps reporting the array.
+    for (Function* function : consumed) {
+        function->removeDeadConstantUsers();
+    }
+    if (!kept.empty()) {
+        auto* keptType = ArrayType::get(kept.front()->getType(), kept.size());
+        auto* rebuilt =
+            new GlobalVariable(module, keptType, false, GlobalValue::AppendingLinkage, ConstantArray::get(keptType, kept), "llvm.global.annotations");
+        rebuilt->setSection("llvm.metadata");
+    }
+}
+
+bool bpf::HasFunctionClass(const llvm::Function& function, llvm::StringRef cls) {
+    return function.hasFnAttribute(cls);
 }

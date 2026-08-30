@@ -1,62 +1,289 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Float llama2.c: stage one checkpoint and compare kernel/native token IDs.
+// Load one llama2.c checkpoint into Capsule memory, generate tokens, and print them.
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
+#include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#include <unistd.h>
 
 #include "bpf_capsule_host.h"
 
 #include "llama2_ctrl.h"
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wsign-compare"
-#pragma GCC diagnostic ignored "-Wunused-variable"
-#define main llama2_unused_main
-#include "run.c"
-#undef main
-#pragma GCC diagnostic pop
-
+#ifdef LLAMA2_QUANTIZED
+#include "llama2q.skel.h"
+#define LLAMA_NAME "llama2q"
+#define LLAMA_SKELETON struct llama2q
+#define LLAMA_OPEN llama2q__open
+#define LLAMA_DESTROY llama2q__destroy
+#define LLAMA_CONTROL(skeleton) (&(skeleton)->data_qctrl->qctrl)
+#define LLAMA_DRAIN(skeleton) ((skeleton)->progs.llama2q_drain)
+#define LLAMA_RUN(skeleton) ((skeleton)->progs.llama2q_run)
+#else
 #include "llama2.skel.h"
+#define LLAMA_NAME "llama2"
+#define LLAMA_SKELETON struct llama2
+#define LLAMA_OPEN llama2__open
+#define LLAMA_DESTROY llama2__destroy
+#define LLAMA_CONTROL(skeleton) (&(skeleton)->data_lctrl->lctrl)
+#define LLAMA_DRAIN(skeleton) ((skeleton)->progs.llama2_drain)
+#define LLAMA_RUN(skeleton) ((skeleton)->progs.llama2_run)
+#endif
 
-static int llama_prepare_model(const unsigned char* model, long size, int* steps) {
-    if (size < (long)sizeof(Config)) {
-        fprintf(stderr, "model too short\n");
+enum {
+    LLAMA_MAX_DRAINS = 2000000,
+    LLAMA_HEAP_BYTES = 4u << 20,
+};
+
+struct checkpoint_config {
+    int32_t dim;
+    int32_t hidden_dim;
+    int32_t layers;
+    int32_t heads;
+    int32_t kv_heads;
+    int32_t vocabulary;
+    int32_t context;
+};
+
+_Static_assert(sizeof(struct checkpoint_config) == 7 * sizeof(int32_t), "llama2.c checkpoint header layout");
+
+static int add_tensor_bytes(size_t* total, size_t a, size_t b, size_t c, size_t copies, size_t item_size) {
+    const size_t factors[] = {a, b, c, copies, item_size};
+    size_t bytes = 1;
+    for (size_t i = 0; i < sizeof(factors) / sizeof(factors[0]); ++i) {
+        if (factors[i] && bytes > SIZE_MAX / factors[i]) {
+            return -1;
+        }
+        bytes *= factors[i];
+    }
+    if (*total > SIZE_MAX - bytes) {
         return -1;
     }
-    Config config;
+    *total += bytes;
+    return 0;
+}
+
+#ifdef LLAMA2_QUANTIZED
+static int add_quantized_tensor_bytes(size_t* total, size_t a, size_t b, size_t c, size_t copies, size_t group_size) {
+    size_t before = *total;
+    if (add_tensor_bytes(total, a, b, c, copies, 1)) {
+        return -1;
+    }
+    size_t values = *total - before;
+    if (values % group_size || add_tensor_bytes(total, values / group_size, 1, 1, 1, sizeof(float))) {
+        return -1;
+    }
+    return 0;
+}
+#endif
+
+static int prepare_model(const unsigned char* model, size_t size, unsigned int* tokens) {
+    struct checkpoint_config config;
+    int shared_classifier;
+#ifdef LLAMA2_QUANTIZED
+    if (size < 256) {
+        fprintf(stderr, "model is too short for a Q8-v2 header\n");
+        return -1;
+    }
+    uint32_t magic = 0, version = 0;
+    memcpy(&magic, model, sizeof(magic));
+    memcpy(&version, model + sizeof(magic), sizeof(version));
+    if (magic != 0x616b3432 || version != 2) {
+        fprintf(stderr, "model is not a Q8-v2 checkpoint\n");
+        return -1;
+    }
+    memcpy(&config, model + 8, sizeof(config));
+    shared_classifier = model[8 + sizeof(config)];
+    int32_t group_size = 0;
+    memcpy(&group_size, model + 9 + sizeof(config), sizeof(group_size));
+    if (shared_classifier > 1 || group_size <= 0 || config.dim % group_size || config.hidden_dim % group_size) {
+        fprintf(stderr, "model has invalid Q8 parameters\n");
+        return -1;
+    }
+#else
+    if (size < sizeof(config)) {
+        fprintf(stderr, "model is too short\n");
+        return -1;
+    }
     memcpy(&config, model, sizeof(config));
-    if (config.seq_len < 1) {
-        fprintf(stderr, "model has an invalid context length\n");
+    if (config.vocabulary == INT32_MIN) {
+        fprintf(stderr, "model has an invalid vocabulary size\n");
         return -1;
     }
-    if (*steps > config.seq_len) {
-        *steps = config.seq_len;
+    shared_classifier = config.vocabulary > 0;
+    if (!shared_classifier) {
+        config.vocabulary = -config.vocabulary;
+    }
+#endif
+    if (config.dim <= 0 || (config.dim & 1) || config.hidden_dim <= 0 || config.layers <= 0 || config.heads <= 0 || config.kv_heads <= 0 ||
+        config.heads % config.kv_heads || config.dim % config.heads || ((config.dim / config.heads) & 1) || config.vocabulary <= 1 || config.context <= 0) {
+        fprintf(stderr, "model has an invalid configuration\n");
+        return -1;
+    }
+    size_t dim = (size_t)config.dim;
+    size_t hidden = (size_t)config.hidden_dim;
+    size_t layers = (size_t)config.layers;
+    size_t vocabulary = (size_t)config.vocabulary;
+    size_t head_size = dim / (size_t)config.heads;
+    size_t kv_dim = head_size * (size_t)config.kv_heads;
+#ifdef LLAMA2_QUANTIZED
+    size_t required = 256;
+    size_t group = (size_t)group_size;
+    int invalid_size = add_tensor_bytes(&required, layers, dim, 1, 2, sizeof(float)) || add_tensor_bytes(&required, dim, 1, 1, 1, sizeof(float)) ||
+        add_quantized_tensor_bytes(&required, vocabulary, dim, 1, 1, group) || add_quantized_tensor_bytes(&required, layers, dim, dim, 2, group) ||
+        add_quantized_tensor_bytes(&required, layers, dim, kv_dim, 2, group) || add_quantized_tensor_bytes(&required, layers, dim, hidden, 3, group) ||
+        (!shared_classifier && add_quantized_tensor_bytes(&required, vocabulary, dim, 1, 1, group));
+#else
+    size_t required = sizeof(config);
+    size_t context = (size_t)config.context;
+    int invalid_size = add_tensor_bytes(&required, vocabulary, dim, 1, 1, sizeof(float)) || add_tensor_bytes(&required, layers, dim, 1, 2, sizeof(float)) ||
+        add_tensor_bytes(&required, layers, dim, dim, 2, sizeof(float)) || add_tensor_bytes(&required, layers, dim, kv_dim, 2, sizeof(float)) ||
+        add_tensor_bytes(&required, layers, dim, hidden, 3, sizeof(float)) || add_tensor_bytes(&required, dim, 1, 1, 1, sizeof(float)) ||
+        add_tensor_bytes(&required, context, head_size / 2, 1, 2, sizeof(float)) ||
+        (!shared_classifier && add_tensor_bytes(&required, vocabulary, dim, 1, 1, sizeof(float)));
+#endif
+    if (invalid_size || size < required) {
+        fprintf(stderr, "model is truncated or its dimensions overflow the checkpoint layout\n");
+        return -1;
+    }
+    if (*tokens > (unsigned int)config.context) {
+        *tokens = (unsigned int)config.context;
     }
     return 0;
 }
 
-static void llama_initialize_native(Transformer* transformer, unsigned char* model) {
-    Config* config = &transformer->config;
-    memcpy(config, model, sizeof(*config));
-    int shared = config->vocab_size > 0;
-    config->vocab_size = abs(config->vocab_size);
-    memory_map_weights(&transformer->weights, config, (float*)(model + sizeof(*config)), shared);
-    malloc_run_state(&transformer->state, config);
+int main(int argc, char** argv) {
+    if (argc < 2 || argc > 3) {
+        fprintf(stderr, "usage: %s MODEL [tokens]\n", LLAMA_NAME);
+        return 1;
+    }
+
+    char* end = NULL;
+    errno = 0;
+    unsigned long requested = argc == 3 ? strtoul(argv[2], &end, 10) : 16;
+    if (!requested || requested > LLAMA2_MAX_TOKENS || errno || (end && *end)) {
+        fprintf(stderr, "tokens must be an integer from 1 through %u\n", (unsigned int)LLAMA2_MAX_TOKENS);
+        return 1;
+    }
+    unsigned int tokens = (unsigned int)requested;
+
+    int result = 1;
+    FILE* file = NULL;
+    unsigned char* model = NULL;
+    LLAMA_SKELETON* skeleton = NULL;
+    struct bpf_capsule capsule = {0};
+
+    file = fopen(argv[1], "rb");
+    if (!file) {
+        perror(argv[1]);
+        goto cleanup;
+    }
+    if (fseek(file, 0, SEEK_END)) {
+        perror("model size");
+        goto cleanup;
+    }
+    long file_size = ftell(file);
+    if (file_size <= 0) {
+        fprintf(stderr, "cannot determine model size\n");
+        goto cleanup;
+    }
+    rewind(file);
+    size_t model_size = (size_t)file_size;
+    model = malloc(model_size);
+    if (!model || fread(model, 1, model_size, file) != model_size) {
+        fprintf(stderr, "cannot read model\n");
+        goto cleanup;
+    }
+    fclose(file);
+    file = NULL;
+    if (prepare_model(model, model_size, &tokens)) {
+        goto cleanup;
+    }
+
+    skeleton = LLAMA_OPEN();
+    if (!skeleton) {
+        fprintf(stderr, "open failed\n");
+        goto cleanup;
+    }
+    size_t reserved_bytes = (model_size + 15u) & ~(size_t)15u;
+    if (bpf_capsule_configure(&capsule, skeleton->obj,
+            (struct bpf_capsule_config){
+                .fiber_count = 1,
+                .heap_bytes = reserved_bytes + LLAMA_HEAP_BYTES,
+                .reserved_bytes = model_size,
+            }) ||
+        bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
+        fprintf(stderr, "load failed: %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    volatile struct llama2_bpf_ctrl* control = LLAMA_CONTROL(skeleton);
+    unsigned char* model_address = bpf_capsule_memory_reserved_start(&capsule);
+    if (bpf_capsule_memcpy(&capsule, model_address, model, model_size)) {
+        fprintf(stderr, "cannot stage model: %s\n", strerror(errno));
+        goto cleanup;
+    }
+    control->model = model_address;
+    control->model_size = model_size;
+    control->requested_tokens = tokens;
+
+    int drain_fd = bpf_program__fd(LLAMA_DRAIN(skeleton));
+    int run_fd = bpf_program__fd(LLAMA_RUN(skeleton));
+    if (drain_fd < 0 || run_fd < 0) {
+        fprintf(stderr, "BPF object is missing a %s program\n", LLAMA_NAME);
+        goto cleanup;
+    }
+    struct bpf_test_run_opts options = {.sz = sizeof(options)};
+    if (bpf_prog_test_run_opts(run_fd, &options)) {
+        perror("run");
+        goto cleanup;
+    }
+    unsigned long drains = 0;
+    while (control->capsule.status == CAPSULE_PENDING) {
+        if (drains == LLAMA_MAX_DRAINS) {
+            fprintf(stderr, "gave up after %lu drains: computation still pending\n", drains);
+            goto cleanup;
+        }
+        if (bpf_prog_test_run_opts(drain_fd, &options)) {
+            perror("drain");
+            goto cleanup;
+        }
+        drains++;
+    }
+    if (control->capsule.status != CAPSULE_OK) {
+        if (control->capsule.status == CAPSULE_EXITED && control->capsule.code < 0) {
+            fprintf(stderr, "capsule stopped: %s (%lld)\n", bpf_capsule_error_string(control->capsule.code), (long long)control->capsule.code);
+        } else if (control->capsule.status == CAPSULE_EXITED) {
+            fprintf(stderr, "capsule exited with code %lld\n", (long long)control->capsule.code);
+        } else {
+            fprintf(stderr, "capsule status=%s\n", bpf_capsule_status_string(control->capsule.status));
+        }
+        goto cleanup;
+    }
+    if (control->generated_tokens != tokens) {
+        fprintf(stderr, "generated %u of %u requested tokens\n", control->generated_tokens, tokens);
+        goto cleanup;
+    }
+
+    printf("tokens:");
+    for (unsigned int i = 0; i < tokens; ++i) {
+        printf(" %d", control->tokens[i]);
+    }
+    printf("\n");
+    fprintf(stderr, "continuation drains: %lu\n", drains);
+    result = 0;
+
+cleanup:
+    if (file) {
+        fclose(file);
+    }
+    if (skeleton) {
+        (void)bpf_capsule_release(&capsule);
+        LLAMA_DESTROY(skeleton);
+    }
+    free(model);
+    return result;
 }
-
-#define LLAMA_HOST_NAME "llama2"
-#define LLAMA_SKELETON_TYPE struct llama2
-#define LLAMA_SKELETON_OPEN llama2__open
-#define LLAMA_SKELETON_DESTROY llama2__destroy
-#define LLAMA_CONTROL(skeleton) (&(skeleton)->data_lctrl->lctrl)
-#define LLAMA_TOKENS(skeleton) ((skeleton)->bss_ltokens->ltokens)
-#define LLAMA_DRAIN_PROGRAM(skeleton) ((skeleton)->progs.llama2_drain)
-#define LLAMA_RUN_PROGRAM(skeleton) ((skeleton)->progs.llama2_run)
-
-#include "llama2_host_impl.h"

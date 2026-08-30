@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#include "bpf_capsule_arithmetic.h"
 // 128-bit unsigned division and remainder for the BPF pipeline, in pure
 // 64-bit arithmetic. The backend legalizes every i128 operation by splitting
 // EXCEPT mul/div/rem, which become libcalls the kernel cannot host;
@@ -12,17 +13,18 @@
 // out is a plain i64, so nothing here needs i128 support from the backend.
 //
 // The pair ABI keeps arguments and result i64: {lo, hi} in, a two-field
-// struct out. bpf-expand-i128 accepts either LLVM's sret form or a natural
-// aggregate return, and only the pass calls these below the C level.
-struct bpf_u128_pair {
-    unsigned long long lo, hi;
-};
+// struct out (bpf_capsule_arithmetic.h). bpf-expand-i128 accepts either LLVM's
+// sret form or a natural aggregate return, and only the pass calls these
+// below the C level.
 
 static int u128_ge(unsigned long long alo, unsigned long long ahi, unsigned long long blo, unsigned long long bhi) {
     return ahi > bhi || (ahi == bhi && alo >= blo);
 }
 
-// Count leading zeros of a nonzero 64-bit value.
+// Count leading zeros of a nonzero 64-bit value. Softfloat uses a branchless
+// version because its long division would multiply these states across many
+// iterations; the int128 paths below have only bounded correction steps, so
+// this compact binary search is cheaper here.
 static int clz64(unsigned long long x) {
     int n = 0;
     if (x <= 0x00000000ffffffffull) {
@@ -136,19 +138,18 @@ struct bpf_u128_pair __bpf_udiv128(unsigned long long nlo, unsigned long long nh
     unsigned long long qhat;
     {
         // qhat = (nex:nhi2) / vhi, capped at 2^64-1.
-        unsigned long long rem;
         if (nex >= vhi) {
             qhat = 0xffffffffffffffffull;
         } else if (nex == 0) {
             qhat = nhi2 / vhi;
-            (void)rem;
         } else {
+            unsigned long long rem;
             qhat = udiv_128_by_64(nex, nhi2, vhi, &rem);
         }
     }
     // Multiply qhat * divisor (128-bit) and subtract; correct down if too big.
     for (int iter = 0; iter < 2 && qhat; iter++) {
-        // p = qhat * (dhi:dlo), low 128 bits.
+        // p = qhat * (dhi:dlo), retaining overflow past 128 bits.
         unsigned long long p_lo, p_hi;
         {
             unsigned long long a0 = dlo & 0xffffffffull, a1 = dlo >> 32;
@@ -157,7 +158,13 @@ struct bpf_u128_pair __bpf_udiv128(unsigned long long nlo, unsigned long long nh
             unsigned long long p10 = a1 * b0, p11 = a1 * b1;
             unsigned long long mid = (p00 >> 32) + (p01 & 0xffffffffull) + (p10 & 0xffffffffull);
             p_lo = (p00 & 0xffffffffull) | (mid << 32);
-            p_hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32) + qhat * dhi;
+            unsigned long long p_hi_base = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+            struct bpf_u128_pair high_product = __bpf_mul64_wide(qhat, dhi);
+            p_hi = p_hi_base + high_product.lo;
+            if (high_product.hi != 0 || p_hi < p_hi_base) {
+                qhat--;
+                continue;
+            }
         }
         if (u128_ge(nlo, nhi, p_lo, p_hi)) {
             break;
@@ -212,4 +219,52 @@ struct bpf_u128_pair __bpf_urem128(unsigned long long nlo, unsigned long long nh
     r.lo = nlo - qd_lo;
     r.hi = nhi - qd_hi - borrow;
     return r;
+}
+
+// ---------------------------------------------------------------------------
+// The remaining i128 arithmetic bpf-expand-i128 routes here instead of
+// emitting IR expansions: 128-bit multiply, the signed division/remainder
+// fixups, and the 64-bit overflow-multiply intrinsics (the backend forms a
+// 128-bit product to test the top half, which would become the same hosted
+// libcall). always_inline: after the whole-program link, -O2 folds these into
+// their call sites exactly as the old IR expansions did — a constant operand
+// still folds to shifts, and no subprogram survives for the verifier to
+// re-walk. The full udiv/urem above deliberately stay real calls: their loops
+// are verified once instead of at every division site.
+// ---------------------------------------------------------------------------
+
+__attribute__((always_inline)) struct bpf_u128_pair __bpf_mul128(
+    unsigned long long alo, unsigned long long ahi, unsigned long long blo, unsigned long long bhi) {
+    struct bpf_u128_pair r = __bpf_mul64_wide(alo, blo);
+    r.hi += alo * bhi + ahi * blo;
+    return r;
+}
+
+static __attribute__((always_inline)) struct bpf_u128_pair bpf_u128_negate(unsigned long long lo, unsigned long long hi) {
+    struct bpf_u128_pair r;
+    r.lo = 0 - lo;
+    r.hi = 0 - hi - (lo != 0);
+    return r;
+}
+
+// Quotient flips when the operand signs differ; remainder takes the
+// dividend's sign. The fixups inline; the unsigned division stays a call.
+__attribute__((always_inline)) struct bpf_u128_pair __bpf_sdiv128(
+    unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi) {
+    int negN = (long long)nhi < 0;
+    int negD = (long long)dhi < 0;
+    struct bpf_u128_pair n = negN ? bpf_u128_negate(nlo, nhi) : (struct bpf_u128_pair){nlo, nhi};
+    struct bpf_u128_pair d = negD ? bpf_u128_negate(dlo, dhi) : (struct bpf_u128_pair){dlo, dhi};
+    struct bpf_u128_pair q = __bpf_udiv128(n.lo, n.hi, d.lo, d.hi);
+    return negN != negD ? bpf_u128_negate(q.lo, q.hi) : q;
+}
+
+__attribute__((always_inline)) struct bpf_u128_pair __bpf_srem128(
+    unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi) {
+    int negN = (long long)nhi < 0;
+    int negD = (long long)dhi < 0;
+    struct bpf_u128_pair n = negN ? bpf_u128_negate(nlo, nhi) : (struct bpf_u128_pair){nlo, nhi};
+    struct bpf_u128_pair d = negD ? bpf_u128_negate(dlo, dhi) : (struct bpf_u128_pair){dlo, dhi};
+    struct bpf_u128_pair r = __bpf_urem128(n.lo, n.hi, d.lo, d.hi);
+    return negN ? bpf_u128_negate(r.lo, r.hi) : r;
 }

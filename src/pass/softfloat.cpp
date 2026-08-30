@@ -23,7 +23,7 @@
 #include "softfloat.h"
 
 #include "common.h"
-#include "bpf_capsule_abi.h"
+#include "runtime_symbols.h"
 
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/DIBuilder.h>
@@ -162,6 +162,21 @@ struct SoftFloat {
         return mapType(t) != t;
     }
 
+    AttributeList mapAttributes(AttributeList attributes, FunctionType* type) {
+        // nofpclass constrains an LLVM floating-point value and is invalid on
+        // the integer bit-pattern ABI. The other ABI and behavioural
+        // attributes remain meaningful after a scalar f32/f64 retype.
+        if (hasFloat(type->getReturnType())) {
+            attributes = attributes.removeRetAttribute(Ctx, Attribute::NoFPClass);
+        }
+        for (unsigned i = 0; i < type->getNumParams(); ++i) {
+            if (hasFloat(type->getParamType(i))) {
+                attributes = attributes.removeParamAttribute(Ctx, i, Attribute::NoFPClass);
+            }
+        }
+        return attributes;
+    }
+
     FunctionCallee routine(StringRef name, Type* ret, ArrayRef<Type*> args) {
         return M.getOrInsertFunction(name, FunctionType::get(ret, args, false));
     }
@@ -184,11 +199,13 @@ struct SoftFloat {
             }
             return ConstantInt::get(nt, bits.getZExtValue());
         }
-        if (isa<UndefValue>(c)) {
-            return UndefValue::get(nt);
-        }
         if (isa<PoisonValue>(c)) {
             return PoisonValue::get(nt);
+        }
+        // PoisonValue derives from UndefValue. Check it first so retyping
+        // does not silently weaken poison into ordinary undef.
+        if (isa<UndefValue>(c)) {
+            return UndefValue::get(nt);
         }
         if (isa<ConstantAggregateZero>(c)) {
             return Constant::getNullValue(nt);
@@ -259,27 +276,44 @@ struct SoftFloat {
         };
 
         switch (I.getOpcode()) {
+            case Instruction::BitCast: {
+                // A same-width float/integer bitcast is only a change in the
+                // source IR's view of the bits.  Once both sides use the
+                // integer representation it becomes the mapped operand
+                // itself; leaving the cast behind either preserves a float
+                // for the final validator or gives a rebuilt call an operand
+                // with its old, incompatible type.
+                Value* mapped = get(I.getOperand(0));
+                Type* mappedType = mapType(I.getType());
+                if ((hasFloat(I.getType()) || hasFloat(I.getOperand(0)->getType())) && mapped->getType() == mappedType) {
+                    return mapped;
+                }
+                return nullptr;
+            }
             case Instruction::FAdd:
-                return call2("__bpf_fadd", "__bpf_dadd", I.getOperand(0), I.getOperand(1));
+                return call2(bpf::sym::FAdd, bpf::sym::DAdd, I.getOperand(0), I.getOperand(1));
             case Instruction::FSub:
-                return call2("__bpf_fsub", "__bpf_dsub", I.getOperand(0), I.getOperand(1));
+                return call2(bpf::sym::FSub, bpf::sym::DSub, I.getOperand(0), I.getOperand(1));
             case Instruction::FMul:
-                return call2("__bpf_fmul", "__bpf_dmul", I.getOperand(0), I.getOperand(1));
+                return call2(bpf::sym::FMul, bpf::sym::DMul, I.getOperand(0), I.getOperand(1));
             case Instruction::FDiv:
-                return call2("__bpf_fdiv", "__bpf_ddiv", I.getOperand(0), I.getOperand(1));
+                return call2(bpf::sym::FDiv, bpf::sym::DDiv, I.getOperand(0), I.getOperand(1));
             case Instruction::FRem:
-                return call2("__bpf_frem", "__bpf_drem", I.getOperand(0), I.getOperand(1));
+                return call2(bpf::sym::FRem, bpf::sym::DRem, I.getOperand(0), I.getOperand(1));
             case Instruction::FNeg: {
+                // A call like its siblings; the always_inline C body is one
+                // sign-bit flip and the post-link O2 folds it back to a XOR.
                 Value* x = get(I.getOperand(0));
                 bool f32 = isF32(I.getOperand(0));
-                return b.CreateXor(x, ConstantInt::get(f32 ? i32() : i64(), f32 ? 0x80000000ull : (1ull << 63)));
+                Type* t = f32 ? i32() : i64();
+                return b.CreateCall(routine(f32 ? bpf::sym::FNeg : bpf::sym::DNeg, t, {t}), {x});
             }
             case Instruction::FCmp: {
                 auto& fc = cast<FCmpInst>(I);
                 Value* x = fc.getOperand(0);
                 bool f32 = isF32(x);
                 Type* t = f32 ? i32() : i64();
-                Value* c = b.CreateCall(routine(f32 ? "__bpf_fcmp" : "__bpf_dcmp", i32(), {t, t}), {get(fc.getOperand(0)), get(fc.getOperand(1))});
+                Value* c = b.CreateCall(routine(f32 ? bpf::sym::FCmp : bpf::sym::DCmp, i32(), {t, t}), {get(fc.getOperand(0)), get(fc.getOperand(1))});
                 // The routine answers -1 / 0 / 1, or 2 when either side is NaN.
                 Value* zero = ConstantInt::get(i32(), 0);
                 Value* two = ConstantInt::get(i32(), 2);
@@ -344,11 +378,11 @@ struct SoftFloat {
             }
             case Instruction::FPExt: { // float -> double
                 Value* x = get(I.getOperand(0));
-                return b.CreateCall(routine("__bpf_f2d", i64(), {i32()}), {x});
+                return b.CreateCall(routine(bpf::sym::F2D, i64(), {i32()}), {x});
             }
             case Instruction::FPTrunc: { // double -> float
                 Value* x = get(I.getOperand(0));
-                return b.CreateCall(routine("__bpf_d2f", i32(), {i64()}), {x});
+                return b.CreateCall(routine(bpf::sym::D2F, i32(), {i64()}), {x});
             }
             case Instruction::SIToFP:
             case Instruction::UIToFP: {
@@ -356,7 +390,7 @@ struct SoftFloat {
                 bool sgn = I.getOpcode() == Instruction::SIToFP;
                 x = sgn ? b.CreateSExtOrTrunc(x, i64()) : b.CreateZExtOrTrunc(x, i64());
                 bool toF32 = I.getType()->isFloatTy();
-                StringRef n = toF32 ? (sgn ? "__bpf_i2f" : "__bpf_u2f") : (sgn ? "__bpf_i2d" : "__bpf_u2d");
+                StringRef n = toF32 ? (sgn ? bpf::sym::I2F : bpf::sym::U2F) : (sgn ? bpf::sym::I2D : bpf::sym::U2D);
                 return b.CreateCall(routine(n, toF32 ? i32() : i64(), {i64()}), {x});
             }
             case Instruction::FPToSI:
@@ -364,7 +398,7 @@ struct SoftFloat {
                 Value* x = get(I.getOperand(0));
                 bool sgn = I.getOpcode() == Instruction::FPToSI;
                 bool fromF32 = I.getOperand(0)->getType()->isFloatTy();
-                StringRef n = fromF32 ? (sgn ? "__bpf_f2i" : "__bpf_f2u") : (sgn ? "__bpf_d2i" : "__bpf_d2u");
+                StringRef n = fromF32 ? (sgn ? bpf::sym::F2I : bpf::sym::F2U) : (sgn ? bpf::sym::D2I : bpf::sym::D2U);
                 Value* r = b.CreateCall(routine(n, i64(), {fromF32 ? i32() : i64()}), {x});
                 return b.CreateTruncOrBitCast(r, I.getType());
             }
@@ -413,8 +447,7 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
             if ((isa<SIToFPInst, UIToFPInst>(instruction) && instruction.getOperand(0)->getType()->getIntegerBitWidth() > 64) ||
                 (isa<FPToSIInst, FPToUIInst>(instruction) && instruction.getType()->getIntegerBitWidth() > 64)) {
                 instruction.getContext().emitError(
-                    &instruction, "bpf-soft-float: conversions between floating point and integers wider than 64 bits are unsupported"
-                );
+                    &instruction, "bpf-soft-float: conversions between floating point and integers wider than 64 bits are unsupported");
                 return PreservedAnalyses::all();
             }
         }
@@ -453,7 +486,12 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
         auto* nf = Function::Create(nft, f->getLinkage(), f->getAddressSpace(), "", &module);
         nf->takeName(f);
         nf->copyAttributesFrom(f);
-        nf->setSubprogram(f->getSubprogram());
+        nf->setAttributes(SF.mapAttributes(f->getAttributes(), f->getFunctionType()));
+        // Capsule/native ownership and later-pass contracts are ordinary
+        // function metadata, not attributes.  Retyping must preserve every
+        // attachment, including the debug subprogram, before the old husk is
+        // detached and destroyed.
+        nf->copyMetadata(f, 0);
         f->setSubprogram(nullptr);
         nf->splice(nf->begin(), f);
         for (unsigned i = 0; i < f->arg_size(); i++) {
@@ -505,52 +543,137 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
                     lowered++;
                     continue;
                 }
-                // Floating-point intrinsics: the ones with an exact integer
-                // equivalent are expanded here. The rest (llvm.sqrt,
-                // llvm.floor, the transcendentals — Clang emits these directly
-                // for the plain libm calls) have no integer routine, so they
-                // publish CAPSULE_ERROR_UNSUPPORTED_FP_INTRINSIC and yield
-                // zero: the host sees a distinct code, never a plausible
-                // wrong number.
+                // Floating-point intrinsics all lower the same way: to a call
+                // of the C implementation an ordinary source-level call would
+                // reach by name (foreign bitcode such as rustc's spells libm
+                // calls as intrinsics). One mechanism, no special cases —
+                // always_inline bodies (fabs, copysign) fold back to their
+                // bit ops during the post-link O2. An unknown FP intrinsic,
+                // or a mapped one whose implementation is not linked, is a
+                // compile-time error: code that cannot work fully does not
+                // build.
                 if (auto* ii = dyn_cast<IntrinsicInst>(&I)) {
                     if (!SF.hasFloat(ii->getFunctionType())) {
                         continue;
                     }
                     IRBuilder<> ib(ii);
                     bool f32 = ii->getType()->isFloatTy();
-                    Type* it = f32 ? SF.i32() : SF.i64();
-                    Value* nv = nullptr;
+                    // llvm.fmuladd explicitly permits separate multiply and
+                    // add rounding. Lower it to the integer primitives
+                    // directly. Routing it through the source-level fma()
+                    // implementation is recursive: Clang represents that
+                    // implementation's `a * b + c` as llvm.fmuladd too, and
+                    // the ordinary O2 tail-recursion pass then turns fma into
+                    // a silent infinite loop.
+                    if (ii->getIntrinsicID() == Intrinsic::fmuladd) {
+                        Type* type = f32 ? SF.i32() : SF.i64();
+                        Value* product = ib.CreateCall(
+                            SF.routine(f32 ? bpf::sym::FMul : bpf::sym::DMul, type, {type, type}), {get(ii->getArgOperand(0)), get(ii->getArgOperand(1))});
+                        repl[ii] = ib.CreateCall(SF.routine(f32 ? bpf::sym::FAdd : bpf::sym::DAdd, type, {type, type}), {product, get(ii->getArgOperand(2))});
+                        dead.push_back(ii);
+                        lowered++;
+                        continue;
+                    }
+                    StringRef base;
                     switch (ii->getIntrinsicID()) {
-                        case Intrinsic::fmuladd:
-                        case Intrinsic::fma: {
-                            Value* m = ib.CreateCall(
-                                SF.routine(f32 ? "__bpf_fmul" : "__bpf_dmul", it, {it, it}), {get(ii->getArgOperand(0)), get(ii->getArgOperand(1))}
-                            );
-                            nv = ib.CreateCall(SF.routine(f32 ? "__bpf_fadd" : "__bpf_dadd", it, {it, it}), {m, get(ii->getArgOperand(2))});
-                            break;
-                        }
                         case Intrinsic::fabs:
-                            nv = ib.CreateAnd(get(ii->getArgOperand(0)), ConstantInt::get(it, f32 ? 0x7fffffffull : ~(1ull << 63)));
+                            base = "fabs";
                             break;
-                        case Intrinsic::copysign: {
-                            uint64_t signBit = f32 ? 0x80000000ull : (1ull << 63);
-                            Value* mag = ib.CreateAnd(get(ii->getArgOperand(0)), ConstantInt::get(it, ~signBit));
-                            Value* sgn = ib.CreateAnd(get(ii->getArgOperand(1)), ConstantInt::get(it, signBit));
-                            nv = ib.CreateOr(mag, sgn);
+                        case Intrinsic::copysign:
+                            base = "copysign";
                             break;
-                        }
+                        case Intrinsic::fma:
+                            base = "fma";
+                            break;
+                        case Intrinsic::sqrt:
+                            base = "sqrt";
+                            break;
+                        case Intrinsic::floor:
+                            base = "floor";
+                            break;
+                        case Intrinsic::ceil:
+                            base = "ceil";
+                            break;
+                        case Intrinsic::trunc:
+                            base = "trunc";
+                            break;
+                        case Intrinsic::round:
+                            base = "round";
+                            break;
+                        case Intrinsic::rint:
+                            base = "rint";
+                            break;
+                        case Intrinsic::nearbyint:
+                            base = "nearbyint";
+                            break;
+                        case Intrinsic::sin:
+                            base = "sin";
+                            break;
+                        case Intrinsic::cos:
+                            base = "cos";
+                            break;
+                        case Intrinsic::tan:
+                            base = "tan";
+                            break;
+                        case Intrinsic::asin:
+                            base = "asin";
+                            break;
+                        case Intrinsic::acos:
+                            base = "acos";
+                            break;
+                        case Intrinsic::atan:
+                            base = "atan";
+                            break;
+                        case Intrinsic::atan2:
+                            base = "atan2";
+                            break;
+                        case Intrinsic::exp:
+                            base = "exp";
+                            break;
+                        case Intrinsic::exp2:
+                            base = "exp2";
+                            break;
+                        case Intrinsic::log:
+                            base = "log";
+                            break;
+                        case Intrinsic::log2:
+                            base = "log2";
+                            break;
+                        case Intrinsic::log10:
+                            base = "log10";
+                            break;
+                        case Intrinsic::pow:
+                            base = "pow";
+                            break;
+                        case Intrinsic::minnum:
+                            base = "fmin";
+                            break;
+                        case Intrinsic::maxnum:
+                            base = "fmax";
+                            break;
                         default:
-                            ib.CreateStore(
-                                ConstantInt::get(
-                                    Type::getInt64Ty(module.getContext()),
-                                    bpf::ExitWordValue(CAPSULE_ERROR_UNSUPPORTED_FP_INTRINSIC)
-                                ), // "float intrinsic"
-                                bpf::ExitWordPointer(ib, f)
-                            );
-                            nv = Constant::getNullValue(it);
                             break;
                     }
-                    repl[ii] = nv;
+                    if (base.empty()) {
+                        ii->getContext().emitError(ii, Twine("bpf-soft-float: no integer lowering for ") + ii->getCalledFunction()->getName());
+                        return PreservedAnalyses::all();
+                    }
+                    std::string name = f32 ? (base + "f").str() : base.str();
+                    Function* impl = module.getFunction(name);
+                    // Signatures were retyped before this walk, so a linked
+                    // implementation already has the integer form and can be
+                    // called with the mapped operands.
+                    if (!impl || impl->isDeclaration()) {
+                        ii->getContext().emitError(ii,
+                            Twine("bpf-soft-float: ") + ii->getCalledFunction()->getName() + " needs " + name +
+                                ", which is not defined in the linked program (src/libc/mathfns.c provides it)");
+                        return PreservedAnalyses::all();
+                    }
+                    SmallVector<Value*> callArgs;
+                    for (Value* argument : ii->args()) {
+                        callArgs.push_back(get(argument));
+                    }
+                    repl[ii] = ib.CreateCall(impl, callArgs);
                     dead.push_back(ii);
                     lowered++;
                     continue;
@@ -569,9 +692,21 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
                     for (unsigned i = 0; i < call->arg_size(); i++) {
                         args.push_back(get(call->getArgOperand(i)));
                     }
-                    auto* nc = cb.CreateCall(nft, get(call->getCalledOperand()), args);
+                    SmallVector<OperandBundleDef> bundles;
+                    for (unsigned i = 0; i < call->getNumOperandBundles(); ++i) {
+                        OperandBundleUse bundle = call->getOperandBundleAt(i);
+                        SmallVector<Value*> inputs;
+                        for (const Use& input : bundle.Inputs) {
+                            inputs.push_back(get(input.get()));
+                        }
+                        bundles.emplace_back(bundle.getTagName().str(), inputs);
+                    }
+                    auto* nc = cb.CreateCall(nft, get(call->getCalledOperand()), args, bundles);
                     nc->setCallingConv(call->getCallingConv());
                     nc->setTailCallKind(call->getTailCallKind());
+                    nc->setAttributes(SF.mapAttributes(call->getAttributes(), oft));
+                    nc->copyMetadata(*call);
+                    nc->setDebugLoc(call->getDebugLoc());
                     if (!call->getType()->isVoidTy()) {
                         repl[call] = nc;
                     }
@@ -579,7 +714,7 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
                     continue;
                 }
                 // Not an FP operation: retype it if it carries an FP type.
-                if (auto* alloca = dyn_cast<AllocaInst>(&I)) {
+                if (isa<AllocaInst>(I)) {
                     continue;
                 }
                 if (auto* load = dyn_cast<LoadInst>(&I)) {
@@ -715,17 +850,23 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
     // take, so its BTF record contradicts the function itself and the kernel
     // rejects the object ("FUNC __bpf_dadd Invalid arg#1"). Keep the original
     // distinct DISubprogram -- every instruction and loop DILocation already
-    // names it -- and replace only its signature. Creating a second
-    // DISubprogram would split the function from those existing locations;
-    // stripping them fixes the verifier error at the cost of all source
-    // locations. Nothing downstream needs the parameter list to be accurate,
-    // only consistent. One DIBuilder is finalized once: finalizing per
-    // function corrupts the compile unit.
+    // names it -- and replace only its signature. Declarations instead carry
+    // uniqued (non-distinct) DISubprogram nodes, which LLVM forbids mutating;
+    // they produce no BTF FUNC record, so detach that stale declaration-only
+    // metadata. Creating a second node for a definition would split the
+    // function from its existing locations. Nothing downstream needs the
+    // parameter list to be accurate, only consistent. One DIBuilder is
+    // finalized once: finalizing per function corrupts the compile unit.
     if (!module.debug_compile_units().empty() && !retyped.empty()) {
         auto* cu = *module.debug_compile_units_begin();
         DIBuilder db(module, false, cu);
         for (auto* nf : retyped) {
-            if (!nf->getSubprogram()) {
+            DISubprogram* subprogram = nf->getSubprogram();
+            if (!subprogram) {
+                continue;
+            }
+            if (!subprogram->isDistinct()) {
+                nf->setSubprogram(nullptr);
                 continue;
             }
             // Element zero of a subroutine type is the return type (null for
@@ -735,7 +876,7 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
             Type* rt = nf->getReturnType();
             Metadata* retType = rt->isVoidTy() ? nullptr : static_cast<Metadata*>(BtfGetInt(db, rt->isIntegerTy() ? rt->getIntegerBitWidth() : 64, true));
             auto* sig = db.createSubroutineType(db.getOrCreateTypeArray({retType}));
-            nf->getSubprogram()->replaceType(sig);
+            subprogram->replaceType(sig);
         }
         db.finalize();
     }
@@ -752,4 +893,12 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
         module.getContext().emitError("bpf-soft-float produced an invalid module");
     }
     return lowered || !retype.empty() ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+bool RegisterSoftFloatPass(StringRef name, ModulePassManager& manager) {
+    if (name != "bpf-soft-float") {
+        return false;
+    }
+    manager.addPass(SoftFloatPass());
+    return true;
 }

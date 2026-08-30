@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// No stack to jump over: the real one is abandoned by design, and the
-// software one is walked by the runtime. Programs override their own
-// error handling (Lua does this through LUAI_TRY/LUAI_THROW).
 #pragma once
-typedef int jmp_buf[1];
-int setjmp(jmp_buf b);
-__attribute__((noreturn)) void longjmp(jmp_buf b, int v);
-#define _setjmp setjmp
-#define _longjmp longjmp
+
+// Opaque saved {pc, sp, fp, result-slot} software-machine state.
+typedef unsigned long long jmp_buf[4];
+int __bpf_capsule_setjmp(jmp_buf) __attribute__((returns_twice));
+void __bpf_capsule_longjmp(jmp_buf, int) __attribute__((noreturn));
+#define setjmp(env) __bpf_capsule_setjmp(env)
+#define longjmp(env, value) __bpf_capsule_longjmp(env, value)
+#define _setjmp(env) setjmp(env)
+#define _longjmp(env, value) longjmp(env, value)
