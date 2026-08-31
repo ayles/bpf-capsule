@@ -15,6 +15,7 @@
         llvmPkgs = pkgs.llvmPackages_23;
         latestKernel = pkgs.linuxPackages_latest.kernel.version;
         mkPackage = arguments: pkgs.callPackage ./package.nix ({ llvmPackages = llvmPkgs; } // arguments);
+        defaultPackage = mkPackage { };
         mkTests = targetKernel: mkPackage {
           inherit targetKernel;
           buildTests = true;
@@ -42,6 +43,11 @@
         exampleApp = package: executable: description: {
           type = "app";
           program = "${package}/libexec/bpf-capsule/examples/${executable}";
+          meta = { inherit description; };
+        };
+        toolApp = executable: description: {
+          type = "app";
+          program = "${defaultPackage}/bin/${executable}";
           meta = { inherit description; };
         };
         llamaFixtures = pkgs.runCommand "bpf-capsule-llama-fixtures" {
@@ -78,13 +84,14 @@
       in
       {
         packages = {
-          default = mkPackage { };
+          default = defaultPackage;
           examples-515 = mkExamples "5.15";
           examples-69 = mkExamples "6.9";
         } // testPackages // examplePackages;
 
-        apps = rec {
-          default = fib;
+        apps = {
+          bpf-capsule-cc = toolApp "bpf-capsule-cc" "Compile C or C++ to Capsule bitcode";
+          bpf-capsule-ld = toolApp "bpf-capsule-ld" "Link Capsule bitcode into a BPF object";
           fib = exampleApp examplePackages.fib "fib/fib" "Run the recursive Fibonacci example";
           zlib = exampleApp examplePackages.zlib "zlib/zlib" "Run zlib inside BPF";
           sqlite = exampleApp examplePackages.sqlite "sqlite/sqlite" "Run SQLite inside BPF";

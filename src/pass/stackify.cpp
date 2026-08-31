@@ -1870,8 +1870,9 @@ private:
             Value* slot = b.CreateStructGEP(FiberConfigType_, FiberConfig_, BPF_CAPSULE_OBJECT_CONFIG_FIBER_COUNT, "fiber.count.slot");
             auto* count = b.CreateLoad(I32_, slot, "fiber.count");
             count->setVolatile(true);
-            Value* valid = b.CreateAnd(
-                b.CreateICmpUGE(count, ConstantInt::get(I32_, 1)), b.CreateICmpULE(count, ConstantInt::get(I32_, FiberCount_)), "fiber.count.valid");
+            Value* aboveMinimum = b.CreateICmpUGE(count, ConstantInt::get(I32_, 1));
+            Value* belowMaximum = b.CreateICmpULE(count, ConstantInt::get(I32_, FiberCount_));
+            Value* valid = b.CreateAnd(aboveMinimum, belowMaximum, "fiber.count.valid");
             call->replaceAllUsesWith(b.CreateSelect(valid, count, ConstantInt::get(I32_, 0), "fiber.count.bounded"));
             call->eraseFromParent();
         }
@@ -4030,7 +4031,9 @@ private:
             // frame immediately after the carve).
             uint64_t slack = info.LocalsOffset + (align > FrameAlignment_ ? align : 0) + FrameAlignment_ - 1;
             need = b.CreateAnd(b.CreateAdd(need, ConstantInt::get(I64_, slack)), ConstantInt::get(I64_, ~(FrameAlignment_ - 1)));
-            Value* low = b.CreateICmpULT(SliceOffset(b, frontier), b.CreateAdd(need, ConstantInt::get(I64_, ReserveFloor_)));
+            Value* frontierOffset = SliceOffset(b, frontier);
+            Value* minimum = b.CreateAdd(need, ConstantInt::get(I64_, ReserveFloor_));
+            Value* low = b.CreateICmpULT(frontierOffset, minimum);
             Value* over = b.CreateOr(tooMany, low, "carve.overflow");
 
             BasicBlock* block = alloca.getParent();
@@ -4233,9 +4236,13 @@ private:
         auto field = [&](int64_t offset) { return b.CreateGEP(I8_, env, ConstantInt::get(I64_, offset)); };
         b.CreateStore(ConstantInt::get(I32_, 0), slot);
         b.CreateStore(ConstantInt::get(I32_, resumePc), field(JumpPcOffset));
-        b.CreateStore(b.CreateLoad(I64_, SpPtr(b)), field(JumpSpOffset));
+        Value* sp = b.CreateLoad(I64_, SpPtr(b));
+        Value* spField = field(JumpSpOffset);
+        b.CreateStore(sp, spField);
         b.CreateStore(info.Fp, field(JumpFpOffset));
-        b.CreateStore(b.CreatePtrToInt(slot, I64_), field(JumpResultOffset));
+        Value* slotAddress = b.CreatePtrToInt(slot, I64_);
+        Value* resultField = field(JumpResultOffset);
+        b.CreateStore(slotAddress, resultField);
 
         IRBuilder<> rb(call);
         rb.SetCurrentDebugLocation(call->getDebugLoc());
@@ -4255,9 +4262,15 @@ private:
         Value* value = call->getArgOperand(1);
         value = b.CreateSelect(b.CreateICmpEQ(value, ConstantInt::get(I32_, 0)), ConstantInt::get(I32_, 1), value, "longjmp.value");
         b.CreateStore(value, b.CreateIntToPtr(load(I64_, JumpResultOffset), PointerType::get(Ctx_, 0)));
-        b.CreateStore(load(I64_, JumpSpOffset), SpPtr(b));
-        b.CreateStore(load(I64_, JumpFpOffset), FpPtr(b));
-        b.CreateStore(load(I32_, JumpPcOffset), PcPtr(b));
+        Value* sp = load(I64_, JumpSpOffset);
+        Value* spSlot = SpPtr(b);
+        b.CreateStore(sp, spSlot);
+        Value* fp = load(I64_, JumpFpOffset);
+        Value* fpSlot = FpPtr(b);
+        b.CreateStore(fp, fpSlot);
+        Value* pc = load(I32_, JumpPcOffset);
+        Value* pcSlot = PcPtr(b);
+        b.CreateStore(pc, pcSlot);
         b.CreateRet(ConstantInt::get(I32_, ActionContinue));
         for (Instruction* inst = call; inst;) {
             Instruction* next = inst->getNextNode();

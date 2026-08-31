@@ -111,6 +111,10 @@ Each example is also directly runnable. For example:
 sudo nix run .#lua-xdp -- "$PWD/examples/lua-xdp/packet_observer.lua" eth0
 ```
 
+The compiler drivers are exposed explicitly as `.#bpf-capsule-cc` and
+`.#bpf-capsule-ld`; there is no default app because the flake has no single
+main executable.
+
 Without Nix, provide CMake 3.21 or newer, LLVM and Clang 23 from the same
 installation, libbpf 1.4 or newer, bpftool, pkg-config, libelf, zlib, and zstd.
 

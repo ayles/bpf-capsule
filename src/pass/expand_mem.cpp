@@ -246,7 +246,9 @@ public:
                 } else if (callee->getName() == "memmove") {
                     Value* src = call->getArgOperand(1);
                     Value* len = b.CreateZExtOrTrunc(call->getArgOperand(2), i64);
-                    auto* isBackward = b.CreateICmpUGT(b.CreatePtrToInt(dst, i64), b.CreatePtrToInt(src, i64));
+                    Value* dstAddress = b.CreatePtrToInt(dst, i64);
+                    Value* srcAddress = b.CreatePtrToInt(src, i64);
+                    auto* isBackward = b.CreateICmpUGT(dstAddress, srcAddress);
                     Instruction* thenTerm = nullptr;
                     Instruction* elseTerm = nullptr;
                     SplitBlockAndInsertIfThenElse(isBackward, inst->getIterator(), &thenTerm, &elseTerm);
