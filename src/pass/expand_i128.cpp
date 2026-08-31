@@ -78,7 +78,10 @@ struct ExpandI128Pass : public PassInfoMixin<ExpandI128Pass> {
                 b.CreateTrunc(b.CreateLShr(d, 64), i64),
             };
             auto [lo, hi] = EmitHelperCall(module, b, name, args, bin);
-            Value* out = b.CreateOr(b.CreateZExt(lo, i128), b.CreateShl(b.CreateZExt(hi, i128), 64));
+            Value* outLo = b.CreateZExt(lo, i128);
+            Value* outHi = b.CreateZExt(hi, i128);
+            outHi = b.CreateShl(outHi, 64);
+            Value* out = b.CreateOr(outLo, outHi);
             bin->replaceAllUsesWith(out);
             bin->eraseFromParent();
         }

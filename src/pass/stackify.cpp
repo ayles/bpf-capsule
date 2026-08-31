@@ -2518,7 +2518,9 @@ private:
                 Value* pc = lb.CreateLoad(I32_, pcSlot, "pc");
                 Value* isCompleted = lb.CreateICmpEQ(pc, DonePc());
                 Value* hasExited = lb.CreateICmpNE(lb.CreateLoad(I64_, OutcomePtr(lb)), ConstantInt::get(I64_, 0));
-                Value* stopped = lb.CreateOr(lb.CreateICmpEQ(pc, ConstantInt::get(I32_, 0)), lb.CreateOr(isCompleted, hasExited));
+                Value* isIdle = lb.CreateICmpEQ(pc, ConstantInt::get(I32_, 0));
+                Value* isTerminal = lb.CreateOr(isCompleted, hasExited);
+                Value* stopped = lb.CreateOr(isIdle, isTerminal);
                 lb.CreateCondBr(stopped, terminal, entry);
                 IRBuilder<> tlb(terminal);
                 tlb.CreateCondBr(isCompleted, completed, stop);
@@ -4413,7 +4415,9 @@ private:
         Value* pc = b.CreateLoad(I32_, pcSlot, "pc");
         Value* isCompleted = b.CreateICmpEQ(pc, DonePc());
         Value* hasExited = b.CreateICmpNE(b.CreateLoad(I64_, OutcomePtr(b, fiber)), ConstantInt::get(I64_, 0));
-        Value* stopped = b.CreateOr(b.CreateICmpEQ(pc, ConstantInt::get(I32_, 0)), b.CreateOr(isCompleted, hasExited));
+        Value* isIdle = b.CreateICmpEQ(pc, ConstantInt::get(I32_, 0));
+        Value* isTerminal = b.CreateOr(isCompleted, hasExited);
+        Value* stopped = b.CreateOr(isIdle, isTerminal);
         b.CreateCondBr(stopped, terminal, route);
 
         b.SetInsertPoint(terminal);
