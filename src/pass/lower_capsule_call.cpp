@@ -93,7 +93,7 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
         for (User* user : marker->users()) {
             auto* call = dyn_cast<CallBase>(user);
             if (!call || call->getCalledOperand()->stripPointerCasts() != marker) {
-                module.getContext().emitError(Twine("bpf-lower-capsule-call: address of ") + bpf::sym::CallMarker + " escapes");
+                module.getContext().emitError(Twine("bpf-lower-capsule-call: address of ") + marker->getName() + " escapes");
                 return PreservedAnalyses::all();
             }
             calls.push_back(call);
@@ -110,7 +110,7 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
 
         DenseMap<Function*, Function*> adaptedRoots;
         for (CallBase* markerCall : calls) {
-            if (markerCall->arg_size() < 5) {
+            if (markerCall->arg_size() < 6) {
                 ctx.emitError(markerCall,
                     "bpf-lower-capsule-call: capsule_call needs a fiber, "
                     "output description, and function");
@@ -121,16 +121,21 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
                 ctx.emitError(markerCall, "bpf-lower-capsule-call: capsule fiber must be an integer");
                 return PreservedAnalyses::all();
             }
-            Value* output = markerCall->getArgOperand(1);
-            auto* outputSize = dyn_cast<ConstantInt>(markerCall->getArgOperand(2));
-            auto* outputAlignment = dyn_cast<ConstantInt>(markerCall->getArgOperand(3));
+            Value* context = markerCall->getArgOperand(1);
+            if (!context->getType()->isPointerTy()) {
+                ctx.emitError(markerCall, "bpf-lower-capsule-call: capsule_call_ctx context must be a pointer");
+                return PreservedAnalyses::all();
+            }
+            Value* output = markerCall->getArgOperand(2);
+            auto* outputSize = dyn_cast<ConstantInt>(markerCall->getArgOperand(3));
+            auto* outputAlignment = dyn_cast<ConstantInt>(markerCall->getArgOperand(4));
             if (!output->getType()->isPointerTy() || !outputSize || !outputAlignment || !isPowerOf2_64(outputAlignment->getZExtValue())) {
                 ctx.emitError(markerCall,
                     "bpf-lower-capsule-call: capsule return storage must have "
                     "a constant size and alignment");
                 return PreservedAnalyses::all();
             }
-            Function* root = FunctionOperand(markerCall->getArgOperand(4));
+            Function* root = FunctionOperand(markerCall->getArgOperand(5));
             if (!root || root->isDeclaration()) {
                 ctx.emitError(markerCall,
                     "bpf-lower-capsule-call: capsule_call target must be a "
@@ -157,7 +162,7 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
                                                   "storage"));
                 return PreservedAnalyses::all();
             }
-            if (root->isVarArg() || markerCall->arg_size() - 5 != root->arg_size()) {
+            if (root->isVarArg() || markerCall->arg_size() - 6 != root->arg_size()) {
                 ctx.emitError(markerCall,
                     Twine("bpf-lower-capsule-call: capsule_call argument count "
                           "does not match ") +
@@ -169,20 +174,17 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
             SmallVector<Value*> arguments;
             for (unsigned index = 0; index < root->arg_size(); ++index) {
                 Type* parameter = root->getFunctionType()->getParamType(index);
-                if (parameter->isPointerTy()) {
-                    // A pointer crossing capsule_call is an entry-owned
-                    // verifier capability, not guest memory. Stackify keeps
-                    // it native and rematerializes it after each suspension.
-                    root->addParamAttr(index, Attribute::get(ctx, bpf::md::Borrowed));
-                }
-                Value* argument = ConvertArgument(builder, markerCall->getArgOperand(index + 5), parameter, *root, *markerCall);
+                Value* argument = ConvertArgument(builder, markerCall->getArgOperand(index + 6), parameter, *root, *markerCall);
                 if (!argument) {
                     return PreservedAnalyses::all();
                 }
                 arguments.push_back(argument);
             }
             Value* fiber32 = builder.CreateZExtOrTrunc(fiber, i32, "capsule.fiber");
-            SmallVector<Value*, 1> boundaryInputs{fiber32};
+            SmallVector<Value*, 2> boundaryInputs{fiber32};
+            if (!isa<ConstantPointerNull>(context)) {
+                boundaryInputs.push_back(context);
+            }
             OperandBundleDef boundary(bpf::md::CallBundle.str(), boundaryInputs);
             CallInst* call = builder.CreateCall(root, arguments, {boundary});
             call->setCallingConv(root->getCallingConv());

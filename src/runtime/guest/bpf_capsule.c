@@ -212,11 +212,11 @@ extern struct bpf_heap_array_value* __bpf_capsule_stack_region(uint32_t fiber);
 extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, struct bpf_capsule_stack_value* stack_base);
 #endif
 
-// Borrowed verifier pointers cannot be stored in maps or arena memory. XDP
-// calls use a parallel typed driver that keeps the exact PTR_TO_CTX provenance
+// Borrowed verifier pointers cannot be stored in maps or arena memory. Context
+// calls use a parallel typed driver that keeps the exact verifier provenance
 // in BPF registers/native spills through every global subprogram call. The
-// compiler supplies the step definition and selects this driver only for a
-// capsule_call whose root has a pointer argument.
+// compiler supplies the step definition and selects this driver only for an
+// explicit capsule_call_ctx/capsule_continue_ctx boundary.
 #if BPF_CAPSULE_FEATURE_ARENA
 extern int __bpf_capsule_trampoline_ctx_step(struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control);
 #else
@@ -233,11 +233,9 @@ extern int __bpf_capsule_trampoline_ctx_step(
 // does not descend into them from a call site -- so the body costs a call and a
 // branch no matter how much work it does.
 //
-// Iterations therefore multiply while verification only adds. This loop runs
-// The nested driver dispatches for roughly four instructions of simulation
-// per inner iteration, and the
-// entry program repeats the whole thing, giving span * repeats dispatches for
-// span + repeats worth of verification.
+// Iterations therefore multiply while verification only adds. The entry
+// program runs the nested driver, giving span * repeats dispatches for span +
+// repeats worth of verification.
 //
 // No helper, no map, and nothing newer than function-by-function verification.
 // One loop, and a short one, because of a second limit: the verifier tracks a
@@ -650,45 +648,48 @@ int __bpf_capsule_plan_broken(void) {
     return 0;
 }
 
-__BPF_CAPSULE_FN_CLASS("capsule.entry-glue")
-__attribute__((always_inline)) struct capsule_result __bpf_capsule_continue(
-    void* output, uint64_t output_size, uint64_t output_alignment, uint64_t continuation) {
-    struct capsule_result result = {
+static __attribute__((always_inline)) int __bpf_capsule_prepare_continue(struct capsule_result* result, uint64_t continuation, uint32_t* fiber) {
+    *result = (struct capsule_result){
         .code = CAPSULE_ERROR_INVALID_CONTINUATION,
         .status = CAPSULE_EXITED,
         .continuation = BPF_CAPSULE_NO_CONTINUATION,
     };
-    uint32_t fiber = __BPF_CAPSULE_NO_FIBER;
-    int consumed = __bpf_capsule_consume_continuation(continuation, &fiber);
+    *fiber = __BPF_CAPSULE_NO_FIBER;
+    int consumed = __bpf_capsule_consume_continuation(continuation, fiber);
     if (consumed < 0) {
         if (consumed == __BPF_CAPSULE_CLAIM_MAP_CORRUPT) {
-            result.code = CAPSULE_ERROR_POOL_CORRUPT;
+            result->code = CAPSULE_ERROR_POOL_CORRUPT;
         }
-        return result;
+        return 0;
     }
     if (!consumed) {
-        result.code = CAPSULE_ERROR_STALE_CONTINUATION;
-        return result;
+        result->code = CAPSULE_ERROR_STALE_CONTINUATION;
+        return 0;
     }
-    result.code = 0;
-    struct __bpf_capsule_fiber_control* control = __bpf_capsule_fiber_control(fiber);
-    result.continuation = __bpf_capsule_make_continuation(fiber);
+    result->code = 0;
+    struct __bpf_capsule_fiber_control* control = __bpf_capsule_fiber_control(*fiber);
+    result->continuation = __bpf_capsule_make_continuation(*fiber);
     if (control->status == CAPSULE_EXITED) {
-        __bpf_capsule_finish_exited(&result, fiber);
-        return result;
+        __bpf_capsule_finish_exited(result, *fiber);
+        return 0;
     }
     if (!control->pc) {
-        result.code = CAPSULE_ERROR_NOT_PENDING;
-        result.status = CAPSULE_EXITED;
-        result.continuation = BPF_CAPSULE_NO_CONTINUATION;
-        if (__bpf_capsule_fiber_cancel(fiber)) {
-            result.code = CAPSULE_ERROR_POOL_CORRUPT;
+        result->code = CAPSULE_ERROR_NOT_PENDING;
+        result->status = CAPSULE_EXITED;
+        result->continuation = BPF_CAPSULE_NO_CONTINUATION;
+        if (__bpf_capsule_fiber_cancel(*fiber)) {
+            result->code = CAPSULE_ERROR_POOL_CORRUPT;
         }
-        return result;
+        return 0;
     }
     control->status = CAPSULE_OK;
     control->code = 0;
-    (void)__bpf_capsule_trampoline(fiber);
+    return 1;
+}
+
+static __attribute__((always_inline)) struct capsule_result __bpf_capsule_finish_continue(
+    struct capsule_result result, uint32_t fiber, void* output, uint64_t output_size, uint64_t output_alignment) {
+    struct __bpf_capsule_fiber_control* control = __bpf_capsule_fiber_control(fiber);
     if (control->status == CAPSULE_EXITED) {
         __bpf_capsule_finish_exited(&result, fiber);
     } else if (control->status == CAPSULE_YIELD) {
@@ -721,6 +722,30 @@ __attribute__((always_inline)) struct capsule_result __bpf_capsule_continue(
         result.continuation = BPF_CAPSULE_NO_CONTINUATION;
     }
     return result;
+}
+
+__BPF_CAPSULE_FN_CLASS("capsule.entry-glue")
+__attribute__((always_inline)) struct capsule_result __bpf_capsule_continue(
+    void* output, uint64_t output_size, uint64_t output_alignment, uint64_t continuation) {
+    struct capsule_result result;
+    uint32_t fiber;
+    if (!__bpf_capsule_prepare_continue(&result, continuation, &fiber)) {
+        return result;
+    }
+    (void)__bpf_capsule_trampoline(fiber);
+    return __bpf_capsule_finish_continue(result, fiber, output, output_size, output_alignment);
+}
+
+__BPF_CAPSULE_FN_CLASS("capsule.entry-glue")
+__attribute__((always_inline)) struct capsule_result __bpf_capsule_continue_ctx(
+    void* context, void* output, uint64_t output_size, uint64_t output_alignment, uint64_t continuation) {
+    struct capsule_result result;
+    uint32_t fiber;
+    if (!__bpf_capsule_prepare_continue(&result, continuation, &fiber)) {
+        return result;
+    }
+    (void)__bpf_capsule_trampoline_ctx((struct xdp_md*)context, fiber);
+    return __bpf_capsule_finish_continue(result, fiber, output, output_size, output_alignment);
 }
 
 // Cancel a computation and release its fiber; contract in bpf_capsule.h.

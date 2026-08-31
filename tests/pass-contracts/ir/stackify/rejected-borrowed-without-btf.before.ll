@@ -8,15 +8,14 @@ target triple = "bpfel"
 @bpf_capsule_fibers = global [1 x %fiber_control] zeroinitializer, section ".bss.bpfctrl", align 8
 @bpf_capsule_config = constant %config zeroinitializer, section ".rodata.bpfconfig", align 4
 
-define void @borrowed_without_type(ptr "bpf.capsule.borrowed" %context) !bpf.capsule !0 {
+define void @borrowed_without_type() !bpf.capsule !0 {
 entry:
-  call void asm sideeffect "", "r"(ptr %context)
   ret void
 }
 
 define i32 @start(ptr %context, i32 %fiber) section "xdp" !bpf.native !0 {
 entry:
-  call void @borrowed_without_type(ptr %context) [ "bpf.capsule.call"(i32 %fiber) ]
+  call void @borrowed_without_type() [ "bpf.capsule.call"(i32 %fiber, ptr %context) ]
   ret i32 2
 }
 

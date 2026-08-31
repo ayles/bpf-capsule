@@ -70,6 +70,12 @@ static uint64_t monotonic_us(void) {
     return (uint64_t)time.tv_sec * 1000000ull + (uint64_t)time.tv_nsec / 1000;
 }
 
+static uint64_t program_run_time(int program_fd) {
+    struct bpf_prog_info info = {0};
+    unsigned int info_length = sizeof(info);
+    return bpf_prog_get_info_by_fd(program_fd, &info, &info_length) ? 0 : info.run_time_ns;
+}
+
 static int framebuffer_is_readable(const struct bpf_capsule* capsule, const unsigned char* framebuffer) {
     uintptr_t memory = (uintptr_t)bpf_capsule_memory_start(capsule);
     uintptr_t address = (uintptr_t)framebuffer;
@@ -317,6 +323,7 @@ int main(int argc, char** argv) {
     }
 
     int result = 1;
+    int stats_fd = -1;
     int terminal_configured = 0;
     struct termios saved = {0};
     struct terminal_output terminal = {0};
@@ -375,6 +382,7 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
     struct bpf_test_run_opts options = {.sz = sizeof(options)};
+    stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
     ctrl->wad = bpf_capsule_memory_reserved_start(&capsule);
     ctrl->wad_size = wad_size;
     if (import_wad(wad, &capsule, ctrl->wad, (size_t)wad_size)) {
@@ -404,6 +412,7 @@ int main(int argc, char** argv) {
     if (dump) { // deterministic input and PPMs out
         int dump_failed = 0;
         for (int i = 0; i < (int)dump_frames; ++i) {
+            uint64_t before = program_run_time(frame_fd);
             int frame_error = bpf_prog_test_run_opts(frame_fd, &options);
             if (frame_error || ctrl->capsule.status != CAPSULE_OK) {
                 report_capsule_stop("run failed", frame_error, ctrl);
@@ -421,7 +430,7 @@ int main(int argc, char** argv) {
                 dump_failed = 1;
                 break;
             }
-            if (record_frame(&samples, options.duration)) {
+            if (stats_fd >= 0 && record_frame(&samples, program_run_time(frame_fd) - before)) {
                 fprintf(stderr, "cannot record frame timing\n");
                 dump_failed = 1;
                 break;
@@ -539,6 +548,7 @@ int main(int argc, char** argv) {
             t0 = monotonic_us();
         }
         uint64_t due = ++tick * 1000000ull / 35;
+        uint64_t before = program_run_time(frame_fd);
         int frame_error = bpf_prog_test_run_opts(frame_fd, &options);
         if (frame_error || ctrl->capsule.status != CAPSULE_OK) {
             report_capsule_stop("run stopped", frame_error, ctrl);
@@ -556,7 +566,7 @@ int main(int argc, char** argv) {
             failed = 1;
             break;
         }
-        if (record_frame(&samples, options.duration)) {
+        if (stats_fd >= 0 && record_frame(&samples, program_run_time(frame_fd) - before)) {
             fprintf(stderr, "cannot record frame timing\n");
             failed = 1;
             break;
@@ -593,6 +603,9 @@ cleanup:
     free(terminal.bytes);
     if (wad) {
         fclose(wad);
+    }
+    if (stats_fd >= 0) {
+        close(stats_fd);
     }
     (void)bpf_capsule_release(&capsule);
     doom__destroy(skeleton);

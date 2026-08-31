@@ -25,6 +25,8 @@ entry:
 
 declare i32 @__bpf_capsule_trampoline_ctx_step(ptr, i32, ptr)
 
+declare ptr @__bpf_capsule_current_ctx()
+
 define i32 @__bpf_capsule_trampoline_ctx_l1(ptr %context, i32 %fiber, ptr %control) #0 {
 entry:
   %status = call i32 @__bpf_capsule_trampoline_ctx_step(ptr %context, i32 %fiber, ptr %control)
@@ -38,23 +40,24 @@ entry:
   ret i32 %status
 }
 
-define i32 @context_helper(ptr %context, i32 %value) !bpf.capsule !4 {
+define i32 @context_helper(i32 %value) !bpf.capsule !4 {
 entry:
+  %context = call ptr @__bpf_capsule_current_ctx()
   call void asm sideeffect "", "r"(ptr %context)
   %result = add i32 %value, 1
   ret i32 %result
 }
 
-define i32 @borrowed_root(ptr "bpf.capsule.borrowed" %context) !dbg !5 !bpf.capsule !4 {
+define i32 @borrowed_root() !bpf.capsule !4 {
 entry:
-  %first = call i32 @context_helper(ptr %context, i32 5)
-  %second = call i32 @context_helper(ptr %context, i32 %first)
+  %first = call i32 @context_helper(i32 5)
+  %second = call i32 @context_helper(i32 %first)
   ret i32 %second
 }
 
-define i32 @start(ptr %context, i32 %fiber) section "xdp" !bpf.native !4 {
+define i32 @start(ptr %context, i32 %fiber) section "xdp" !dbg !5 !bpf.native !4 {
 entry:
-  %result = call i32 @borrowed_root(ptr %context) [ "bpf.capsule.call"(i32 %fiber) ]
+  %result = call i32 @borrowed_root() [ "bpf.capsule.call"(i32 %fiber, ptr %context) ]
   ret i32 %result
 }
 
@@ -68,9 +71,9 @@ attributes #0 = { "capsule.trampoline" }
 !2 = !{i32 7, !"Dwarf Version", i32 5}
 !3 = !{i32 2, !"Debug Info Version", i32 3}
 !4 = !{}
-!5 = distinct !DISubprogram(name: "borrowed_root", scope: !1, file: !1, type: !6, spFlags: DISPFlagDefinition, unit: !0)
+!5 = distinct !DISubprogram(name: "start", scope: !1, file: !1, type: !6, spFlags: DISPFlagDefinition, unit: !0)
 !6 = !DISubroutineType(types: !7)
-!7 = !{!8, !9}
+!7 = !{!8, !9, !8}
 !8 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
 !9 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !10, size: 64)
 !10 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "xdp_md", file: !1, size: 192)

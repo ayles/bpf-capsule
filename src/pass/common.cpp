@@ -165,8 +165,14 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
         }
     }
     for (Instruction& inst : instructions(func)) {
-        if (auto* call = dyn_cast<CallBase>(&inst); call && IsVerifierPointerSource(*call)) {
-            native.insert(call);
+        if (auto* call = dyn_cast<CallBase>(&inst)) {
+            Function* callee = call->getCalledFunction();
+            if (callee && callee->getName() == bpf::sym::CurrentCtx) {
+                native.insert(call);
+                pointerProducingMemory.insert(call);
+            } else if (IsVerifierPointerSource(*call)) {
+                native.insert(call);
+            }
         }
     }
 

@@ -354,7 +354,6 @@ public:
         if (InputError_) {
             return false;
         }
-        PropagateBorrowedContextArguments();
         ValidateYieldCalls();
         ValidateJumpCalls();
         if (YieldError_ || JumpError_) {
@@ -374,6 +373,7 @@ public:
         if (InputError_) {
             return false;
         }
+        RematerializeBorrowedContextAccesses();
         ValidateScalarRootsDoNotReachBorrowedContext();
         if (InputError_) {
             return false;
@@ -622,36 +622,6 @@ private:
         }
     }
 
-    // A direct managed call can pass the one borrowed context without putting
-    // it in the software frame: mark the destination parameter so every use
-    // rematerializes the typed step argument. Only the exact context value (or
-    // a no-op pointer cast) qualifies; a derived pointer needs its derivation
-    // reproduced in the callee and is rejected by the suspension validator.
-    void PropagateBorrowedContextArguments() {
-        bool changed = true;
-        while (changed) {
-            changed = false;
-            for (auto&& [function, info] : Managed_) {
-                for (Instruction& instruction : instructions(*function)) {
-                    auto* call = dyn_cast<CallBase>(&instruction);
-                    Function* callee = call ? ResolveDirectCallee(*call) : nullptr;
-                    if (!call || !callee || !ManagedByFunction_.contains(callee)) {
-                        continue;
-                    }
-                    for (unsigned index = 0; index < call->arg_size() && index < callee->arg_size(); ++index) {
-                        auto* source = dyn_cast<Argument>(call->getArgOperand(index)->stripPointerCasts());
-                        Argument* destination = callee->getArg(index);
-                        if (!source || !source->hasAttribute(bpf::md::Borrowed) || destination->hasAttribute(bpf::md::Borrowed)) {
-                            continue;
-                        }
-                        destination->addAttr(Attribute::get(Ctx_, bpf::md::Borrowed));
-                        changed = true;
-                    }
-                }
-            }
-        }
-    }
-
     Value* CurrentFiberValue(IRBuilder<>& b) {
         if (!CurrentFiber_ || CurrentFiber_->getParent() != &Module_) {
             report_fatal_error("stackify: current fiber requested after accessor lowering");
@@ -747,71 +717,83 @@ private:
         builder.CreateCall(GetOutcomeSetter(), {fiber, ConstantInt::get(I64_, bpf::OutcomeValue(code))});
     }
 
+    Metadata* BorrowedContextDebugType(CallBase& boundary, Value* context) {
+        auto* argument = dyn_cast<Argument>(getUnderlyingObject(context));
+        DISubprogram* subprogram = argument ? argument->getParent()->getSubprogram() : nullptr;
+        auto types = subprogram && subprogram->getType() ? subprogram->getType()->getTypeArray() : DINodeArray();
+        if (!argument || types.size() <= argument->getArgNo() + 1 || !types[argument->getArgNo() + 1]) {
+            boundary.getContext().emitError(
+                &boundary, "stackify: capsule_call_ctx context must derive from a native function argument with debug/BTF type information");
+            InputError_ = true;
+            return nullptr;
+        }
+        return types[argument->getArgNo() + 1];
+    }
+
     void ConfigureBorrowedContext() {
-        SmallPtrSet<Function*, 4> boundaryRoots;
+        bool hasContextBoundary = false;
         for (Function& function : Module_) {
             for (Instruction& instruction : instructions(function)) {
                 auto* call = dyn_cast<CallBase>(&instruction);
-                Function* root = call && call->getOperandBundle(bpf::md::CallBundle) ? ResolveDirectCallee(*call) : nullptr;
-                if (root && llvm::any_of(root->args(), [](Argument& argument) { return argument.hasAttribute(bpf::md::Borrowed); })) {
-                    boundaryRoots.insert(root);
-                }
-            }
-        }
-
-        bool hasBorrowedArgument = false;
-        for (auto&& [function, info] : Managed_) {
-            for (Argument& argument : function->args()) {
-                if (!argument.hasAttribute(bpf::md::Borrowed)) {
+                std::optional<OperandBundleUse> boundary = call ? call->getOperandBundle(bpf::md::CallBundle) : std::nullopt;
+                Function* root = boundary ? ResolveDirectCallee(*call) : nullptr;
+                if (!root) {
                     continue;
                 }
-                hasBorrowedArgument = true;
-                if (!argument.getType()->isPointerTy()) {
-                    function->getContext().emitError(Twine("stackify: borrowed argument in ") + function->getName() + " is not a pointer");
+                if (boundary->Inputs.size() == 2) {
+                    hasContextBoundary = true;
+                    Metadata* type = BorrowedContextDebugType(*call, boundary->Inputs[1].get());
+                    if (!type) {
+                        return;
+                    }
+                    if (BorrowedDebugType_ && BorrowedDebugType_ != type) {
+                        call->getContext().emitError(call, "stackify: one borrowed verifier-context type is supported per Capsule object");
+                        InputError_ = true;
+                        return;
+                    }
+                    BorrowedDebugType_ = type;
+                } else if (boundary->Inputs.size() != 1) {
+                    call->getContext().emitError(call, "stackify: Capsule call boundary has an invalid context operand count");
                     InputError_ = true;
                     return;
                 }
             }
         }
-        if (!hasBorrowedArgument) {
-            return;
-        }
-        if (boundaryRoots.size() != 1) {
-            Module_.getContext().emitError("stackify: one borrowed verifier-context root is supported per Capsule object");
-            InputError_ = true;
+
+        if (!hasContextBoundary) {
             return;
         }
 
-        BorrowedFunction_ = *boundaryRoots.begin();
-        SmallVector<Argument*, 2> rootArguments;
-        for (Argument& argument : BorrowedFunction_->args()) {
-            if (argument.hasAttribute(bpf::md::Borrowed)) {
-                rootArguments.push_back(&argument);
-            }
-        }
-        if (rootArguments.size() != 1) {
-            BorrowedFunction_->getContext().emitError(
-                Twine("stackify: borrowed root ") + BorrowedFunction_->getName() + " must have exactly one verifier-context argument");
-            InputError_ = true;
-            return;
-        }
         BorrowedContext_ = true;
-        BorrowedArgument_ = rootArguments.front()->getArgNo();
-
-        DISubprogram* subprogram = BorrowedFunction_->getSubprogram();
-        if (!subprogram || !subprogram->getType() || subprogram->getType()->getTypeArray().size() <= BorrowedArgument_ + 1) {
-            BorrowedFunction_->getContext().emitError(
-                Twine("stackify: borrowed context in ") + BorrowedFunction_->getName() + " needs debug/BTF type information");
-            InputError_ = true;
-            return;
-        }
-        BorrowedDebugType_ = subprogram->getType()->getTypeArray()[BorrowedArgument_ + 1];
-        if (!BorrowedDebugType_) {
-            BorrowedFunction_->getContext().emitError(Twine("stackify: borrowed context in ") + BorrowedFunction_->getName() + " has no BTF pointer type");
-            InputError_ = true;
-            return;
-        }
         BorrowedCurrent_ = GetOrCreateAccessor(bpf::sym::CurrentCtx, FunctionType::get(PointerType::get(Ctx_, 0), false));
+    }
+
+    // LLVM may hoist one accessor above several managed calls even when each
+    // source use is local. Put the marker beside every use before liveness is
+    // checked, so the context itself never appears to cross a suspension and
+    // each resumed region receives the current physical invocation's value.
+    void RematerializeBorrowedContextAccesses() {
+        if (!BorrowedCurrent_) {
+            return;
+        }
+        SmallVector<CallBase*> accessors;
+        for (User* user : BorrowedCurrent_->users()) {
+            auto* call = dyn_cast<CallBase>(user);
+            if (!call || call->getCalledFunction() != BorrowedCurrent_) {
+                report_fatal_error("stackify: borrowed context accessor has a non-call use");
+            }
+            accessors.push_back(call);
+        }
+        for (CallBase* accessor : accessors) {
+            DebugLoc debugLoc = accessor->getDebugLoc();
+            RematerializeUses(*accessor, [&](BasicBlock::iterator at) -> Value* {
+                IRBuilder<> b(at->getParent(), at);
+                CallInst* current = b.CreateCall(BorrowedCurrent_);
+                current->setDebugLoc(debugLoc);
+                return current;
+            });
+            accessor->eraseFromParent();
+        }
     }
 
     // A verifier context exists only while executing the native entry that
@@ -829,20 +811,18 @@ private:
         for (Function& function : Module_) {
             for (Instruction& instruction : instructions(function)) {
                 auto* call = dyn_cast<CallBase>(&instruction);
-                if (!call || !call->getOperandBundle(bpf::md::CallBundle)) {
+                std::optional<OperandBundleUse> boundary = call ? call->getOperandBundle(bpf::md::CallBundle) : std::nullopt;
+                if (!boundary || boundary->Inputs.size() != 1) {
                     continue;
                 }
                 Function* root = call->getCalledFunction();
-                if (root && root != BorrowedFunction_) {
+                if (root) {
                     scalarRoots.push_back(root);
                 }
             }
         }
 
         auto directlyUsesBorrowedContext = [&](Function* function) {
-            if (llvm::any_of(function->args(), [](Argument& argument) { return argument.hasAttribute(bpf::md::Borrowed) && !argument.use_empty(); })) {
-                return true;
-            }
             return llvm::any_of(instructions(function), [&](Instruction& instruction) {
                 auto* call = dyn_cast<CallBase>(&instruction);
                 return call && call->getCalledFunction() == BorrowedCurrent_;
@@ -943,11 +923,7 @@ private:
     }
 
     bool IsRematerializableVerifierRoot(Value* value) const {
-        if (NativeHelperAllocas_.contains(dyn_cast<AllocaInst>(value))) {
-            return true;
-        }
-        auto* argument = dyn_cast<Argument>(value);
-        return argument && argument->hasAttribute(bpf::md::Borrowed);
+        return NativeHelperAllocas_.contains(dyn_cast<AllocaInst>(value));
     }
 
     SmallVector<const AllocaInst*, 8> NativeHelperAllocas(Function& function) const {
@@ -979,8 +955,8 @@ private:
             } else {
                 stream << "pointer returned by a BPF helper";
             }
-        } else if (auto* argument = dyn_cast<Argument>(value); argument && argument->hasAttribute(bpf::md::Borrowed)) {
-            stream << "borrowed verifier argument " << argument->getName();
+        } else if (auto* call = dyn_cast<CallBase>(value); call && call->getCalledFunction() == BorrowedCurrent_) {
+            stream << "borrowed verifier context";
         } else {
             stream << "value ";
             value->printAsOperand(stream, false);
@@ -1012,9 +988,9 @@ private:
 
     // Verifier-owned pointers are capabilities for one physical BPF region.
     // They may use registers or native BPF stack spills, but cannot enter the
-    // software frame which survives a return to the trampoline. The borrowed
-    // entry context is the sole exception: every physical step receives that
-    // root again and ReplaceArgumentUses rematerializes it at each use.
+    // software frame which survives a return to the trampoline. Context
+    // accessor uses were rematerialized above, so every region obtains the
+    // current invocation's context without source-level repetition.
     void ValidateVerifierPointerStorageAndCalls() {
         for (auto&& [function, info] : Managed_) {
             SmallPtrSet<Value*, 32> native;
@@ -1048,10 +1024,8 @@ private:
 
             LivenessAnalysis liveness(*function);
             for (CallBase* call : SuspensionCalls(*function)) {
-                Function* callee = ResolveDirectCallee(*call);
                 for (auto [index, argument] : llvm::enumerate(call->args())) {
-                    bool destinationBorrows = callee && index < callee->arg_size() && callee->getArg(index)->hasAttribute(bpf::md::Borrowed);
-                    if (native.contains(argument.get()) && !destinationBorrows) {
+                    if (native.contains(argument.get())) {
                         RejectVerifierPointer(argument.get(), *function, "is passed through a Capsule suspension point");
                         return;
                     }
@@ -4013,15 +3987,6 @@ private:
     }
 
     void ReplaceArgumentUses(Argument& arg, Value* frame, int64_t offset, DebugLoc debugLoc) {
-        if (arg.hasAttribute(bpf::md::Borrowed)) {
-            RematerializeUses(arg, [&](BasicBlock::iterator at) -> Value* {
-                IRBuilder<> b(at->getParent(), at);
-                auto* value = b.CreateCall(BorrowedCurrent_, {}, arg.getName());
-                value->setDebugLoc(debugLoc);
-                return value;
-            });
-            return;
-        }
         RematerializeUses(arg, [&](BasicBlock::iterator at) -> Value* {
             IRBuilder<> b(at->getParent(), at);
             auto* slot = b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, offset)});
@@ -4361,14 +4326,7 @@ private:
     // argument i lands one slot stride lower per index, matching the
     // callee's own ArgOffsets.
     void StoreCallArguments(IRBuilder<>& b, Value* out, int64_t bias, CallBase* call) {
-        Function* callee = ResolveDirectCallee(*call);
         for (unsigned i = 0; i < call->arg_size(); i++) {
-            // Verifier-owned pointers (XDP ctx today) are threaded through the
-            // typed native driver. They may never be spilled into a map or the
-            // arena: doing so destroys PTR_TO_CTX provenance and is rejected.
-            if (callee && i < callee->arg_size() && callee->getArg(i)->hasAttribute(bpf::md::Borrowed)) {
-                continue;
-            }
             auto* slot = b.CreateGEP(I8_, out, {ConstantInt::getSigned(I64_, bias - int64_t(ArgumentTopBytes_ + (i + 1) * ArgSlotSize_))});
             b.CreateStore(call->getArgOperand(i), slot);
         }
@@ -4837,18 +4795,19 @@ private:
     }
 
     bool NeedsScalarDriver() const {
-        bool scalarRoot = !BorrowedContext_;
-        if (BorrowedContext_) {
-            for (const Function& function : Module_) {
-                for (const Instruction& instruction : instructions(function)) {
-                    auto* call = dyn_cast<CallBase>(&instruction);
-                    if (call && call->getOperandBundle(bpf::md::CallBundle) && call->getCalledFunction() != BorrowedFunction_) {
-                        return true;
-                    }
+        if (!BorrowedContext_) {
+            return true;
+        }
+        for (const Function& function : Module_) {
+            for (const Instruction& instruction : instructions(function)) {
+                auto* call = dyn_cast<CallBase>(&instruction);
+                std::optional<OperandBundleUse> boundary = call ? call->getOperandBundle(bpf::md::CallBundle) : std::nullopt;
+                if (boundary && boundary->Inputs.size() == 1) {
+                    return true;
                 }
             }
         }
-        return scalarRoot;
+        return false;
     }
 
     void BuildTrampoline() {
@@ -5035,20 +4994,12 @@ private:
         IRBuilder<> b(call);
 
         std::optional<OperandBundleUse> boundary = call->getOperandBundle(bpf::md::CallBundle);
-        if (!boundary || boundary->Inputs.size() != 1) {
-            report_fatal_error("stackify: Capsule call boundary is missing its fiber ID");
+        if (!boundary || boundary->Inputs.empty() || boundary->Inputs.size() > 2) {
+            report_fatal_error("stackify: Capsule call boundary has an invalid fiber/context ABI");
         }
         Value* fiber = NormalizeFiber(b, boundary->Inputs[0].get());
-
-        Function* callee = call->getCalledFunction();
-        bool borrowsContext = callee == BorrowedFunction_;
-        Value* borrowedContext = nullptr;
-        if (borrowsContext) {
-            if (BorrowedArgument_ >= call->arg_size()) {
-                report_fatal_error("stackify: borrowed-context Capsule root is missing its context argument");
-            }
-            borrowedContext = call->getArgOperand(BorrowedArgument_);
-        }
+        bool borrowsContext = boundary->Inputs.size() == 2;
+        Value* borrowedContext = borrowsContext ? boundary->Inputs[1].get() : nullptr;
 
         ManagedFunction* root = ManagedByFunction_.lookup(call->getCalledFunction());
         if (!root || !root->FrameSize) {
@@ -5152,8 +5103,6 @@ private:
     Function* OutcomeAccessor_ = nullptr;
     Function* OutcomeSetter_ = nullptr;
     bool BorrowedContext_ = false;
-    Function* BorrowedFunction_ = nullptr;
-    unsigned BorrowedArgument_ = 0;
     Metadata* BorrowedDebugType_ = nullptr;
     Function* BorrowedCurrent_ = nullptr;
     bool YieldError_ = false;

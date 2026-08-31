@@ -6,11 +6,11 @@ target triple = "bpfel"
 
 @bpf_capsule_fibers = global [4 x %fiber] zeroinitializer
 
-define i64 @scalar_root(ptr "bpf.capsule.borrowed" %context, i32 %value) {
+define i64 @scalar_root(ptr %ordinary, i32 %value) {
 entry:
-  %context.bits = ptrtoint ptr %context to i64
+  %ordinary.bits = ptrtoint ptr %ordinary to i64
   %value.wide = zext i32 %value to i64
-  %result = add i64 %context.bits, %value.wide
+  %result = add i64 %ordinary.bits, %value.wide
   ret i64 %result
 }
 
@@ -19,11 +19,11 @@ entry:
   ret void
 }
 
-define i32 @call_scalar(ptr %context, i32 %fiber.index, i16 %value) section "xdp" {
+define i32 @call_scalar(ptr %context, ptr %ordinary, i32 %fiber.index, i16 %value) section "xdp" {
 entry:
   %output = alloca i64, align 8
   %0 = zext i16 %value to i32
-  %1 = call i64 @scalar_root(ptr %context, i32 %0) [ "bpf.capsule.call"(i32 %fiber.index) ]
+  %1 = call i64 @scalar_root(ptr %ordinary, i32 %0) [ "bpf.capsule.call"(i32 %fiber.index, ptr %context) ]
   %capsule.control = getelementptr inbounds [4 x %fiber], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index
   %2 = getelementptr inbounds nuw %fiber, ptr %capsule.control, i32 0, i32 0
   %3 = getelementptr inbounds nuw %fiber, ptr %capsule.control, i32 0, i32 5

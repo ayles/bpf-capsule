@@ -20,9 +20,24 @@
   buildTests ? false,
   buildBenchmarks ? buildTests,
   buildExamples ? false,
+  example ? null,
   targetKernel ? "5.15",
 }:
 let
+  allExamples = [
+    "fib"
+    "zlib"
+    "sqlite"
+    "lua"
+    "lua-xdp"
+    "wasm3"
+    "llama2"
+    "quickjs"
+    "rust"
+    "doom"
+  ];
+  buildsExamples = buildExamples || example != null;
+  builds = name: buildExamples || example == name;
   # Host tools use Nix's complete system compiler wrapper. bpf-capsule-cc
   # discovers the pinned unwrapped Clang separately; the host compiler has no
   # bearing on generated BPF and must retain its ordinary libc startup paths.
@@ -61,8 +76,11 @@ let
       --output "$out/case.c"
   '';
 in
+assert lib.assertMsg (example == null || lib.elem example allExamples)
+  "unknown BPF Capsule example: ${toString example}";
 stdenv.mkDerivation {
-  pname = "bpf-capsule-${builtins.replaceStrings [ "." ] [ "" ] targetKernel}";
+  pname = if example != null then "bpf-capsule-${example}"
+          else "bpf-capsule-${builtins.replaceStrings [ "." ] [ "" ] targetKernel}";
   version = "0.1.0";
 
   src = lib.fileset.toSource {
@@ -92,20 +110,26 @@ stdenv.mkDerivation {
     "-DBPF_CAPSULE_TARGET_KERNEL=${targetKernel}"
     "-DBPF_CAPSULE_BUILD_TESTS:BOOL=${lib.boolToString buildTests}"
     "-DBPF_CAPSULE_BUILD_BENCHMARKS:BOOL=${lib.boolToString buildBenchmarks}"
-    "-DBPF_CAPSULE_BUILD_EXAMPLES:BOOL=${lib.boolToString buildExamples}"
+    "-DBPF_CAPSULE_BUILD_EXAMPLES:BOOL=${lib.boolToString buildsExamples}"
     "-DBPF_CAPSULE_INSTALL_TEST_ARTIFACTS:BOOL=${lib.boolToString buildTests}"
+  ] ++ lib.optionals buildsExamples [
+    "-DBPF_CAPSULE_EXAMPLES:STRING=${if example != null then example else "all"}"
   ] ++ lib.optionals buildTests [
     "-DBPF_CAPSULE_CSMITH_CASE=${csmithCase}/case.c"
     "-DBPF_CAPSULE_CSMITH_INCLUDE_DIR=${csmith}/include"
-  ] ++ lib.optionals (buildTests || buildExamples) [
+  ] ++ lib.optionals (buildTests || builds "lua" || builds "lua-xdp") [
     "-DLUA_BPF_SOURCE_DIR=${luaSource}"
-  ] ++ lib.optionals buildExamples [
-    "-DBPF_CAPSULE_EXAMPLES:STRING=all"
+  ] ++ lib.optionals (builds "zlib") [
     "-DZLIB_BPF_SOURCE_DIR=${zlibSource}"
+  ] ++ lib.optionals (builds "sqlite") [
     "-DSQLITE_BPF_SOURCE_DIR=${sqliteSource}"
+  ] ++ lib.optionals (builds "wasm3") [
     "-DWASM3_BPF_SOURCE_DIR=${wasm3Source}"
+  ] ++ lib.optionals (builds "llama2") [
     "-DLLAMA2_BPF_SOURCE_DIR=${llama2Source}"
+  ] ++ lib.optionals (builds "quickjs") [
     "-DQUICKJS_BPF_SOURCE_DIR=${quickjsSource}"
+  ] ++ lib.optionals (builds "doom") [
     "-DPUREDOOM_SOURCE_DIR=${puredoomSource}"
   ];
 
@@ -115,7 +139,7 @@ stdenv.mkDerivation {
     llvmPackages.libllvm
     llvmPackages.clang-unwrapped
     bpftools
-  ] ++ lib.optionals buildExamples [
+  ] ++ lib.optionals (builds "rust") [
     cargo
     rustc
   ];
@@ -127,7 +151,7 @@ stdenv.mkDerivation {
     gtest
   ] ++ lib.optionals buildBenchmarks [
     gbenchmark
-  ] ++ lib.optionals buildExamples [
+  ] ++ lib.optionals (builds "zlib") [
     zlib
   ];
 
@@ -144,12 +168,13 @@ stdenv.mkDerivation {
     license = [
       lib.licenses.asl20
       lib.licenses.llvm-exception
-    ] ++ lib.optionals buildExamples [
+    ] ++ lib.optionals buildsExamples [
       lib.licenses.bsd3
-      lib.licenses.gpl2Only
       lib.licenses.mit
       lib.licenses.publicDomain
       lib.licenses.zlib
+    ] ++ lib.optionals (builds "doom") [
+      lib.licenses.gpl2Only
     ];
     platforms = lib.platforms.linux;
   };

@@ -40,21 +40,24 @@ The compiler partitions every object into two domains and rejects overlap
   persistent state does not live on the BPF stack, its source-level calls do
   not become BPF calls, and it can suspend at compiler-inserted points.
 
-The boundary is `capsule_call(&output, f, args...)` in an entry program —
-output size, alignment, and type are checked against `f`'s signature at
-compile time. It lowers to: acquire a **fiber**, lay out the arguments in
-fiber memory, set the fiber's PC to `f`'s entry, and drive. The drive
+The ordinary boundary is `capsule_call(&output, f, args...)` in an entry
+program. `capsule_call_ctx(ctx, &output, f, args...)` additionally lends the
+entry's verifier-owned context without adding it to `f`'s source signature.
+Output size, alignment, and type are checked against `f` at compile time. The
+call lowers to: acquire a **fiber**, lay out the ordinary arguments in fiber
+memory, set the fiber's PC to `f`'s entry, and drive. The drive
 returns `struct capsule_result { int32 code; enum capsule_status status;
 uint64 continuation; }`: `OK`, `EXITED` (one signed code space shaped like
 a shell's `$?` — 0..255 guest codes, negatives reserved for the
 framework), `YIELD`, or `PENDING` — the in-kernel drive budget ended before
 the computation did. Pending is not an error: `continuation` (fiber id +
 generation) is a resumable handle. A later BPF entry calls
-`capsule_continue(&output, continuation)`, and the host invokes that entry
-until the computation finishes. The erased return type is re-checked at
-runtime against a byte-count witness stamped into the fiber by the original
-call. That is how a long-running computation such as llama2 outlives one
-invocation.
+`capsule_continue(&output, continuation)`; a context computation instead uses
+`capsule_continue_ctx(ctx, &output, continuation)` and lends that invocation's
+live context. The host invokes the entry until the computation finishes. The
+erased return type is re-checked at runtime against a byte-count witness
+stamped into the fiber by the original call. That is how a long-running
+computation such as llama2 outlives one invocation.
 
 ## One window, one pointer representation
 
@@ -285,9 +288,12 @@ units first map the PC to its owning unit; a large verifier-ABI class also adds
 one real root call between the public step and the region tree. The 5.15
 profile shards very large compare trees to stay within its branch range. The
 7.1 profile instead dispatches the PC through an instruction array and
-`gotox`, without the ownership table. Borrowed verifier pointers such as an XDP
-context use a separate typed step; they remain in BPF registers or native
-spills and are never serialized into Capsule memory.
+`gotox`, without the ownership table. An explicit `*_ctx` boundary uses a
+separate typed step. Managed code reads its hidden argument through
+`capsule_borrowed_ctx()`; the compiler rematerializes that accessor in each
+region that uses it, so the context remains in BPF registers or native spills
+and is never serialized into Capsule memory. Pointers derived from the context
+must be derived and bounds-checked again after a region boundary.
 
 The selected region runs, stores its next PC, and returns. The two nested
 constant-trip driver loops provide roughly four million dispatches in one BPF

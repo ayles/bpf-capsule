@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// The two ways managed code meets a verifier context: borrowing it (the root
-// takes the live xdp_md and reads packet bytes directly) and yielding for it
-// (the native entry copies packet bytes into Capsule memory between yields).
-// Both must produce the identical checksum. The borrowed object additionally
-// proves scalar and context roots dispatch through one object. The reference
-// host's median-of-21 timing comparison was perf reporting and is dropped.
+// A context call can read packet bytes directly, and the same hidden context
+// is available again when a voluntary yield is resumed through
+// capsule_continue_ctx. Both paths must produce the identical checksum. The
+// non-yielding object additionally proves scalar and context roots dispatch
+// through one object.
 #include "capsule_gtest.h"
 
 #include "bpf_capsule_host.h"

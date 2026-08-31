@@ -7,12 +7,6 @@
 #define CONTEXT_INTEROP_FNV_OFFSET 0xcbf29ce484222325ull
 #define CONTEXT_INTEROP_FNV_PRIME 0x100000001b3ull
 
-struct context_interop_request {
-    unsigned char* destination;
-    unsigned int offset;
-    unsigned int length;
-};
-
 struct context_interop_output {
     struct capsule_result capsule;
     uint64_t checksum;

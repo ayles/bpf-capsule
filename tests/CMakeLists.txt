@@ -260,8 +260,8 @@ capsule_gtest_host(verifier_pointer_test
     INCLUDE_DIRECTORIES ${D}/verifier-pointer
 )
 
-# The two ways managed code meets a verifier context — borrowing it and
-# yielding for packet bytes — must produce the identical checksum.
+# A hidden verifier context works both directly and after an explicit
+# yield/continue pair within the same XDP invocation.
 capsule_bpf_object(ctx_borrowed
     SOURCES context-interop/context_interop_borrowed_bpf.c
     FLAGS -I${D}/context-interop

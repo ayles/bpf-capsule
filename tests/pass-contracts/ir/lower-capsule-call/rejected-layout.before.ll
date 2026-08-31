@@ -6,7 +6,7 @@ target triple = "bpfel"
 
 @bpf_capsule_fibers = global [1 x %fiber] zeroinitializer
 
-declare i32 @__bpf_capsule_call(i32, ptr, i64, i64, ptr, ...)
+declare i32 @__bpf_capsule_call(i32, ptr, ptr, i64, i64, ptr, ...)
 
 define i32 @root() {
 entry:
@@ -16,6 +16,6 @@ entry:
 define i32 @entry() {
 entry:
   %output = alloca i32, align 4
-  %status = call i32 (i32, ptr, i64, i64, ptr, ...) @__bpf_capsule_call(i32 0, ptr %output, i64 8, i64 8, ptr @root)
+  %status = call i32 (i32, ptr, ptr, i64, i64, ptr, ...) @__bpf_capsule_call(i32 0, ptr null, ptr %output, i64 8, i64 8, ptr @root)
   ret i32 %status
 }

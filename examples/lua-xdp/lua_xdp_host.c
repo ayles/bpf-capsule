@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "bpf_capsule_host.h"
 
@@ -141,6 +142,7 @@ int main(int argc, char** argv) {
 
     int result = 1;
     int poll_error = 0;
+    int stats_fd = -1;
     struct lua_xdp* skeleton = lua_xdp__open();
     struct bpf_capsule capsule = {0};
     struct ring_buffer* ring = NULL;
@@ -185,6 +187,11 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
+    stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
+    if (stats_fd < 0) {
+        fprintf(stderr, "cannot enable kernel runtime accounting: %s\n", strerror(errno));
+    }
+
     // A BPF link owns the attachment. Closing it on normal exit, crash or
     // terminal loss detaches the observer, and attach refuses to replace an
     // existing XDP program.
@@ -214,6 +221,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    struct bpf_prog_info info = {0};
+    unsigned int info_length = sizeof(info);
+    if (stats_fd >= 0 && !bpf_prog_get_info_by_fd(bpf_program__fd(program), &info, &info_length) && info.run_cnt) {
+        fprintf(stderr, "kernel execution: avg %llu ns per packet over %llu packets\n", (unsigned long long)(info.run_time_ns / info.run_cnt),
+            (unsigned long long)info.run_cnt);
+    }
     result = poll_error < 0 && poll_error != -EINTR;
 
 cleanup:
@@ -222,6 +235,9 @@ cleanup:
     }
     if (ring) {
         ring_buffer__free(ring);
+    }
+    if (stats_fd >= 0) {
+        close(stats_fd);
     }
     free(source);
     (void)bpf_capsule_release(&capsule);

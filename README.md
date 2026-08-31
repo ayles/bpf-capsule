@@ -10,7 +10,9 @@ Rust `core`/`alloc` inside BPF.
 
 ## How can large programs run in the kernel?
 
-An ordinary BPF entry starts a Capsule computation with `capsule_call()`.
+An ordinary BPF entry starts a Capsule computation with `capsule_call()` (or
+`capsule_call_ctx()` when managed code needs the entry's verifier-owned
+context).
 The compiler follows the root function, its callees, and possible callback
 targets to find the complete computation. After optimization and limited
 inlining, it cuts the computation into small, self-contained execution
@@ -59,7 +61,9 @@ framebuffer.
   `capsule_call()` returns `CAPSULE_PENDING` and a generation-checked
   continuation to the BPF caller; a later entry can resume it with
   `capsule_continue()`. Capsule code can stop intentionally with
-  `capsule_yield()`.
+  `capsule_yield()`. Context computations use the matching `*_ctx` calls; the
+  context is supplied afresh by the current BPF invocation and is never stored
+  in the fiber.
 - **The missing machine pieces are built in software.** Dynamic allocation,
   function pointers, software floating point, and wide-integer operations make
   useful freestanding libraries possible on a CPU target that has no FPU and
@@ -99,6 +103,12 @@ The example bundles fetch and build their third-party sources separately:
 ```sh
 nix build .#examples-515
 nix build .#examples-69
+```
+
+Each example is also directly runnable. For example:
+
+```sh
+sudo nix run .#lua-xdp -- "$PWD/examples/lua-xdp/packet_observer.lua" eth0
 ```
 
 Without Nix, provide CMake 3.21 or newer, LLVM and Clang 23 from the same
@@ -189,8 +199,9 @@ The Capsule environment is freestanding:
   memory, fences, and unsupported orderings are rejected;
 - freestanding `strtod` reports no conversion and `atof` returns zero; Lua
   cannot parse floating-point literals or strings, though arithmetic works;
-- verifier-owned pointers may be used by ordinary BPF code but may not be
-  stored in Capsule state across a region boundary;
+- an entry context may be lent explicitly with `capsule_call_ctx()` and read in
+  managed code with `capsule_borrowed_ctx()`; verifier-owned pointers derived
+  from it may not be stored in Capsule state across a region boundary;
 - all program and fiber capacities remain finite compile-time or load-time
   bounds.
 

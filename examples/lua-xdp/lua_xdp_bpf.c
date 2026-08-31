@@ -17,7 +17,8 @@ struct {
     __uint(max_entries, 1 << 20);
 } lua_xdp_events SEC(".maps");
 
-static size_t lua_xdp_dispatch_body(struct xdp_md* ctx) {
+static size_t lua_xdp_dispatch_body(void) {
+    struct xdp_md* ctx = capsule_borrowed_ctx();
     unsigned char* data = (unsigned char*)(long)ctx->data;
     unsigned char* data_end = (unsigned char*)(long)ctx->data_end;
     size_t length = (size_t)(data_end - data);
@@ -47,7 +48,7 @@ int lua_xdp_observe(struct xdp_md* ctx) {
     }
     mailbox->error_size = 0;
     size_t output_size;
-    struct capsule_result capsule = capsule_call(&output_size, lua_xdp_dispatch_body, ctx);
+    struct capsule_result capsule = capsule_call_ctx(ctx, &output_size, lua_xdp_dispatch_body);
     if (capsule.status == CAPSULE_OK) {
         struct lua_exchange* exchange = bpf_map_lookup_elem(&lua_exchange_by_cpu, &lua_exchange_key);
         if (exchange) {

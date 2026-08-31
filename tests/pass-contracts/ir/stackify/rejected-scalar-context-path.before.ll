@@ -17,9 +17,9 @@ entry:
   ret void
 }
 
-define void @borrowed_root(ptr "bpf.capsule.borrowed" %context) !dbg !5 !bpf.capsule !4 {
+define void @borrowed_root() !bpf.capsule !4 {
 entry:
-  call void asm sideeffect "", "r"(ptr %context)
+  call void @context_leaf()
   ret void
 }
 
@@ -29,9 +29,9 @@ entry:
   ret void
 }
 
-define i32 @start_context(ptr %context, i32 %fiber) section "xdp" !bpf.native !4 {
+define i32 @start_context(ptr %context, i32 %fiber) section "xdp" !dbg !5 !bpf.native !4 {
 entry:
-  call void @borrowed_root(ptr %context) [ "bpf.capsule.call"(i32 %fiber) ]
+  call void @borrowed_root() [ "bpf.capsule.call"(i32 %fiber, ptr %context) ]
   ret i32 2
 }
 
@@ -49,8 +49,9 @@ entry:
 !2 = !{i32 7, !"Dwarf Version", i32 5}
 !3 = !{i32 2, !"Debug Info Version", i32 3}
 !4 = !{}
-!5 = distinct !DISubprogram(name: "borrowed_root", scope: !1, file: !1, type: !6, spFlags: DISPFlagDefinition, unit: !0)
+!5 = distinct !DISubprogram(name: "start_context", scope: !1, file: !1, type: !6, spFlags: DISPFlagDefinition, unit: !0)
 !6 = !DISubroutineType(types: !7)
-!7 = !{null, !8}
-!8 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !9, size: 64)
-!9 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "xdp_md", file: !1, size: 192)
+!7 = !{!8, !9, !8}
+!8 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
+!9 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !10, size: 64)
+!10 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "xdp_md", file: !1, size: 192)

@@ -24,7 +24,8 @@ static __attribute__((noinline)) struct scalar_pair scalar_transform(uint64_t va
     return (struct scalar_pair){transformed, ~transformed};
 }
 
-static struct verifier_pointer_value verifier_pointer_body(struct xdp_md* context, uint64_t replacement) {
+static struct verifier_pointer_value verifier_pointer_body(uint64_t replacement) {
+    struct xdp_md* context = capsule_borrowed_ctx();
     struct scalar_pair ingress = scalar_transform(context->ingress_ifindex);
     struct scalar_pair queue = scalar_transform(context->rx_queue_index);
     const unsigned int key = 0;
@@ -50,7 +51,7 @@ static struct verifier_pointer_value verifier_pointer_body(struct xdp_md* contex
 
 SEC("xdp")
 int verifier_pointer_run(struct xdp_md* context) {
-    verifier_pointer_output.capsule = capsule_call(&verifier_pointer_output.value, verifier_pointer_body, context, 0x1122334455667788ull);
+    verifier_pointer_output.capsule = capsule_call_ctx(context, &verifier_pointer_output.value, verifier_pointer_body, 0x1122334455667788ull);
     if (verifier_pointer_output.capsule.status == CAPSULE_PENDING) {
         struct capsule_result reset = capsule_reset(verifier_pointer_output.capsule.continuation);
         if (reset.status != CAPSULE_OK) {
