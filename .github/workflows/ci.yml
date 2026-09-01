@@ -50,7 +50,8 @@ jobs:
           external-data-json-path: benchmark-cache/data.json
           summary-always: true
           save-data-file: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          fail-on-alert: true
+          # Shared-runner CPU variance is too large for this to be a correctness gate.
+          fail-on-alert: false
 
       - name: Save benchmark history
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
