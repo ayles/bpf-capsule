@@ -1,10 +1,10 @@
-source_filename = "varargs-rejected-invoke.ll"
+source_filename = "stackify-rejected-varargs-invoke.ll"
 target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
 target triple = "bpfel"
 
 declare i32 @__gxx_personality_v0(...)
 
-define i32 @variadic_callee(i32 %fixed, ...) {
+define i32 @variadic_callee(i32 %fixed, ...) !bpf.capsule !0 {
 entry:
   ret i32 %fixed
 }
@@ -22,3 +22,5 @@ failed:                                           ; preds = %entry
           cleanup
   ret i32 -1
 }
+
+!0 = !{}

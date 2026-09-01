@@ -1,1 +1,0 @@
-bpf-expand-varargs: invoke of variadic variadic_callee is unsupported

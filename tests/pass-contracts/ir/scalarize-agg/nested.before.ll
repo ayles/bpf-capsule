@@ -10,3 +10,10 @@ entry:
   store volatile %nested %value, ptr %destination, align 4
   ret %nested %value
 }
+
+define i128 @copy_i128(ptr %source, ptr %destination) {
+entry:
+  %value = load volatile i128, ptr %source, align 16
+  store volatile i128 %value, ptr %destination, align 16
+  ret i128 %value
+}

@@ -16,6 +16,7 @@ struct compiler_test_result {
     uint64_t memset_failures;
     uint64_t first_memset_failure;
     uint64_t parallel_phi_sum;
+    uint64_t varargs_value;
     uint64_t native_atomic_failures;
 };
 

@@ -28,17 +28,17 @@ entry:
   %fiber.index1 = and i32 %fiber.index, 0
   %0 = zext i32 %fiber.index1 to i64
   %1 = mul i64 %0, 262144
-  %stack.linear.offset = add i64 %1, 262128
+  %stack.linear.offset = add i64 %1, 262112
   %fiber.stack = getelementptr i8, ptr @bpf_call_stack, i64 %stack.linear.offset
   %root.fp = ptrtoint ptr %fiber.stack to i64
   %fiber.index2 = and i32 %fiber.index, 0
   %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index2, !bpf.capsule.sectioned.bounded !2
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber.control, i32 0, i32 0
   store i64 0, ptr %fiber.outcome, align 8
-  %root.return.pc = getelementptr i8, ptr %fiber.stack, i64 -8
-  store i32 -1, ptr %root.return.pc, align 4
-  %root.saved.fp = getelementptr i8, ptr %fiber.stack, i64 -16
+  %root.saved.fp = getelementptr i8, ptr %fiber.stack, i64 0
   store i64 0, ptr %root.saved.fp, align 8
+  %root.return.pc = getelementptr i8, ptr %fiber.stack, i64 8
+  store i32 -1, ptr %root.return.pc, align 4
   %fiber.index3 = and i32 %fiber.index, 0
   %fiber.control4 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index3, !bpf.capsule.sectioned.bounded !2
   %fiber.return.size = getelementptr inbounds nuw %fiber_control, ptr %fiber.control4, i32 0, i32 6
@@ -62,7 +62,7 @@ entry:
   %3 = mul i64 %2, 262144
   %stack.linear.offset12 = add i64 %3, 262128
   %fiber.stack13 = getelementptr i8, ptr @bpf_call_stack, i64 %stack.linear.offset12
-  %root.result = load i32, ptr %fiber.stack13, align 4
+  %root.result = load i32, ptr %fiber.stack13, align 8
   ret i32 %root.result
 }
 
@@ -123,9 +123,9 @@ unit.control.missing:                             ; preds = %unit.entry
   ret i32 1
 
 native_loop.prologue:                             ; preds = %unit.control.ready
-  %frame.sp = sub i64 %frame.fp, 16
+  %frame.sp = sub i64 %frame.fp, 0
   %slice.offset = and i64 %frame.fp, 262143
-  %10 = icmp ult i64 %slice.offset, 131104
+  %10 = icmp ult i64 %slice.offset, 131072
   br i1 %10, label %native_loop.prologue.overflow, label %entry
 
 entry:                                            ; preds = %native_loop.prologue
@@ -141,15 +141,17 @@ loop:                                             ; preds = %loop.bound, %entry
   br i1 %more, label %loop.bound, label %exit
 
 exit:                                             ; preds = %loop
-  store i32 %next, ptr %frame.addr, align 4
-  %11 = getelementptr i8, ptr %frame.addr, i64 -8
+  %result.slot = getelementptr i8, ptr %frame.addr, i64 16
+  store i32 %next, ptr %result.slot, align 8
+  %11 = getelementptr i8, ptr %frame.addr, i64 8
   %return.pc = load i32, ptr %11, align 4
-  %12 = getelementptr i8, ptr %frame.addr, i64 -16
+  %12 = getelementptr i8, ptr %frame.addr, i64 0
   %saved.fp = load i64, ptr %12, align 8
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   store i32 %return.pc, ptr %fiber.pc, align 4
+  %return.sp = add i64 %frame.fp, 16
   %fiber.sp5 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
-  store i64 %frame.fp, ptr %fiber.sp5, align 8
+  store i64 %return.sp, ptr %fiber.sp5, align 8
   %fiber.fp6 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   store i64 %saved.fp, ptr %fiber.fp6, align 8
   ret i32 0
@@ -165,17 +167,19 @@ bpf.loop.bound.fail:                              ; preds = %loop.bound
   %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index2, !bpf.capsule.sectioned.bounded !2
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber.control, i32 0, i32 0
   %14 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -42949672957)
-  store i32 0, ptr %frame.addr, align 4
-  %15 = getelementptr i8, ptr %frame.addr, i64 -8
-  %return.pc7 = load i32, ptr %15, align 4
-  %16 = getelementptr i8, ptr %frame.addr, i64 -16
-  %saved.fp8 = load i64, ptr %16, align 8
-  %fiber.pc9 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  store i32 %return.pc7, ptr %fiber.pc9, align 4
-  %fiber.sp10 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
-  store i64 %frame.fp, ptr %fiber.sp10, align 8
-  %fiber.fp11 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
-  store i64 %saved.fp8, ptr %fiber.fp11, align 8
+  %result.slot7 = getelementptr i8, ptr %frame.addr, i64 16
+  store i32 0, ptr %result.slot7, align 8
+  %15 = getelementptr i8, ptr %frame.addr, i64 8
+  %return.pc8 = load i32, ptr %15, align 4
+  %16 = getelementptr i8, ptr %frame.addr, i64 0
+  %saved.fp9 = load i64, ptr %16, align 8
+  %fiber.pc10 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
+  store i32 %return.pc8, ptr %fiber.pc10, align 4
+  %return.sp11 = add i64 %frame.fp, 16
+  %fiber.sp12 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
+  store i64 %return.sp11, ptr %fiber.sp12, align 8
+  %fiber.fp13 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
+  store i64 %saved.fp9, ptr %fiber.fp13, align 8
   ret i32 0
 
 native_loop.prologue.overflow:                    ; preds = %native_loop.prologue

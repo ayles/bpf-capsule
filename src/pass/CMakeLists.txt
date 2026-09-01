@@ -31,7 +31,6 @@ add_library(
     softfloat.cpp
     split_shift63.cpp
     stackify.cpp
-    varargs.cpp
     # late machine pass (registers itself into codegen via TargetPassConfig)
     machine_stack_budget.cpp
     unified_spills_mir.cpp

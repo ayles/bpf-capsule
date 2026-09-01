@@ -79,14 +79,13 @@
 // is a free fiber, which is what makes a fresh zero-filled map a valid
 // pool), BPF_CAPSULE_PC_DONE = computation complete and unconsumed,
 // anything else = a live entry/resume PC. sp is the allocation frontier and
-// fp the running frame's boundary; both are full based pointers into
+// fp the running frame's x86-shaped anchor; both are full based pointers into
 // capsule memory, the same representation the guest and host dereference.
-// Locals live below fp; the incoming linkage (the caller's saved fp at
-// fp-16, the 32-bit return pc at fp-8) sits above any padding needed to
-// align the fixed-stride argument slots inside the frame, and the
-// function's result lands just above fp in the caller's result zone. There
-// is no result register. return_size is the erased return type's byte-count
-// witness, checked when a type-blind continuation reap copies the result.
+// fp points at the saved caller fp, the 32-bit return pc occupies fp+8, and
+// the caller-owned result and actual arguments follow at positive offsets.
+// Locals and dynamic allocations grow toward lower addresses. There is no
+// result register. return_size is the erased return type's byte-count witness,
+// checked when a type-blind continuation reap copies the root result.
 struct __bpf_capsule_fiber_control {
     enum capsule_status status;
     int32_t code;

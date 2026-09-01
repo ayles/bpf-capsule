@@ -2,6 +2,7 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <setjmp.h>
+#include <stdarg.h>
 
 #include "bpf_capsule.h"
 #include "compiler_test.h"
@@ -98,6 +99,20 @@ __attribute__((noinline)) static int compiler_jump_once(int value) {
     return result;
 }
 
+__attribute__((noinline)) static int compiler_frame_leaf(void* expected_parent, void* expected_grandparent) {
+    void* current = __builtin_frame_address(0);
+    void* parent = __builtin_frame_address(1);
+    void* grandparent = __builtin_frame_address(2);
+    void* past_root = __builtin_frame_address(3);
+    return current && current != parent && parent == expected_parent && grandparent == expected_grandparent && !past_root;
+}
+
+__attribute__((noinline)) static int compiler_frame_probe(void) {
+    void* current = __builtin_frame_address(0);
+    void* parent = __builtin_frame_address(1);
+    return current && parent && current != parent && compiler_frame_leaf(current, parent);
+}
+
 static int compiler_jump_body(void) {
     return compiler_jump_once(37) * 10 + compiler_jump_once(0);
 }
@@ -173,6 +188,26 @@ static struct sparse_item sparse_items[64];
 static struct sparse_item* sparse_cursor;
 static struct sparse_item* sparse_initialized_cursor = &sparse_items[7];
 
+struct compiler_vararg_wide {
+    uint64_t first;
+    uint64_t second;
+    uint64_t third;
+};
+
+__attribute__((noinline)) static uint64_t compiler_vararg_sum(unsigned int fixed, ...) {
+    va_list list;
+    va_list copy;
+    va_start(list, fixed);
+    unsigned int small = va_arg(list, unsigned int);
+    va_copy(copy, list);
+    unsigned __int128 integer = va_arg(copy, unsigned __int128);
+    struct compiler_vararg_wide wide = va_arg(copy, struct compiler_vararg_wide);
+    struct sparse_item* pointer = va_arg(copy, struct sparse_item*);
+    va_end(copy);
+    va_end(list);
+    return fixed + small + (uint64_t)integer + (uint64_t)(integer >> 64) + wide.first + wide.second + wide.third + (pointer == &sparse_items[2] ? 1000 : 0);
+}
+
 #define COPY_BYTES 256000ul
 #define COPY_MAP_SIZE (1ul << 18)
 static unsigned char copy_storage[COPY_BYTES + 32];
@@ -247,8 +282,8 @@ __attribute__((noinline)) static unsigned parallel_phi_read(struct parallel_phi_
     return item->value;
 }
 
-__attribute__((noinline)) static unsigned
-parallel_phi_loop(struct parallel_phi_item* left, struct parallel_phi_item* right, unsigned count, parallel_phi_reader read) {
+__attribute__((noinline)) static unsigned parallel_phi_loop(
+    struct parallel_phi_item* left, struct parallel_phi_item* right, unsigned count, parallel_phi_reader read) {
     unsigned sum = 0;
     while (count--) {
         // The indirect managed calls force the two pointer PHIs to survive a
@@ -278,6 +313,14 @@ static void compiler_test_body(void) {
         failures |= 2;
     }
     checksum = checksum * 131 + (unsigned)many_args;
+
+    struct compiler_vararg_wide vararg_wide = {40, 50, 60};
+    unsigned __int128 vararg_integer = ((unsigned __int128)20 << 64) | 30;
+    uint64_t varargs_value = compiler_vararg_sum(10, 11u, vararg_integer, vararg_wide, &sparse_items[2]);
+    if (varargs_value != 1221) {
+        failures |= 32768;
+    }
+    compiler_result.varargs_value = varargs_value;
 
     uint64_t overflow_left = (uint64_t)(unsigned)n << 60;
     if (!multiply_overflow(overflow_left, 17)) {
@@ -408,6 +451,12 @@ static void compiler_test_body(void) {
         failures |= 2048;
     }
     checksum = checksum * 131 + __atomic_load_n(&compiler_capsule_atomic64, __ATOMIC_RELAXED);
+
+    int frame_chain = compiler_frame_probe();
+    if (!frame_chain) {
+        failures |= 16384;
+    }
+    checksum = checksum * 131 + (unsigned)frame_chain;
 
     compiler_result.failures = failures;
     compiler_result.checksum = checksum;

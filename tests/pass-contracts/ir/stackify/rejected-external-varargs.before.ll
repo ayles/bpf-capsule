@@ -1,4 +1,4 @@
-source_filename = "varargs-external.ll"
+source_filename = "stackify-rejected-external-varargs.ll"
 target triple = "bpfel"
 
 declare i32 @external(i32, ...)

@@ -1,0 +1,1 @@
+stackify: invoke of a managed variadic function is unsupported

@@ -27,7 +27,6 @@
 #include "stackify.h"
 #include "suspend_barriers.h"
 #include "validate_no_float.h"
-#include "varargs.h"
 
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Transforms/Scalar/InferAddressSpaces.h>
@@ -39,7 +38,7 @@ void RegisterCapsulePipelineCallbacks(llvm::PassBuilder& PB) {
         if (RegisterMemoryPass(Name, PM) || RegisterExpandSretPass(Name, PM) || RegisterExpandI128Pass(Name, PM) || RegisterSanitizeBtfNamesPass(Name, PM) ||
             RegisterLowerSDivPass(Name, PM) || RegisterLowerCapsuleCallPass(Name, PM) || RegisterCapsuleDomainsPass(Name, PM) ||
             RegisterLowerCapsuleExitPass(Name, PM) || RegisterSuspendBarrierPasses(Name, PM) || RegisterStackifyPass(Name, PM) ||
-            RegisterExpandVarargsPass(Name, PM) || RegisterSoftFloatPass(Name, PM) || RegisterInternalizePass(Name, PM)) {
+            RegisterSoftFloatPass(Name, PM) || RegisterInternalizePass(Name, PM)) {
             return true;
         }
         return false;

@@ -147,18 +147,26 @@ heap, recycled through a pool.
 Normal eBPF passes arguments in r1–r5 with a real call stack. The managed
 world replaces all of it:
 
-- **Frames** are carved from the fiber slice. Locals live below `fp`; the
-  incoming linkage sits at the frame's top edge — the caller's full saved
-  `fp` at `fp-16` and the 32-bit resume PC at `fp-8`, the analogue of
-  saved RBP + return address; the caller's result zone sits just above
-  `fp`. There is no result register: a callee writes its return value
-  into the caller's frame. Each function's frame size is an immediate in
-  its own prologue, checked against the slice floor (`fp & (slice-1)` is
-  exact because the bank is slice-aligned) before `sp` moves, so overflow
-  is a clean `CAPSULE_ERROR_STACK_OVERFLOW` at the offending entry.
-- **Arguments** go to fixed-stride slots below the callee's frame
-  boundary. One module-wide stride is what lets an indirect call work
-  from a token alone.
+- **Frames** use the familiar downward x86 shape. `fp` points at the saved
+  caller `fp`, the 32-bit resume PC occupies `fp+8`, and locals grow toward
+  lower addresses. The caller owns everything above that linkage: an optional
+  result slot followed by the actual arguments. There is no result register.
+  Each function's local-frame size is an immediate in its prologue, checked
+  against the slice floor (`fp & (slice-1)` is exact because the bank is
+  slice-aligned) before `sp` moves, so overflow is a clean
+  `CAPSULE_ERROR_STACK_OVERFLOW` at the offending entry.
+- **Arguments** proceed toward higher addresses in source order, each with an
+  eight-byte minimum slot and its stronger natural alignment preserved.
+  Variadic arguments immediately follow the fixed prefix: `va_list` is an
+  ordinary cursor, and `va_arg(T)` aligns and advances it by `T`. The callee
+  receives no hidden count; as in C, its format, count or sentinel determines
+  how many values it reads. Values such as `i128` occupy their full rounded
+  size. Clang represents a C aggregate passed by value as a pointer slot; the
+  caller copies the complete object after the argument tail and puts its
+  software-stack address in that slot. Indirect calls use the same layout
+  because every call instruction still carries its ABI signature, attributes,
+  and actual operands. The complete outgoing size is known at that call site,
+  so it is not stored in the frame or exposed through `va_list`.
 - **The fiber slice has two owners.** Managed frames and variable-size
   allocations occupy its upper half. Eligible scalar spills created by BPF
   register allocation use a transient extent in the lower half, reused by
@@ -167,9 +175,10 @@ world replaces all of it:
   the midpoint.
 - **Dynamic allocations move `sp`.** Each site checks the element count and
   byte size before subtracting, then keeps the resulting pointer in a fixed
-  frame slot so it survives suspension. `stacksave` records `sp`,
-  `stackrestore` restores it, and returning resets `sp` to `fp`, discarding the
-  complete frame and all of its carvings.
+  frame slot so it survives suspension. `stacksave` records `sp` and
+  `stackrestore` restores it. Return performs the software equivalent of
+  `leave; ret`; the caller's resume region then reclaims its statically known
+  outgoing area, including every actual variadic argument.
 - **A managed call is a suspension**: the caller serializes its live
   values, writes its resume PC into the linkage and the callee's PC into
   the fiber control, and returns to the dispatcher; return is symmetric.

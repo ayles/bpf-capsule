@@ -105,7 +105,7 @@ KernelVersion parseKernel(StringRef text) {
 // kernel whose verifier accepts sign-extending arena loads simply does not
 // get bpf-lower-arena-sext.
 std::string capsulePipeline(KernelVersion kernel) {
-    std::string pipeline = "bpf-expand-varargs,bpf-expand-sret,"
+    std::string pipeline = "bpf-expand-sret,"
                            "bpf-lower-capsule-call,bpf-capsule-domains,bpf-lower-capsule-exit,bpf-add-suspend-barriers,"
                            "function(bpf-validate-atomics),bpf-expand-i128,bpf-soft-float,";
     if (kernel < KernelVersion{6, 6}) {

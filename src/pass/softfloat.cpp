@@ -729,6 +729,17 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
                     dead.push_back(load);
                     continue;
                 }
+                if (auto* va = dyn_cast<VAArgInst>(&I)) {
+                    Type* nt = SF.mapType(va->getType());
+                    if (nt == va->getType()) {
+                        continue;
+                    }
+                    auto* replacement = new VAArgInst(va->getPointerOperand(), nt, va->getName(), va->getIterator());
+                    replacement->setDebugLoc(va->getDebugLoc());
+                    repl[va] = replacement;
+                    dead.push_back(va);
+                    continue;
+                }
                 if (auto* store = dyn_cast<StoreInst>(&I)) {
                     Value* v = store->getValueOperand();
                     if (!SF.hasFloat(v->getType())) {

@@ -76,7 +76,7 @@ TEST_F(CompilerTest, CoreSemantics) {
         drains++;
     }
     EXPECT_EQ(result->failures, 0u) << "guest failure bitmap 0x" << std::hex << result->failures;
-    EXPECT_EQ(result->checksum, 0x9c4e7252bfb60f08ull);
+    EXPECT_EQ(result->checksum, 0xfc2480581a29b119ull);
     EXPECT_EQ(result->pending, 0u);
     EXPECT_EQ(result->code, 0);
     EXPECT_EQ(result->sparse_pointer_difference, 34);
@@ -84,6 +84,7 @@ TEST_F(CompilerTest, CoreSemantics) {
     EXPECT_EQ(result->copy_failures, 0u);
     EXPECT_EQ(result->memset_failures, 0u);
     EXPECT_EQ(result->parallel_phi_sum, 297u);
+    EXPECT_EQ(result->varargs_value, 1221u);
 
     // The verifier-native entry uses the real BPF atomic ISA.
     ASSERT_EQ(Run("compiler_native_atomic_run"), 0) << strerror(errno);

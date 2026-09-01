@@ -67,14 +67,14 @@ constexpr int ActionContinue = 0;
 // Step actions are deliberately boolean: zero continues, one stops.
 constexpr int ActionYield = 1;
 
-// A managed link keeps its two scalar domains independent: the caller's
-// full fp pointer at fp-16 and the 32-bit resume PC at fp-8. Packing them
-// into one word would save one virtual-memory access, but adds a shift and
-// OR to every call and makes the old verifier track a packed value which
-// is later reused in frame-address arithmetic.
+// Match an x86 frame anchor: fp points at the saved caller fp and the return
+// region occupies the next machine word. Results and arguments belong to the
+// caller and follow at positive offsets; callee locals grow down from fp.
+// Packing the two linkage domains into one word would save one memory access,
+// but adds arithmetic to every call and obscures the frame chain.
 constexpr uint64_t LinkageBytes = 16;
-constexpr int64_t ReturnPcOffset = -8;
-constexpr int64_t SavedFpOffset = -16;
+constexpr int64_t SavedFpOffset = 0;
+constexpr int64_t ReturnPcOffset = 8;
 constexpr int64_t JumpPcOffset = 0;
 constexpr int64_t JumpSpOffset = 8;
 constexpr int64_t JumpFpOffset = 16;
@@ -291,7 +291,7 @@ struct ManagedFunction {
         StateKind Kind = StateKind::Entry;
     };
     SmallVector<State> States;
-    SmallVector<int64_t> ArgOffsets; // boundary-relative offset of each incoming argument (negative)
+    SmallVector<int64_t> ArgOffsets; // fp-relative positive offset of each fixed argument
     DenseMap<AllocaInst*, uint64_t> AllocaOffsets;
     // A run-time-sized allocation is carved below the frame; sp itself is
     // the carving frontier. Each site keeps an 8-byte handle so the
@@ -300,9 +300,31 @@ struct ManagedFunction {
     DenseMap<AllocaInst*, uint64_t> DynamicHandleOffsets;
     DenseMap<CallBase*, uint64_t> StackSaveOffsets;
     DenseMap<CallBase*, uint64_t> JumpResultOffsets;
-    uint64_t LocalsOffset = 0; // = result landing zone; statics start here
-    uint64_t FrameSize = 0;    // fp - sp at entry: zone + locals + spills + args + linkage
+    uint64_t FrameSize = 0; // fp - sp after the prologue: locals and spills only
+    uint64_t FixedArgsEnd = LinkageBytes;
+    uint64_t ResultOffset = 0;
     uint64_t ReturnSize = 0;
+};
+
+// One caller-owned outgoing area. The linkage is fixed, the optional result
+// and every actual slot retain their natural type and alignment. A byval slot
+// points at its full object copy after the cursor-visible arguments. Tail
+// padding restores the universal frame alignment. A variadic callee needs no
+// special signature: its fixed arguments use the prefix of this same layout,
+// and va_start begins at FixedArgsEnd.
+struct ManagedCallLayout {
+    SmallVector<uint64_t> ArgOffsets;
+    SmallVector<uint64_t> ArgAlignments;
+    SmallVector<uint64_t> ByValCopyOffsets; // zero for an ordinary value
+    uint64_t ResultOffset = 0;
+    uint64_t ArgsEnd = LinkageBytes;
+    uint64_t Size = LinkageBytes;
+};
+
+struct ManagedCallValue {
+    Type* SlotType = nullptr;
+    Type* ByValType = nullptr;
+    uint64_t ByValAlignment = 1;
 };
 
 // A maximal connected piece of transformed CFG.  Suspension edges have
@@ -351,6 +373,10 @@ public:
         bpf::MaterializeFunctionClasses(Module_);
         CanonicalizeManagedAliases();
         ChooseManagedFunctions();
+        if (InputError_) {
+            return false;
+        }
+        ValidateManagedCallABIs();
         if (InputError_) {
             return false;
         }
@@ -1436,20 +1462,17 @@ private:
     }
 
     void CheckSignature(Function& func) {
-        if (func.isVarArg()) {
-            func.getContext().emitError(Twine("stackify: variadic function survived ABI expansion: ") + func.getName());
-            InputError_ = true;
-            return;
-        }
         // An sret destination is an ordinary pointer into the caller's frame.
         // The caller remains live while a managed callee runs, and both frames
         // use unified memory, so preserving that pointer has the same semantics
-        // as any other pointer argument. ByVal and InAlloca still require ABI
-        // copies which StoreCallArguments does not implement.
-        for (auto&& attr : {Attribute::ByVal, Attribute::InAlloca}) {
+        // as any other pointer argument. byval has a direct representation in
+        // the software frame: the slot contains the copied object and the
+        // callee receives its address. The other copy-bearing forms have more
+        // elaborate lifetime/aliasing contracts and remain unsupported.
+        for (auto&& attr : {Attribute::ByRef, Attribute::InAlloca, Attribute::Preallocated}) {
             for (unsigned i = 0; i < func.arg_size(); i++) {
                 if (func.getArg(i)->hasAttribute(attr)) {
-                    func.getContext().emitError(Twine("stackify: byval/inalloca argument is unsupported in ") + func.getName());
+                    func.getContext().emitError(Twine("stackify: copy-bearing argument is unsupported in ") + func.getName());
                     InputError_ = true;
                     return;
                 }
@@ -1457,74 +1480,169 @@ private:
         }
     }
 
-    // Arguments and return values live in the frame with their natural LLVM
-    // types, so aggregates passed by value need no special handling. Argument
-    // slots retain one module-wide stride so an indirect call needs only its
-    // statically known function type; unlike the former uniform frames, each
-    // function reserves only the number of slots it actually accepts.
+    bool IncludeCallValue(Function& owner, ManagedCallValue value, const Twine& role) {
+        uint64_t bytes = 0;
+        uint64_t alignment = 0;
+        if (!FixedTypeLayout(owner, value.SlotType, role, bytes, alignment)) {
+            return false;
+        }
+        FrameAlignment_ = std::max<uint64_t>(FrameAlignment_, std::max<uint64_t>(8, alignment));
+        if (value.ByValType) {
+            if (!FixedTypeLayout(owner, value.ByValType, Twine(role) + " byval copy", bytes, alignment)) {
+                return false;
+            }
+            FrameAlignment_ = std::max<uint64_t>(FrameAlignment_, std::max({uint64_t(8), alignment, value.ByValAlignment}));
+        }
+        return true;
+    }
+
+    std::optional<std::pair<uint64_t, uint64_t>> ReserveCallValue(Function& owner, uint64_t& cursor, ManagedCallValue value, const Twine& role) {
+        uint64_t bytes = 0;
+        uint64_t alignment = 0;
+        if (!FixedTypeLayout(owner, value.SlotType, role, bytes, alignment)) {
+            return std::nullopt;
+        }
+        alignment = std::max<uint64_t>(8, alignment);
+        bytes = alignTo(bytes, uint64_t(8));
+        auto offset = ReserveFrameBytes(owner, cursor, bytes, alignment, role.str());
+        if (!offset) {
+            return std::nullopt;
+        }
+        return std::pair(*offset, alignment);
+    }
+
+    ManagedCallLayout LayoutCall(Function& owner, Type* result, ArrayRef<ManagedCallValue> arguments) {
+        ManagedCallLayout layout;
+        uint64_t cursor = LinkageBytes;
+        if (!result->isVoidTy()) {
+            auto reserved = ReserveCallValue(owner, cursor, {result, nullptr, 1}, "a managed result");
+            if (!reserved) {
+                return layout;
+            }
+            layout.ResultOffset = reserved->first;
+        }
+        for (ManagedCallValue argument : arguments) {
+            auto reserved = ReserveCallValue(owner, cursor, argument, "a managed argument");
+            if (!reserved) {
+                return layout;
+            }
+            layout.ArgOffsets.push_back(reserved->first);
+            layout.ArgAlignments.push_back(reserved->second);
+        }
+        layout.ArgsEnd = cursor;
+        for (ManagedCallValue argument : arguments) {
+            if (!argument.ByValType) {
+                layout.ByValCopyOffsets.push_back(0);
+                continue;
+            }
+            uint64_t bytes = 0;
+            uint64_t alignment = 0;
+            if (!FixedTypeLayout(owner, argument.ByValType, "a managed byval copy", bytes, alignment)) {
+                return layout;
+            }
+            alignment = std::max<uint64_t>({8, alignment, argument.ByValAlignment});
+            bytes = alignTo(bytes, uint64_t(8));
+            auto offset = ReserveFrameBytes(owner, cursor, bytes, alignment, "a managed byval copy");
+            if (!offset) {
+                return layout;
+            }
+            layout.ByValCopyOffsets.push_back(*offset);
+        }
+        if (!ReserveFrameBytes(owner, cursor, 0, FrameAlignment_, "managed call tail padding")) {
+            return layout;
+        }
+        layout.Size = cursor;
+        return layout;
+    }
+
+    ManagedCallLayout LayoutCall(CallBase& call) {
+        FunctionType* signature = call.getFunctionType();
+        SmallVector<ManagedCallValue> arguments;
+        arguments.reserve(call.arg_size());
+        for (unsigned i = 0; i < call.arg_size(); ++i) {
+            Type* slot = i < signature->getNumParams() ? signature->getParamType(i) : call.getArgOperand(i)->getType();
+            Type* byVal = call.getParamByValType(i);
+            arguments.push_back({slot, byVal, byVal ? call.getParamAlign(i).valueOrOne().value() : 1});
+        }
+        return LayoutCall(*call.getFunction(), call.getType(), arguments);
+    }
+
+    // The managed call frame follows cdecl's memory shape: fp names the saved
+    // caller fp, then come the return region, optional result, fixed arguments
+    // and the actual variadic tail. Every value gets an eight-byte minimum
+    // slot with its stronger natural alignment preserved; there is no global
+    // maximum slot and no separately packed variadic buffer. LLVM represents
+    // a C by-value aggregate as a pointer slot with a byval attribute; its
+    // complete copy follows the cursor-visible arguments in the same outgoing
+    // area, so the pointer remains valid until the caller reclaims the call.
     void LayOutArguments() {
-        uint64_t slot = 8;
-        uint64_t slotAlignment = 8;
+        // The fp anchor must satisfy every value and static-object alignment.
+        // Discover the complete convention before assigning a single offset.
         for (auto&& [func, info] : Managed_) {
             for (auto&& arg : func->args()) {
-                uint64_t bytes = 0;
-                uint64_t alignment = 0;
-                if (!FixedTypeLayout(*func, arg.getType(), "managed argument", bytes, alignment)) {
+                Type* byVal = arg.getParamByValType();
+                if (!IncludeCallValue(*func, {arg.getType(), byVal, byVal ? arg.getParamAlign().valueOrOne().value() : 1}, "managed argument")) {
                     return;
                 }
-                slot = std::max(slot, bytes);
-                slotAlignment = std::max(slotAlignment, alignment);
-                FrameAlignment_ = std::max(FrameAlignment_, alignment);
             }
             Type* ret = func->getReturnType();
             if (!ret->isVoidTy()) {
                 uint64_t alignment = 0;
-                if (!FixedTypeLayout(*func, ret, "managed result", info->ReturnSize, alignment)) {
+                if (!FixedTypeLayout(*func, ret, "managed result", info->ReturnSize, alignment) ||
+                    !IncludeCallValue(*func, {ret, nullptr, 1}, "managed result")) {
                     return;
                 }
-                FrameAlignment_ = std::max(FrameAlignment_, alignment);
             }
-            // A computed call can carry a signature which has no direct
-            // definition in this module. Its landing-zone type still belongs
-            // to the same frame ABI and must participate in the global
-            // alignment before any function is laid out.
             for (Instruction& instruction : instructions(*func)) {
-                auto* call = dyn_cast<CallBase>(&instruction);
-                if (!call || !IsManagedCall(call) || call->getType()->isVoidTy()) {
+                auto* alloca = dyn_cast<AllocaInst>(&instruction);
+                if (!alloca || NativeHelperAllocas_.contains(alloca)) {
                     continue;
                 }
-                uint64_t bytes = 0;
-                uint64_t alignment = 0;
-                if (!FixedTypeLayout(*func, call->getType(), "managed call result", bytes, alignment)) {
-                    return;
+                uint64_t alignment = alloca->getAlign().value();
+                StackAlignment_ = std::max(StackAlignment_, alignment);
+                if (alloca->isStaticAlloca()) {
+                    FrameAlignment_ = std::max(FrameAlignment_, alignment);
                 }
-                FrameAlignment_ = std::max(FrameAlignment_, alignment);
             }
         }
-        ArgSlotSize_ = alignTo(slot, slotAlignment);
-        // The link remains immediately below fp. Arguments begin below it,
-        // their module-wide ABI alignment instead of inheriting that eight-
-        // byte displacement from an otherwise aligned frame boundary.
-        ArgumentTopBytes_ = alignTo(LinkageBytes, slotAlignment);
-    }
+        for (Function& function : Module_) {
+            for (Instruction& instruction : instructions(function)) {
+                auto* call = dyn_cast<CallBase>(&instruction);
+                if (!call || (!call->getOperandBundle(bpf::md::CallBundle) && (!ManagedByFunction_.contains(&function) || !IsManagedCall(call)))) {
+                    continue;
+                }
+                if (!call->getType()->isVoidTy() && !IncludeCallValue(function, {call->getType(), nullptr, 1}, "managed call result")) {
+                    return;
+                }
+                FunctionType* signature = call->getFunctionType();
+                for (unsigned i = 0; i < call->arg_size(); ++i) {
+                    Type* slot = i < signature->getNumParams() ? signature->getParamType(i) : call->getArgOperand(i)->getType();
+                    Type* byVal = call->getParamByValType(i);
+                    if (!IncludeCallValue(function, {slot, byVal, byVal ? call->getParamAlign(i).valueOrOne().value() : 1}, "managed call argument")) {
+                        return;
+                    }
+                }
+            }
+        }
+        StackAlignment_ = std::max(StackAlignment_, FrameAlignment_);
 
-    // Results of every size land just above the callee's frame boundary,
-    // in the caller's result zone. A separate fiber-level result register
-    // for scalars measured slower and larger than reusing caller memory
-    // that is already hot.
-    uint64_t ResultSlotForType(Type* type, Function& owner) {
-        if (type->isVoidTy()) {
-            return 0;
+        for (auto&& [func, info] : Managed_) {
+            SmallVector<ManagedCallValue> arguments;
+            arguments.reserve(func->arg_size());
+            for (Argument& argument : func->args()) {
+                Type* byVal = argument.getParamByValType();
+                arguments.push_back({argument.getType(), byVal, byVal ? argument.getParamAlign().valueOrOne().value() : 1});
+            }
+            ManagedCallLayout layout = LayoutCall(*func, func->getReturnType(), arguments);
+            if (InputError_) {
+                return;
+            }
+            info->ResultOffset = layout.ResultOffset;
+            info->FixedArgsEnd = layout.ArgsEnd;
+            for (uint64_t offset : layout.ArgOffsets) {
+                info->ArgOffsets.push_back(int64_t(offset));
+            }
         }
-        uint64_t bytes = 0;
-        uint64_t alignment = 0;
-        if (!FixedTypeLayout(owner, type, "managed call result", bytes, alignment)) {
-            return 0;
-        }
-        if (alignment > FrameAlignment_) {
-            report_fatal_error("stackify: managed call result escaped the precomputed frame alignment");
-        }
-        return alignTo(bytes, uint64_t(8));
     }
 
     // Indirect calls are managed too: the callee value already carries the
@@ -1552,6 +1670,50 @@ private:
 
     bool IsLongjmpCall(CallBase* call) const {
         return LongjmpMarker_ && call->getCalledOperand()->stripPointerCasts() == LongjmpMarker_;
+    }
+
+    void ValidateManagedCallABIs() {
+        for (Function& function : Module_) {
+            for (Instruction& instruction : instructions(function)) {
+                if ((isa<VAStartInst>(instruction) || isa<VAEndInst>(instruction) || isa<VACopyInst>(instruction) || isa<VAArgInst>(instruction)) &&
+                    !ManagedByFunction_.contains(&function)) {
+                    instruction.getContext().emitError(
+                        &instruction, Twine("stackify: variadic operation in ") + function.getName() + " is outside the managed software-stack ABI");
+                    InputError_ = true;
+                    continue;
+                }
+                auto* call = dyn_cast<CallBase>(&instruction);
+                if (!call) {
+                    continue;
+                }
+                const bool boundary = call->getOperandBundle(bpf::md::CallBundle).has_value();
+                const bool managed = boundary || IsManagedCall(call);
+                if (managed) {
+                    for (unsigned i = 0; i < call->arg_size(); ++i) {
+                        if (call->paramHasAttr(i, Attribute::ByRef) || call->paramHasAttr(i, Attribute::InAlloca) ||
+                            call->paramHasAttr(i, Attribute::Preallocated)) {
+                            call->getContext().emitError(call, "stackify: copy-bearing managed call argument is unsupported");
+                            InputError_ = true;
+                            break;
+                        }
+                    }
+                }
+                if (!call->getFunctionType()->isVarArg() || boundary) {
+                    continue;
+                }
+                if (managed) {
+                    if (!isa<CallInst>(call)) {
+                        call->getContext().emitError(call, "stackify: invoke of a managed variadic function is unsupported");
+                        InputError_ = true;
+                    }
+                    continue;
+                }
+                Function* callee = ResolveDirectCallee(*call);
+                StringRef name = callee ? callee->getName() : StringRef("<indirect>");
+                call->getContext().emitError(call, Twine("stackify: variadic call to ") + name + " is outside the managed software-stack ABI");
+                InputError_ = true;
+            }
+        }
     }
 
     void ValidateYieldCalls() {
@@ -3487,7 +3649,7 @@ private:
         }
         StackAlignment_ = std::max(StackAlignment_, FrameAlignment_);
 
-        SmallPtrSet<Function*, 16> roots;
+        SmallVector<CallBase*> rootCalls;
         for (Function& function : Module_) {
             for (Instruction& instruction : instructions(function)) {
                 auto* call = dyn_cast<CallBase>(&instruction);
@@ -3498,40 +3660,31 @@ private:
                 if (!root || !ManagedByFunction_.contains(root)) {
                     report_fatal_error("stackify: Capsule boundary does not name a managed root");
                 }
-                roots.insert(root);
+                rootCalls.push_back(call);
             }
         }
 
         uint64_t largestFrame = 0;
         Function* largestFrameOwner = nullptr;
         uint64_t smallestFrame = UINT64_MAX;
-        uint64_t maxPush = ArgumentTopBytes_;
-        Function* maxPushOwner = Managed_.front().first;
-        uint64_t maxResult = 0;
-        Function* maxResultOwner = nullptr;
+        uint64_t maxOutgoing = 0;
+        Function* maxOutgoingOwner = Managed_.front().first;
         for (auto&& [func, info] : Managed_) {
-            // The result landing zone: every callee this function invokes
-            // writes its result at its own frame boundary, which is this
-            // function's sp at the call. The zone keeps those bytes dead;
-            // it is the lowest static, and run-time carvings float above
-            // their new sp by the same amount.
-            uint64_t zone = 0;
             for (Instruction& inst : instructions(*func)) {
                 auto* call = dyn_cast<CallBase>(&inst);
                 if (!call || !IsManagedCall(call)) {
                     continue;
                 }
-                zone = std::max(zone, ResultSlotForType(call->getType(), *func));
+                ManagedCallLayout layout = LayoutCall(*call);
                 if (InputError_) {
                     return;
                 }
+                if (layout.Size > maxOutgoing) {
+                    maxOutgoing = layout.Size;
+                    maxOutgoingOwner = func;
+                }
             }
-            uint64_t cursor = zone;
-            auto localsOffset = ReserveFrameBytes(*func, cursor, 0, FrameAlignment_, "the result landing zone");
-            if (!localsOffset) {
-                return;
-            }
-            info->LocalsOffset = *localsOffset;
+            uint64_t cursor = 0;
             for (auto&& inst : instructions(*func)) {
                 if (auto* jump = dyn_cast<CallBase>(&inst); jump && IsSetjmpCall(jump)) {
                     auto offset = ReserveFrameBytes(*func, cursor, 4, 4, "a setjmp result");
@@ -3583,67 +3736,55 @@ private:
                 }
                 info->AllocaOffsets[alloca] = *offset;
             }
-
-            // Above the statics sit the incoming arguments and linkage; all
-            // of it is this frame. The function's own
-            // result does not live here: it lands in the caller's zone above
-            // fp.
-            if (func->arg_size() > (FiberStackSize_ - ArgumentTopBytes_) / ArgSlotSize_) {
-                func->getContext().emitError(
-                    Twine("stackify: managed arguments in ") + func->getName() + " exceed the " + Twine(FiberStackSize_) + "-byte per-fiber stack");
-                InputError_ = true;
-                return;
-            }
-            uint64_t argsArea = uint64_t(func->arg_size()) * ArgSlotSize_;
-            uint64_t pushBytes = ArgumentTopBytes_ + argsArea;
-            uint64_t callArea = alignTo(pushBytes, FrameAlignment_);
-            if (!ReserveFrameBytes(*func, cursor, callArea, FrameAlignment_, "call linkage and arguments")) {
+            if (!ReserveFrameBytes(*func, cursor, 0, FrameAlignment_, "local-frame tail padding")) {
                 return;
             }
             info->FrameSize = cursor;
-            for (unsigned i = 0; i < func->arg_size(); i++) {
-                info->ArgOffsets.push_back(-int64_t(ArgumentTopBytes_ + (i + 1) * ArgSlotSize_));
-            }
-            if (pushBytes > maxPush) {
-                maxPush = pushBytes;
-                maxPushOwner = func;
-            }
-            if (roots.contains(func)) {
-                uint64_t resultReserve = alignTo(info->ReturnSize, FrameAlignment_);
-                if (resultReserve > maxResult) {
-                    maxResult = resultReserve;
-                    maxResultOwner = func;
-                }
-            }
-            if (info->FrameSize > largestFrame) {
+            if (!largestFrameOwner || info->FrameSize > largestFrame) {
                 largestFrame = info->FrameSize;
                 largestFrameOwner = func;
             }
             smallestFrame = std::min(smallestFrame, info->FrameSize);
         }
-        // Every descent is bounded at its source: the entry prologue checks
-        // its static claim and each carve site checks its request, both
-        // against this floor, so sp can neither wrap nor reach the transient
-        // spill words at the slice bottom — and the pushes a checked frame
-        // makes (linkage + arguments, below its sp) stay above them too.
+
+        uint64_t maxRootOutgoing = 0;
+        Function* maxRootOwner = Managed_.front().first;
+        RootResultCapacity_ = 0;
+        for (CallBase* call : rootCalls) {
+            ManagedCallLayout layout = LayoutCall(*call);
+            if (InputError_) {
+                return;
+            }
+            if (layout.Size > maxRootOutgoing) {
+                maxRootOutgoing = layout.Size;
+                maxRootOwner = call->getCalledFunction();
+            }
+            uint64_t bytes = 0;
+            uint64_t alignment = 0;
+            if (!call->getType()->isVoidTy() && !FixedTypeLayout(*call->getFunction(), call->getType(), "a root result", bytes, alignment)) {
+                return;
+            }
+            RootResultCapacity_ = std::max(RootResultCapacity_, bytes);
+        }
+        if (!maxRootOutgoing) {
+            report_fatal_error("stackify: managed functions have no Capsule root call");
+        }
+
+        // Every prologue and dynamic carve leaves enough room for the largest
+        // caller-owned outgoing area. A call can therefore subtract its exact
+        // site-local size without another bounds branch.
         ReserveFloor_ = bpf::TransientReserveBytes(FiberStackSize_);
-        if (!ReserveFrameBytes(*maxPushOwner, ReserveFloor_, maxPush, 1, "the transient spill and call-push reserve") ||
-            !ReserveFrameBytes(*maxPushOwner, ReserveFloor_, 0, FrameAlignment_, "the aligned reserve floor")) {
+        if (!ReserveFrameBytes(*maxOutgoingOwner, ReserveFloor_, maxOutgoing, 1, "the transient spill and outgoing-call reserve") ||
+            !ReserveFrameBytes(*maxOutgoingOwner, ReserveFloor_, 0, FrameAlignment_, "the aligned reserve floor")) {
             return;
         }
-        // Above the root's boundary only a native boundary's result lands;
-        // internal results already occupy their caller's per-frame zone.
-        // Reserve the largest actual root result, never zero because the
-        // boundary itself must remain a valid in-slice offset.
-        uint64_t rootResultReserve = std::max(FrameAlignment_, maxResult);
-        if (rootResultReserve >= FiberStackSize_) {
-            Function* owner = maxResultOwner ? maxResultOwner : largestFrameOwner;
-            owner->getContext().emitError(Twine("stackify: managed root reserve for ") + owner->getName() + " needs " + Twine(rootResultReserve) +
+        if (maxRootOutgoing >= FiberStackSize_) {
+            maxRootOwner->getContext().emitError(Twine("stackify: managed root call for ") + maxRootOwner->getName() + " needs " + Twine(maxRootOutgoing) +
                 " bytes, too large for the " + Twine(FiberStackSize_) + "-byte per-fiber stack");
             InputError_ = true;
             return;
         }
-        RootFp_ = FiberStackSize_ - rootResultReserve;
+        RootFp_ = FiberStackSize_ - maxRootOutgoing;
         if (ReserveFloor_ >= RootFp_ || largestFrame > RootFp_ - ReserveFloor_) {
             largestFrameOwner->getContext().emitError(Twine("stackify: managed frame in ") + largestFrameOwner->getName() + " is " + Twine(largestFrame) +
                 " bytes, too large for the " + Twine(FiberStackSize_) + "-byte per-fiber stack");
@@ -3878,6 +4019,8 @@ private:
             alloca->eraseFromParent();
         }
         LowerStackSaves(info, body, debugLoc);
+        LowerFrameAddresses(info, body);
+        LowerVariadicOperations(info, body);
         if (InputError_) {
             return;
         }
@@ -3918,7 +4061,7 @@ private:
             }
         }
         for (auto* ret : returns) {
-            LowerReturn(ret, &func, frame, info, debugLoc);
+            LowerReturn(ret, frame, info, debugLoc);
         }
 
         for (auto&& edge : backedges) {
@@ -3928,7 +4071,7 @@ private:
         }
         for (auto* call : calls) {
             uint32_t resumePc = NextPc_++;
-            info.States.push_back({resumePc, SuspendAtCall(call, frame, resumePc, info, debugLoc), ManagedFunction::StateKind::Call});
+            info.States.push_back({resumePc, SuspendAtCall(call, resumePc, info, debugLoc), ManagedFunction::StateKind::Call});
         }
         for (auto* call : yields) {
             uint32_t resumePc = NextPc_++;
@@ -4000,16 +4143,15 @@ private:
     }
 
     // Carve a run-time-sized allocation below the live frontier — which is
-    // sp itself. Bound the request, drop sp, and park the resulting pointer
-    // in the frame's handle slot for every later region to reload. The
-    // carving sits LocalsOffset bytes above the new sp, keeping the result
-    // zone free at the frontier for the next call.
+    // sp itself. Bound the request, align the new downward frontier, and park
+    // that pointer in the frame's handle slot for later regions. Managed
+    // calls grow below this frontier, so no result landing-zone slack exists.
     void LowerDynamicAlloca(AllocaInst& alloca, ManagedFunction& info, uint64_t handleOffset, SmallVectorImpl<BasicBlock*>& body,
         SmallVectorImpl<Backedge>& backedges, DebugLoc debugLoc) {
         Value* frame = info.Frame;
         const DataLayout& dl = Module_.getDataLayout();
         uint64_t elemBytes = dl.getTypeAllocSize(alloca.getAllocatedType()).getFixedValue();
-        uint64_t align = std::max<uint64_t>(16, alloca.getAlign().value());
+        uint64_t align = std::max<uint64_t>(FrameAlignment_, alloca.getAlign().value());
 
         IRBuilder<> b(&alloca);
         Value* pointer = nullptr;
@@ -4025,14 +4167,11 @@ private:
             // the transient spill words and leaves room for the next push.
             Value* tooMany = b.CreateICmpUGT(count, ConstantInt::get(I64_, FiberStackSize_ / elemBytes));
             Value* need = b.CreateMul(count, ConstantInt::get(I64_, elemBytes), "carve.bytes");
-            // The new frontier must leave this function's result landing zone
-            // below the allocation. Otherwise a later managed callee writes
-            // its result over the VLA (and the VLA can overlap the existing
-            // frame immediately after the carve).
-            uint64_t slack = info.LocalsOffset + (align > FrameAlignment_ ? align : 0) + FrameAlignment_ - 1;
-            need = b.CreateAnd(b.CreateAdd(need, ConstantInt::get(I64_, slack)), ConstantInt::get(I64_, ~(FrameAlignment_ - 1)));
+            // Checking bytes + (align - 1) covers the worst downward rounding
+            // without storing that conservative size as the actual frontier.
+            Value* reserve = b.CreateAdd(need, ConstantInt::get(I64_, align - 1), "carve.reserve");
             Value* frontierOffset = SliceOffset(b, frontier);
-            Value* minimum = b.CreateAdd(need, ConstantInt::get(I64_, ReserveFloor_));
+            Value* minimum = b.CreateAdd(reserve, ConstantInt::get(I64_, ReserveFloor_));
             Value* low = b.CreateICmpULT(frontierOffset, minimum);
             Value* over = b.CreateOr(tooMany, low, "carve.overflow");
 
@@ -4056,13 +4195,9 @@ private:
             br->eraseFromParent();
 
             b.SetInsertPoint(&alloca);
-            Value* next = b.CreateSub(frontier, need, "frontier.next");
+            Value* next = b.CreateAnd(b.CreateSub(frontier, need), ConstantInt::get(I64_, ~(align - 1)), "frontier.next");
             b.CreateStore(next, SpPtr(b));
-            Value* offset = b.CreateAdd(next, ConstantInt::get(I64_, info.LocalsOffset));
-            if (align > FrameAlignment_) {
-                offset = b.CreateAnd(b.CreateAdd(offset, ConstantInt::get(I64_, align - 1)), ConstantInt::get(I64_, ~(align - 1)));
-            }
-            pointer = FramePointer(b, offset);
+            pointer = FramePointer(b, next);
         }
         b.CreateStore(
             pointer, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, int64_t(handleOffset) - int64_t(info.FrameSize))}, alloca.getName() + ".handle"));
@@ -4126,11 +4261,129 @@ private:
         }
     }
 
-    // Split the block at `call`. The caller's half of the machine call
-    // operation is pushing the {resume pc, caller fp} linkage and
-    // arguments at fixed offsets below its sp, installing the callee fp, and
-    // naming the callee in the pc register. Its prologue claims the frame.
-    BasicBlock* SuspendAtCall(CallBase* call, Value* frame, uint32_t resumePc, ManagedFunction& info, DebugLoc debugLoc) {
+    // llvm.frameaddress has no BPF lowering: r10 names the verifier-owned
+    // native stack, while managed C frames live on Capsule's software stack.
+    // Reproduce the C frame chain from Capsule linkage instead. Depth zero is
+    // the running FP; each parent is the saved FP at fp+0, and walking past
+    // the root stays null. Clang marks the depth argument immarg, so the walk
+    // is a fixed straight-line sequence just as it is on native targets.
+    void LowerFrameAddresses(ManagedFunction& info, SmallVectorImpl<BasicBlock*>& body) {
+        SmallVector<IntrinsicInst*> addresses;
+        for (auto* block : body) {
+            for (auto&& inst : *block) {
+                if (auto* intrinsic = dyn_cast<IntrinsicInst>(&inst); intrinsic && intrinsic->getIntrinsicID() == Intrinsic::frameaddress) {
+                    addresses.push_back(intrinsic);
+                }
+            }
+        }
+        for (IntrinsicInst* address : addresses) {
+            auto* depthValue = dyn_cast<ConstantInt>(address->getArgOperand(0));
+            if (!depthValue) {
+                address->getContext().emitError(address, "stackify: __builtin_frame_address depth is not constant");
+                InputError_ = true;
+                continue;
+            }
+            IRBuilder<> b(address);
+            b.SetCurrentDebugLocation(address->getDebugLoc());
+            Value* fp = info.Fp;
+            uint64_t depth = depthValue->getZExtValue();
+            for (uint64_t level = 0; level < depth; ++level) {
+                Value* missing = b.CreateICmpEQ(fp, ConstantInt::get(I64_, 0), "frameaddress.missing");
+                Value* safeFp = b.CreateSelect(missing, info.Fp, fp, "frameaddress.safe.fp");
+                Value* frame = FramePointer(b, safeFp);
+                Value* parent = b.CreateLoad(I64_, b.CreateGEP(I8_, frame, ConstantInt::getSigned(I64_, SavedFpOffset)), "frameaddress.parent");
+                fp = b.CreateSelect(missing, ConstantInt::get(I64_, 0), parent, "frameaddress.fp");
+            }
+            Value* missing = b.CreateICmpEQ(fp, ConstantInt::get(I64_, 0), "frameaddress.null");
+            Value* safeFp = b.CreateSelect(missing, info.Fp, fp, "frameaddress.result.fp");
+            Value* materialized = FramePointer(b, safeFp);
+            Value* pointer = b.CreateSelect(missing, ConstantPointerNull::get(PointerType::get(Ctx_, 0)), materialized, "frameaddress");
+            if (pointer->getType() != address->getType()) {
+                pointer = b.CreatePointerCast(pointer, address->getType(), "frameaddress.cast");
+            }
+            address->replaceAllUsesWith(pointer);
+            address->eraseFromParent();
+        }
+    }
+
+    // A managed va_list is the ordinary cdecl cursor into the caller-owned
+    // argument tail. There is no pack pointer, count or rewritten signature:
+    // the call site lays every actual value after the fixed prefix, and each
+    // va_arg applies the same type-directed alignment and size rule.
+    void LowerVariadicOperations(ManagedFunction& info, SmallVectorImpl<BasicBlock*>& body) {
+        SmallVector<VAStartInst*> starts;
+        SmallVector<VAEndInst*> ends;
+        SmallVector<VACopyInst*> copies;
+        SmallVector<VAArgInst*> arguments;
+        for (BasicBlock* block : body) {
+            for (Instruction& instruction : *block) {
+                if (auto* start = dyn_cast<VAStartInst>(&instruction)) {
+                    starts.push_back(start);
+                } else if (auto* end = dyn_cast<VAEndInst>(&instruction)) {
+                    ends.push_back(end);
+                } else if (auto* copy = dyn_cast<VACopyInst>(&instruction)) {
+                    copies.push_back(copy);
+                } else if (auto* argument = dyn_cast<VAArgInst>(&instruction)) {
+                    arguments.push_back(argument);
+                }
+            }
+        }
+        if (!starts.empty() && !info.Original->isVarArg()) {
+            starts.front()->getContext().emitError(starts.front(), Twine("stackify: va_start in non-variadic ") + info.Original->getName());
+            InputError_ = true;
+            return;
+        }
+
+        for (VAStartInst* start : starts) {
+            IRBuilder<> b(start);
+            b.SetCurrentDebugLocation(start->getDebugLoc());
+            Value* first = b.CreateGEP(I8_, info.Frame, ConstantInt::get(I64_, info.FixedArgsEnd), "varargs.begin");
+            b.CreateStore(first, start->getArgList());
+            start->eraseFromParent();
+        }
+        for (VACopyInst* copy : copies) {
+            IRBuilder<> b(copy);
+            b.SetCurrentDebugLocation(copy->getDebugLoc());
+            b.CreateStore(b.CreateLoad(PointerType::get(Ctx_, 0), copy->getSrc()), copy->getDest());
+            copy->eraseFromParent();
+        }
+        for (VAEndInst* end : ends) {
+            end->eraseFromParent();
+        }
+        for (VAArgInst* argument : arguments) {
+            uint64_t bytes = 0;
+            uint64_t alignment = 0;
+            if (!FixedTypeLayout(*info.Original, argument->getType(), "variadic argument", bytes, alignment)) {
+                return;
+            }
+            alignment = std::max<uint64_t>(8, alignment);
+            bytes = alignTo(bytes, uint64_t(8));
+
+            IRBuilder<> b(argument);
+            b.SetCurrentDebugLocation(argument->getDebugLoc());
+            Value* cursor = b.CreateLoad(PointerType::get(Ctx_, 0), argument->getPointerOperand(), "varargs.cursor");
+            Value* address = b.CreatePtrToInt(cursor, I64_);
+            if (alignment > 1) {
+                address = b.CreateAnd(b.CreateAdd(address, ConstantInt::get(I64_, alignment - 1)), ConstantInt::get(I64_, ~(alignment - 1)), "varargs.aligned");
+            }
+            Value* pointer = b.CreateIntToPtr(address, PointerType::get(Ctx_, 0));
+            Value* value = b.CreateAlignedLoad(argument->getType(), pointer, Align(alignment), argument->getName());
+            Value* next = b.CreateGEP(I8_, pointer, ConstantInt::get(I64_, bytes), "varargs.next");
+            b.CreateStore(next, argument->getPointerOperand());
+            argument->replaceAllUsesWith(value);
+            argument->eraseFromParent();
+        }
+    }
+
+    // Split the block at `call`. The caller reserves one exact outgoing area
+    // below its live sp, writes the x86-shaped linkage and actual arguments at
+    // positive offsets from the new callee fp, then names the callee in pc.
+    // The callee prologue claims only its own locals below that fp.
+    BasicBlock* SuspendAtCall(CallBase* call, uint32_t resumePc, ManagedFunction& info, DebugLoc debugLoc) {
+        ManagedCallLayout layout = LayoutCall(*call);
+        if (InputError_) {
+            return call->getParent();
+        }
         BasicBlock* block = call->getParent();
         BasicBlock* resume = block->splitBasicBlock(call, block->getName() + ".resume");
 
@@ -4156,24 +4409,26 @@ private:
             b.SetInsertPoint(push);
         }
 
-        // The pushes land below this frame's sp: its base when it never
-        // carves, the live frontier otherwise. The machine call operation is
-        // expanded here rather than in the dispatcher because the site
-        // already holds the anchor and both register values; the dispatcher
-        // would have to re-derive the fiber addressing per call.
-        Value* out = frame;
-        int64_t bias = -int64_t(info.FrameSize);
+        // A function without dynamic carving can derive its live sp from fp;
+        // otherwise use the saved frontier. ReserveFloor_ already includes
+        // the largest outgoing area, so this exact subtraction cannot cross
+        // the slice's transient floor.
+        const bool dynamicSp = !info.DynamicHandleOffsets.empty() || !info.StackSaveOffsets.empty();
+        Value* callerSp = nullptr;
         Value* calleeFp = nullptr;
-        if (!info.DynamicHandleOffsets.empty() || !info.StackSaveOffsets.empty()) {
-            calleeFp = b.CreateLoad(I64_, SpPtr(b), "frontier");
+        Value* out = nullptr;
+        if (dynamicSp) {
+            callerSp = b.CreateLoad(I64_, SpPtr(b), "caller.sp");
+            calleeFp = b.CreateSub(callerSp, ConstantInt::get(I64_, layout.Size), "callee.fp");
             out = FramePointer(b, calleeFp);
-            bias = 0;
         } else {
-            calleeFp = b.CreateSub(info.Fp, ConstantInt::get(I64_, info.FrameSize), "callee.fp");
+            callerSp = b.CreateSub(info.Fp, ConstantInt::get(I64_, info.FrameSize), "caller.sp");
+            calleeFp = b.CreateSub(callerSp, ConstantInt::get(I64_, layout.Size), "callee.fp");
+            out = b.CreateGEP(I8_, info.Frame, ConstantInt::getSigned(I64_, -int64_t(info.FrameSize + layout.Size)), "callee.frame");
         }
-        b.CreateStore(ConstantInt::get(I32_, resumePc), b.CreateGEP(I8_, out, {ConstantInt::getSigned(I64_, bias + ReturnPcOffset)}, "return.pc.slot"));
-        b.CreateStore(info.Fp, b.CreateGEP(I8_, out, {ConstantInt::getSigned(I64_, bias + SavedFpOffset)}, "saved.fp.slot"));
-        StoreCallArguments(b, out, bias, call);
+        b.CreateStore(info.Fp, b.CreateGEP(I8_, out, ConstantInt::get(I64_, SavedFpOffset), "saved.fp.slot"));
+        b.CreateStore(ConstantInt::get(I32_, resumePc), b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnPcOffset), "return.pc.slot"));
+        StoreCallArguments(b, out, *call, layout);
         b.CreateStore(calleePc, PcPtr(b));
         b.CreateStore(calleeFp, FpPtr(b));
         b.CreateRet(ConstantInt::get(I32_, ActionContinue));
@@ -4181,19 +4436,31 @@ private:
             br->eraseFromParent();
         }
 
-        // Resume side: the callee wrote its result into this frame's zone,
-        // at what was sp when the call was made — and is sp again now that
-        // the machine return restored it.
+        // `ret` leaves sp just above the two linkage words. A statically based
+        // caller can address the outgoing area directly from its own frame;
+        // only a dynamically carved caller needs to recover the returned fp
+        // from the control state. The resume site knows the complete actual
+        // argument list and therefore the exact caller cleanup.
         IRBuilder<> rb(call);
+        Value* returnedFp = nullptr;
+        Value* returnedFrame = nullptr;
+        if (dynamicSp) {
+            Value* afterReturn = rb.CreateLoad(I64_, SpPtr(rb), "return.sp");
+            returnedFp = rb.CreateSub(afterReturn, ConstantInt::get(I64_, LinkageBytes), "returned.fp");
+            returnedFrame = FramePointer(rb, returnedFp);
+        } else {
+            returnedFrame = rb.CreateGEP(I8_, info.Frame, ConstantInt::getSigned(I64_, -int64_t(info.FrameSize + layout.Size)), "returned.frame");
+        }
         if (!call->getType()->isVoidTy()) {
-            Value* base = frame;
-            int64_t rbias = -int64_t(info.FrameSize);
-            if (!info.DynamicHandleOffsets.empty() || !info.StackSaveOffsets.empty()) {
-                base = FramePointer(rb, rb.CreateLoad(I64_, SpPtr(rb), "frontier.resume"));
-                rbias = 0;
-            }
-            Value* result = rb.CreateGEP(I8_, base, {ConstantInt::getSigned(I64_, rbias)}, "result.zone");
-            call->replaceAllUsesWith(rb.CreateLoad(call->getType(), result, "callret"));
+            Value* result = rb.CreateGEP(I8_, returnedFrame, ConstantInt::get(I64_, layout.ResultOffset), "result.slot");
+            call->replaceAllUsesWith(rb.CreateAlignedLoad(
+                call->getType(), result, Align(std::max<uint64_t>(8, Module_.getDataLayout().getABITypeAlign(call->getType()).value())), "callret"));
+        }
+        if (dynamicSp) {
+            Value* restoredSp = rb.CreateAdd(returnedFp, ConstantInt::get(I64_, layout.Size), "caller.sp.restored");
+            rb.CreateStore(restoredSp, SpPtr(rb));
+        } else if (!info.JumpResultOffsets.empty()) {
+            rb.CreateStore(rb.CreateSub(info.Fp, ConstantInt::get(I64_, info.FrameSize), "caller.sp.restored"), SpPtr(rb));
         }
         call->eraseFromParent();
 
@@ -4336,32 +4603,42 @@ private:
         return resume;
     }
 
-    // Write a call's arguments below the callee's frame boundary, which
-    // sits at `out + bias`: the linkage occupies its top sixteen bytes and
-    // argument i lands one slot stride lower per index, matching the
-    // callee's own ArgOffsets.
-    void StoreCallArguments(IRBuilder<>& b, Value* out, int64_t bias, CallBase* call) {
-        for (unsigned i = 0; i < call->arg_size(); i++) {
-            auto* slot = b.CreateGEP(I8_, out, {ConstantInt::getSigned(I64_, bias - int64_t(ArgumentTopBytes_ + (i + 1) * ArgSlotSize_))});
-            b.CreateStore(call->getArgOperand(i), slot);
+    // Materialize the fixed prefix and actual variadic tail in one contiguous
+    // caller-owned area. The first argument is nearest the linkage and values
+    // proceed toward higher addresses, exactly as after right-to-left cdecl
+    // pushes, though the generated stores need no particular execution order.
+    void StoreCallArguments(IRBuilder<>& b, Value* out, CallBase& call, const ManagedCallLayout& layout) {
+        for (unsigned i = 0; i < call.arg_size(); i++) {
+            Value* value = call.getArgOperand(i);
+            if (Type* byVal = call.getParamByValType(i)) {
+                uint64_t sourceAlignment =
+                    std::max<uint64_t>(Module_.getDataLayout().getABITypeAlign(byVal).value(), call.getParamAlign(i).valueOrOne().value());
+                Value* copied = b.CreateAlignedLoad(byVal, value, Align(sourceAlignment), "byval.copy");
+                Value* copySlot = b.CreateGEP(I8_, out, ConstantInt::get(I64_, layout.ByValCopyOffsets[i]), "byval.slot");
+                uint64_t copyAlignment = std::max<uint64_t>(Module_.getDataLayout().getABITypeAlign(byVal).value(), call.getParamAlign(i).valueOrOne().value());
+                b.CreateAlignedStore(copied, copySlot, Align(std::max<uint64_t>(8, copyAlignment)));
+                value = copySlot;
+            }
+            Value* slot = b.CreateGEP(I8_, out, ConstantInt::get(I64_, layout.ArgOffsets[i]));
+            b.CreateAlignedStore(value, slot, Align(layout.ArgAlignments[i]));
         }
     }
 
-    void LowerReturn(ReturnInst* ret, Function* source, Value* frame, ManagedFunction& info, DebugLoc debugLoc) {
+    void LowerReturn(ReturnInst* ret, Value* frame, ManagedFunction& info, DebugLoc debugLoc) {
         IRBuilder<> b(ret);
         if (Value* value = ret->getReturnValue()) {
-            // The result lands in the caller's zone, directly above this
-            // frame's boundary.
-            b.CreateStore(value, frame);
+            uint64_t alignment = std::max<uint64_t>(8, Module_.getDataLayout().getABITypeAlign(value->getType()).value());
+            Value* slot = b.CreateGEP(I8_, frame, ConstantInt::get(I64_, info.ResultOffset), "result.slot");
+            b.CreateAlignedStore(value, slot, Align(alignment));
         }
-        // The machine return, expanded here for the same reason as the
-        // call: the boundary is already the anchor in hand. The root's
-        // linkage was written by the entry with (DONE, 0), so a root return
-        // completes the computation through this same path.
+        // Equivalent to `leave; ret`: restore fp and the caller's resume
+        // region, and leave sp immediately above the two linkage words. The
+        // caller's resume state removes its result/argument area. A root uses
+        // the same path with (saved fp = 0, return region = DONE).
         Value* returnPc = b.CreateLoad(I32_, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, ReturnPcOffset)}), "return.pc");
         Value* savedFp = b.CreateLoad(I64_, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, SavedFpOffset)}), "saved.fp");
         b.CreateStore(returnPc, PcPtr(b));
-        b.CreateStore(info.Fp, SpPtr(b));
+        b.CreateStore(b.CreateAdd(info.Fp, ConstantInt::get(I64_, LinkageBytes), "return.sp"), SpPtr(b));
         b.CreateStore(savedFp, FpPtr(b));
         auto* newRet = b.CreateRet(ConstantInt::get(I32_, ActionContinue));
         newRet->setDebugLoc(ret->getDebugLoc() ? ret->getDebugLoc() : debugLoc);
@@ -4907,16 +5184,17 @@ private:
             }
             uint64_t size = sizeValue->getZExtValue();
             uint64_t alignment = alignmentValue->getZExtValue();
-            if (!size || size > FiberStackSize_ - RootFp_) {
+            if (!size || size > RootResultCapacity_) {
                 report_fatal_error("stackify: invalid Capsule return size");
             }
 
             IRBuilder<> b(call);
             Value* fiber = NormalizeFiber(b, call->getArgOperand(0));
             Value* output = call->getArgOperand(1);
-            // The ordinary return path wrote the root's result into its
-            // zone at the RootFp_ boundary.
-            Value* source = StackPtr(b, ConstantInt::get(I64_, RootFp_), fiber);
+            // Every root result begins at the same module-wide aligned offset
+            // in its caller-owned outgoing area.
+            uint64_t resultOffset = alignTo(LinkageBytes, std::max<uint64_t>(8, alignment));
+            Value* source = StackPtr(b, ConstantInt::get(I64_, RootFp_ + resultOffset), fiber);
             uint64_t offset = 0;
             while (offset < size) {
                 uint64_t width = std::min<uint64_t>(8, alignment);
@@ -5019,20 +5297,23 @@ private:
         Value* borrowedContext = borrowsContext ? boundary->Inputs[1].get() : nullptr;
 
         ManagedFunction* root = ManagedByFunction_.lookup(call->getCalledFunction());
-        if (!root || !root->FrameSize) {
+        if (!root) {
             report_fatal_error("stackify: Capsule root has no frame layout");
         }
-        // The entry performs the machine call operation for the root: push
-        // the linkage and arguments below the module-wide RootFp_ boundary
-        // and make both registers that boundary; the root's own prologue
-        // claims its frame. Linkage (DONE, 0) makes an ordinary root return
-        // complete the computation: pc becomes the sentinel.
+        ManagedCallLayout layout = LayoutCall(*call);
+        if (InputError_) {
+            report_fatal_error("stackify: invalid Capsule root call layout");
+        }
+        // The native boundary fabricates the same caller-owned frame as an
+        // internal call. Linkage (saved fp = 0, return region = DONE) lets the
+        // root complete through the ordinary return path; its prologue claims
+        // only locals below RootFp_.
         Value* out = StackPtr(b, ConstantInt::get(I64_, RootFp_), fiber);
         Value* rootFp = b.CreatePtrToInt(out, I64_, "root.fp");
         b.CreateStore(ConstantInt::get(I64_, 0), OutcomePtr(b, fiber));
-        b.CreateStore(ConstantInt::get(I32_, BPF_CAPSULE_PC_DONE), b.CreateGEP(I8_, out, {ConstantInt::getSigned(I64_, ReturnPcOffset)}, "root.return.pc"));
-        b.CreateStore(ConstantInt::get(I64_, 0), b.CreateGEP(I8_, out, {ConstantInt::getSigned(I64_, SavedFpOffset)}, "root.saved.fp"));
-        StoreCallArguments(b, out, 0, call);
+        b.CreateStore(ConstantInt::get(I64_, 0), b.CreateGEP(I8_, out, ConstantInt::get(I64_, SavedFpOffset), "root.saved.fp"));
+        b.CreateStore(ConstantInt::get(I32_, BPF_CAPSULE_PC_DONE), b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnPcOffset), "root.return.pc"));
+        StoreCallArguments(b, out, *call, layout);
         b.CreateStore(ConstantInt::get(I32_, root->ReturnSize), ReturnSizePtr(b, fiber));
         b.CreateStore(ConstantInt::get(I32_, root->EntryPc), PcPtr(b, fiber));
         b.CreateStore(rootFp, SpPtr(b, fiber));
@@ -5051,8 +5332,9 @@ private:
         }
 
         if (!call->getType()->isVoidTy()) {
-            Value* slot = StackPtr(b, ConstantInt::get(I64_, RootFp_), fiber);
-            call->replaceAllUsesWith(b.CreateLoad(call->getType(), slot, "root.result"));
+            Value* slot = StackPtr(b, ConstantInt::get(I64_, RootFp_ + layout.ResultOffset), fiber);
+            call->replaceAllUsesWith(b.CreateAlignedLoad(
+                call->getType(), slot, Align(std::max<uint64_t>(8, Module_.getDataLayout().getABITypeAlign(call->getType()).value())), "root.result"));
         }
         call->eraseFromParent();
 
@@ -5093,8 +5375,7 @@ private:
     uint64_t FiberStackSize_ = 0;
     uint64_t ReserveFloor_ = 0;
     uint64_t RootFp_ = 0;
-    uint64_t ArgSlotSize_ = 8;
-    uint64_t ArgumentTopBytes_ = LinkageBytes;
+    uint64_t RootResultCapacity_ = 0;
     uint64_t FrameAlignment_ = 16;
     uint64_t StackAlignment_ = 16;
     uint64_t FiberCount_ = 1;

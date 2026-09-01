@@ -30,13 +30,13 @@ Arguments, call linkage, and values that must survive a region boundary live
 there. This is separate from BPF's 512-byte `r10` stack, which the generated
 code still uses within the normal limit while executing the current region.
 
-At a call between regions, the caller stores its live values, arguments, and
-return region in the software stack, publishes the callee's entry region, and
-returns to the dispatcher. The callee later writes any result into the
-caller's frame, publishes the caller's resume region, and returns through the
-dispatcher too. A loop that cannot stay inside one region runs a bounded
-chunk, saves its loop-carried values and resume region, and crosses the same
-boundary.
+At a call between regions, the caller stores its live values and a complete
+call frame — return region, result slot, fixed arguments and any variadic
+tail — in the software stack, publishes the callee's entry region, and returns
+to the dispatcher. The callee later writes the result there, publishes the
+caller's resume region, and returns through the dispatcher too. A loop that
+cannot stay inside one region runs a bounded chunk, saves its loop-carried
+values and resume region, and crosses the same boundary.
 
 Every cross-region edge is therefore a return to the bounded driver. Recursive
 source calls do not become recursive BPF calls, and dynamic loops become

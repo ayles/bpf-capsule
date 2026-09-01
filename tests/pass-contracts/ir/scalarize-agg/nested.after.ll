@@ -30,3 +30,23 @@ entry:
   store volatile i16 %18, ptr %17, align 2
   ret %nested %10
 }
+
+define i128 @copy_i128(ptr %source, ptr %destination) {
+entry:
+  %0 = getelementptr i8, ptr %source, i64 0
+  %1 = load volatile i64, ptr %0, align 16
+  %2 = getelementptr i8, ptr %source, i64 8
+  %3 = load volatile i64, ptr %2, align 8
+  %4 = zext i64 %1 to i128
+  %5 = zext i64 %3 to i128
+  %6 = shl i128 %5, 64
+  %7 = or i128 %4, %6
+  %8 = trunc i128 %7 to i64
+  %9 = lshr i128 %7, 64
+  %10 = trunc i128 %9 to i64
+  %11 = getelementptr i8, ptr %destination, i64 0
+  store volatile i64 %8, ptr %11, align 16
+  %12 = getelementptr i8, ptr %destination, i64 8
+  store volatile i64 %10, ptr %12, align 8
+  ret i128 %7
+}
