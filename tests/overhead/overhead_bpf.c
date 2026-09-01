@@ -79,6 +79,22 @@ static uint64_t managed_dynamic_call_loop(void) {
     return value;
 }
 
+__attribute__((noinline)) static uint64_t managed_byval_leaf(struct overhead_byval value, uint32_t index) {
+    if (overhead_state.recurse) {
+        return managed_byval_leaf(value, index);
+    }
+    return ARITHMETIC_STEP(value.first + (value.second ^ value.third), index);
+}
+
+static uint64_t managed_byval_call_loop(void) {
+    uint64_t value = 7;
+    for (uint32_t index = 0; index < overhead_state.trips; ++index) {
+        struct overhead_byval argument = {value, value ^ 0x9e3779b97f4a7c15ull, index};
+        value = managed_byval_leaf(argument, index);
+    }
+    return value;
+}
+
 static uint64_t managed_pressure_call_loop(void) {
     uint64_t a = 1, b = 2, c = 3, d = 4, e = 5, f = 6, g = 7, h = 8;
     for (uint32_t index = 0; index < overhead_state.trips; ++index) {
@@ -467,6 +483,12 @@ int overhead_direct_dynamic_call_loop(void) {
 SEC("syscall")
 int overhead_capsule_dynamic_call_loop(void) {
     overhead_state.capsule = capsule_call((uint64_t*)&overhead_state.result, managed_dynamic_call_loop);
+    return 0;
+}
+
+SEC("syscall")
+int overhead_capsule_byval_call_loop(void) {
+    overhead_state.capsule = capsule_call((uint64_t*)&overhead_state.result, managed_byval_call_loop);
     return 0;
 }
 

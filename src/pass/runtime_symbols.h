@@ -40,7 +40,7 @@ inline constexpr llvm::StringLiteral TrampolineCtx{"__bpf_capsule_trampoline_ctx
 inline constexpr llvm::StringLiteral TrampolineCtxL1{"__bpf_capsule_trampoline_ctx_l1"};
 inline constexpr llvm::StringLiteral TrampolineCtxStep{"__bpf_capsule_trampoline_ctx_step"};
 
-// Compiler markers the guest header declares and stackify resolves/lowers.
+// Compiler markers the compiler-facing headers declare and passes resolve.
 inline constexpr llvm::StringLiteral CallMarker{"__bpf_capsule_call"};
 inline constexpr llvm::StringLiteral ExitMarker{"__bpf_capsule_exit"};
 inline constexpr llvm::StringLiteral Yield{"__bpf_capsule_yield"};
@@ -52,6 +52,7 @@ inline constexpr llvm::StringLiteral CurrentFiberIndex{"__bpf_capsule_current_fi
 inline constexpr llvm::StringLiteral ActiveFiberCount{"__bpf_capsule_active_fiber_count"};
 inline constexpr llvm::StringLiteral OutcomePointer{"__bpf_capsule_outcome_ptr"};
 inline constexpr llvm::StringLiteral CurrentCtx{"__bpf_capsule_current_ctx"};
+inline constexpr llvm::StringLiteral VaArg{"__bpf_capsule_va_arg"};
 
 // Late memory intrinsics: lowered by bpf-memory after layout is known.
 inline constexpr llvm::StringLiteral HeapStart{"__bpf_capsule_heap_start"};

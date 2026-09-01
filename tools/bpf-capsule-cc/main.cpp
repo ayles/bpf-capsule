@@ -7,7 +7,9 @@
 // The output is LLVM bitcode for bpf-capsule-ld. Projects with their own
 // toolchain (cargo for Rust guests, a build system invoking clang directly)
 // can skip this wrapper as long as they produce BPF-target bitcode with
-// -O2 -Xclang -disable-llvm-passes and matching capsule defines.
+// -O2 -Xclang -disable-llvm-passes and matching capsule defines. C and C++
+// toolchains must also force-include bpf_capsule_varargs.h so aggregate
+// va_arg retains its size and alignment until stackify.
 //
 // --kernel must match the value later given to bpf-capsule-ld: this wrapper
 // turns it into the BPF_CAPSULE_FEATURE_* defines the runtime and libc
@@ -155,6 +157,8 @@ int main(int argc, char** argv) {
         // Public guest headers plus private runtime/compiler contracts.
         "-I" + guestInclude,
         "-I" + internalInclude,
+        "-include",
+        "bpf_capsule_varargs.h",
     };
     if (kernel >= KernelVersion{6, 9}) {
         args.insert(args.begin() + 3, "-DBPF_CAPSULE_FEATURE_ARENA=1");

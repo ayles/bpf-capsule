@@ -3,8 +3,8 @@
 //
 //   bpf-capsule-ld --kernel 6.9 -o program.o guest.bc [more.bc ...]
 //
-// Takes LLVM bitcode/IR produced by bpf-capsule-cc (or rustc, or any clang
-// with -emit-llvm), links it into one module together with the Capsule
+// Takes LLVM bitcode/IR produced by bpf-capsule-cc, rustc, or a compatible
+// frontend, links it into one module together with the Capsule
 // runtime, runs the whole-program capsule pipeline, and emits a
 // libbpf-loadable BPF ELF. Internally this subsumes llvm-link, opt, llc and
 // llvm-objcopy from the reference pipeline; the passes are linked statically,

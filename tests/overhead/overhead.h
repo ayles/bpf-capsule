@@ -17,6 +17,12 @@ struct overhead_node {
     uint64_t value;
 };
 
+struct overhead_byval {
+    uint64_t first;
+    uint64_t second;
+    uint64_t third;
+};
+
 struct overhead_state {
     struct capsule_result capsule;
     uint64_t result;

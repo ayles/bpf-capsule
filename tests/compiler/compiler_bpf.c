@@ -194,6 +194,13 @@ struct compiler_vararg_wide {
     uint64_t third;
 };
 
+__attribute__((noinline)) static uint64_t compiler_wide_sum(struct compiler_vararg_wide wide, uint64_t addend) {
+    return wide.first + wide.second + wide.third + addend;
+}
+
+typedef uint64_t (*compiler_wide_sum_fn)(struct compiler_vararg_wide, uint64_t);
+static compiler_wide_sum_fn volatile compiler_wide_sums[] = {compiler_wide_sum};
+
 __attribute__((noinline)) static uint64_t compiler_vararg_sum(unsigned int fixed, ...) {
     va_list list;
     va_list copy;
@@ -319,6 +326,11 @@ static void compiler_test_body(void) {
     uint64_t varargs_value = compiler_vararg_sum(10, 11u, vararg_integer, vararg_wide, &sparse_items[2]);
     if (varargs_value != 1221) {
         failures |= 32768;
+    }
+    uint64_t fixed_wide = compiler_wide_sum(vararg_wide, 70);
+    uint64_t indirect_wide = compiler_wide_sums[0](vararg_wide, 80);
+    if (fixed_wide != 220 || indirect_wide != 230) {
+        failures |= 65536;
     }
     compiler_result.varargs_value = varargs_value;
 

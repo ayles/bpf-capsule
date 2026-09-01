@@ -14,6 +14,8 @@ target triple = "bpfel"
 
 declare i32 @__bpf_capsule_trampoline_step(i32, ptr)
 
+declare ptr @__bpf_capsule_va_arg(ptr, i64, i64)
+
 define i32 @__bpf_capsule_trampoline_l1(i32 %fiber, ptr %control) #0 {
 entry:
   %status = call i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr %control)
@@ -35,7 +37,7 @@ entry:
   %first = va_arg ptr %list, i32
   call void @llvm.va_copy.p0(ptr %copy, ptr %list)
   %second = va_arg ptr %copy, i128
-  %third.pointer = va_arg ptr %copy, ptr
+  %third.pointer = call ptr @__bpf_capsule_va_arg(ptr %copy, i64 24, i64 8)
   %third = load %wide, ptr %third.pointer, align 8
   %fourth = va_arg ptr %copy, ptr
   call void @llvm.va_end.p0(ptr %copy)

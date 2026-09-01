@@ -21,6 +21,15 @@ uint64_t arithmeticStep(uint64_t value, uint32_t index) {
     return value * 1664525u + static_cast<uint64_t>(index) + 1013904223u;
 }
 
+__attribute__((noinline)) uint64_t nativeByvalLeaf(overhead_byval argument, uint32_t index) {
+    return arithmeticStep(argument.first + (argument.second ^ argument.third), index);
+}
+
+uint64_t byvalStep(uint64_t value, uint32_t index) {
+    overhead_byval argument = {value, value ^ 0x9e3779b97f4a7c15ull, index};
+    return nativeByvalLeaf(argument, index);
+}
+
 struct Loaded {
     struct overhead* Skeleton = nullptr;
     struct bpf_capsule Capsule = {};
@@ -84,6 +93,14 @@ struct Loaded {
         }
         if (!run(Skeleton->progs.overhead_capsule_pressure_call_loop) || State->capsule.status != CAPSULE_OK || State->result != expected) {
             Error = "Capsule pressure loop produced a wrong result";
+            return;
+        }
+        uint64_t byvalExpected = 7;
+        for (uint32_t index = 0; index < OVERHEAD_ARITHMETIC_TRIPS; ++index) {
+            byvalExpected = byvalStep(byvalExpected, index);
+        }
+        if (!run(Skeleton->progs.overhead_capsule_byval_call_loop) || State->capsule.status != CAPSULE_OK || State->result != byvalExpected) {
+            Error = "Capsule by-value call loop produced a wrong result";
         }
     }
 
@@ -158,6 +175,9 @@ struct bpf_program* DirectDynamicCallLoop(struct overhead* object) {
 }
 struct bpf_program* CapsuleDynamicCallLoop(struct overhead* object) {
     return object->progs.overhead_capsule_dynamic_call_loop;
+}
+struct bpf_program* CapsuleByValCallLoop(struct overhead* object) {
+    return object->progs.overhead_capsule_byval_call_loop;
 }
 struct bpf_program* DirectPressureCallLoop(struct overhead* object) {
     return object->progs.overhead_direct_pressure_call_loop;
@@ -275,6 +295,17 @@ void NativeDynamicCallLoop(benchmark::State& state) {
     }
 }
 
+void NativeByValCallLoop(benchmark::State& state) {
+    static volatile uint32_t trips = OVERHEAD_ARITHMETIC_TRIPS;
+    for (auto _ : state) {
+        uint64_t value = 7;
+        for (uint32_t index = 0; index < trips; ++index) {
+            value = byvalStep(value, index);
+        }
+        benchmark::DoNotOptimize(value);
+    }
+}
+
 void NativePressureCallLoop(benchmark::State& state) {
     static volatile uint32_t trips = OVERHEAD_ARITHMETIC_TRIPS;
     for (auto _ : state) {
@@ -360,6 +391,8 @@ BENCHMARK_TEMPLATE(BpfCase, CapsuleDynamicLoop, 100)->UseManualTime()->Iteration
 BENCHMARK(NativeDynamicCallLoop);
 BENCHMARK_TEMPLATE(BpfCase, DirectDynamicCallLoop, 1000)->UseManualTime()->Iterations(BpfIterations);
 BENCHMARK_TEMPLATE(BpfCase, CapsuleDynamicCallLoop, 100)->UseManualTime()->Iterations(BpfIterations);
+BENCHMARK(NativeByValCallLoop);
+BENCHMARK_TEMPLATE(BpfCase, CapsuleByValCallLoop, 100)->UseManualTime()->Iterations(BpfIterations);
 BENCHMARK(NativePressureCallLoop);
 BENCHMARK_TEMPLATE(BpfCase, DirectPressureCallLoop, 1000)->UseManualTime()->Iterations(BpfIterations);
 BENCHMARK_TEMPLATE(BpfCase, FlatStackPressureCallLoop, 1000)->UseManualTime()->Iterations(BpfIterations);

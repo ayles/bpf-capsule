@@ -112,7 +112,7 @@ unit.entry:
 root.prologue:                                    ; preds = %unit.test.left
   %frame.sp = sub i64 %frame.fp, 16
   %slice.offset = and i64 %frame.fp, 262143
-  %3 = icmp ult i64 %slice.offset, 131200
+  %3 = icmp ult i64 %slice.offset, 131184
   br i1 %3, label %root.prologue.overflow, label %entry
 
 entry:                                            ; preds = %root.prologue
@@ -121,8 +121,8 @@ entry:                                            ; preds = %root.prologue
   %4 = getelementptr i8, ptr %frame.addr, i64 24
   %pointer2 = load ptr, ptr %4, align 8
   %caller.sp = sub i64 %frame.fp, 16
-  %callee.fp = sub i64 %caller.sp, 112
-  %callee.frame = getelementptr i8, ptr %frame.addr, i64 -128
+  %callee.fp = sub i64 %caller.sp, 96
+  %callee.frame = getelementptr i8, ptr %frame.addr, i64 -112
   %saved.fp.slot = getelementptr i8, ptr %callee.frame, i64 0
   store i64 %frame.fp, ptr %saved.fp.slot, align 8
   %return.pc.slot = getelementptr i8, ptr %callee.frame, i64 8
@@ -134,11 +134,9 @@ entry:                                            ; preds = %root.prologue
   %7 = getelementptr i8, ptr %callee.frame, i64 48
   store i128 3, ptr %7, align 16
   %byval.copy = load %wide, ptr @wide_direct, align 8
-  %byval.slot = getelementptr i8, ptr %callee.frame, i64 80
-  store %wide %byval.copy, ptr %byval.slot, align 8
   %8 = getelementptr i8, ptr %callee.frame, i64 64
-  store ptr %byval.slot, ptr %8, align 8
-  %9 = getelementptr i8, ptr %callee.frame, i64 72
+  store %wide %byval.copy, ptr %8, align 8
+  %9 = getelementptr i8, ptr %callee.frame, i64 88
   store ptr %pointer2, ptr %9, align 8
   %fiber.pc5 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   store i32 2, ptr %fiber.pc5, align 4
@@ -152,7 +150,7 @@ root.prologue.overflow:                           ; preds = %root.prologue
   ret i32 0
 
 entry.resume:                                     ; preds = %unit.test.left2
-  %returned.frame = getelementptr i8, ptr %frame.addr, i64 -128
+  %returned.frame = getelementptr i8, ptr %frame.addr, i64 -112
   %result.slot7 = getelementptr i8, ptr %returned.frame, i64 16
   %callret = load i64, ptr %result.slot7, align 8
   %direct.reg2mem.slot = getelementptr i8, ptr %frame.addr, i64 -16
@@ -173,8 +171,8 @@ entry.resume.bad.callee:                          ; preds = %entry.resume
 
 entry.resume.push:                                ; preds = %entry.resume
   %caller.sp9 = sub i64 %frame.fp, 16
-  %callee.fp10 = sub i64 %caller.sp9, 112
-  %callee.frame11 = getelementptr i8, ptr %frame.addr, i64 -128
+  %callee.fp10 = sub i64 %caller.sp9, 96
+  %callee.frame11 = getelementptr i8, ptr %frame.addr, i64 -112
   %saved.fp.slot12 = getelementptr i8, ptr %callee.frame11, i64 0
   store i64 %frame.fp, ptr %saved.fp.slot12, align 8
   %return.pc.slot13 = getelementptr i8, ptr %callee.frame11, i64 8
@@ -186,25 +184,23 @@ entry.resume.push:                                ; preds = %entry.resume
   %16 = getelementptr i8, ptr %callee.frame11, i64 48
   store i128 9, ptr %16, align 16
   %byval.copy14 = load %wide, ptr @wide_indirect, align 8
-  %byval.slot15 = getelementptr i8, ptr %callee.frame11, i64 80
-  store %wide %byval.copy14, ptr %byval.slot15, align 8
   %17 = getelementptr i8, ptr %callee.frame11, i64 64
-  store ptr %byval.slot15, ptr %17, align 8
-  %18 = getelementptr i8, ptr %callee.frame11, i64 72
+  store %wide %byval.copy14, ptr %17, align 8
+  %18 = getelementptr i8, ptr %callee.frame11, i64 88
   store ptr %pointer, ptr %18, align 8
-  %fiber.pc16 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  store i32 %callee.pc, ptr %fiber.pc16, align 4
-  %fiber.fp17 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
-  store i64 %callee.fp10, ptr %fiber.fp17, align 8
+  %fiber.pc15 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
+  store i32 %callee.pc, ptr %fiber.pc15, align 4
+  %fiber.fp16 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
+  store i64 %callee.fp10, ptr %fiber.fp16, align 8
   ret i32 0
 
 entry.resume.resume:                              ; preds = %unit.test.right3
-  %returned.frame18 = getelementptr i8, ptr %frame.addr, i64 -128
-  %result.slot19 = getelementptr i8, ptr %returned.frame18, i64 16
-  %callret20 = load i64, ptr %result.slot19, align 8
+  %returned.frame17 = getelementptr i8, ptr %frame.addr, i64 -112
+  %result.slot18 = getelementptr i8, ptr %returned.frame17, i64 16
+  %callret19 = load i64, ptr %result.slot18, align 8
   %direct.reg2mem.slot1 = getelementptr i8, ptr %frame.addr, i64 -16
   %direct.reload = load i64, ptr %direct.reg2mem.slot1, align 8
-  %result = add i64 %direct.reload, %callret20
+  %result = add i64 %direct.reload, %callret19
   %result.slot = getelementptr i8, ptr %frame.addr, i64 16
   store i64 %result, ptr %result.slot, align 8
   %19 = getelementptr i8, ptr %frame.addr, i64 8
@@ -253,7 +249,7 @@ unit.entry:
 sum_values.prologue:                              ; preds = %unit.entry
   %frame.sp = sub i64 %frame.fp, 16
   %slice.offset = and i64 %frame.fp, 262143
-  %2 = icmp ult i64 %slice.offset, 131200
+  %2 = icmp ult i64 %slice.offset, 131184
   br i1 %2, label %sum_values.prologue.overflow, label %entry
 
 entry:                                            ; preds = %sum_values.prologue
@@ -268,9 +264,9 @@ entry:                                            ; preds = %sum_values.prologue
   %4 = add i64 %3, 7
   %varargs.aligned = and i64 %4, -8
   %5 = inttoptr i64 %varargs.aligned to ptr
-  %first8 = load i32, ptr %5, align 8
   %varargs.next = getelementptr i8, ptr %5, i64 8
   store ptr %varargs.next, ptr %list.slot2, align 8
+  %first8 = load i32, ptr %5, align 8
   %list.slot1 = getelementptr i8, ptr %frame.addr, i64 -16
   %copy.slot7 = getelementptr i8, ptr %frame.addr, i64 -8
   %6 = load ptr, ptr %list.slot1, align 8
@@ -281,33 +277,32 @@ entry:                                            ; preds = %sum_values.prologue
   %8 = add i64 %7, 15
   %varargs.aligned10 = and i64 %8, -16
   %9 = inttoptr i64 %varargs.aligned10 to ptr
-  %second11 = load i128, ptr %9, align 16
-  %varargs.next12 = getelementptr i8, ptr %9, i64 16
-  store ptr %varargs.next12, ptr %copy.slot6, align 8
+  %varargs.next11 = getelementptr i8, ptr %9, i64 16
+  store ptr %varargs.next11, ptr %copy.slot6, align 8
+  %second12 = load i128, ptr %9, align 16
   %copy.slot5 = getelementptr i8, ptr %frame.addr, i64 -8
-  %varargs.cursor13 = load ptr, ptr %copy.slot5, align 8
-  %10 = ptrtoint ptr %varargs.cursor13 to i64
+  %varargs.cursor17 = load ptr, ptr %copy.slot5, align 8
+  %10 = ptrtoint ptr %varargs.cursor17 to i64
   %11 = add i64 %10, 7
-  %varargs.aligned14 = and i64 %11, -8
-  %12 = inttoptr i64 %varargs.aligned14 to ptr
-  %third.pointer15 = load ptr, ptr %12, align 8
-  %varargs.next16 = getelementptr i8, ptr %12, i64 8
-  store ptr %varargs.next16, ptr %copy.slot5, align 8
-  %third = load %wide, ptr %third.pointer15, align 8
+  %varargs.aligned18 = and i64 %11, -8
+  %12 = inttoptr i64 %varargs.aligned18 to ptr
+  %varargs.next19 = getelementptr i8, ptr %12, i64 24
+  store ptr %varargs.next19, ptr %copy.slot5, align 8
+  %third = load %wide, ptr %12, align 8
   %copy.slot4 = getelementptr i8, ptr %frame.addr, i64 -8
-  %varargs.cursor17 = load ptr, ptr %copy.slot4, align 8
-  %13 = ptrtoint ptr %varargs.cursor17 to i64
+  %varargs.cursor13 = load ptr, ptr %copy.slot4, align 8
+  %13 = ptrtoint ptr %varargs.cursor13 to i64
   %14 = add i64 %13, 7
-  %varargs.aligned18 = and i64 %14, -8
-  %15 = inttoptr i64 %varargs.aligned18 to ptr
-  %fourth19 = load ptr, ptr %15, align 8
-  %varargs.next20 = getelementptr i8, ptr %15, i64 8
-  store ptr %varargs.next20, ptr %copy.slot4, align 8
+  %varargs.aligned14 = and i64 %14, -8
+  %15 = inttoptr i64 %varargs.aligned14 to ptr
+  %varargs.next15 = getelementptr i8, ptr %15, i64 8
+  store ptr %varargs.next15, ptr %copy.slot4, align 8
+  %fourth16 = load ptr, ptr %15, align 8
   %copy.slot = getelementptr i8, ptr %frame.addr, i64 -8
   %list.slot = getelementptr i8, ptr %frame.addr, i64 -16
-  %second.low = trunc i128 %second11 to i64
+  %second.low = trunc i128 %second12 to i64
   %third.middle = extractvalue %wide %third, 1
-  %fourth.bits = ptrtoint ptr %fourth19 to i64
+  %fourth.bits = ptrtoint ptr %fourth16 to i64
   %first.wide = zext i32 %first8 to i64
   %16 = getelementptr i8, ptr %frame.addr, i64 24
   %fixed = load i32, ptr %16, align 4
@@ -325,10 +320,10 @@ entry:                                            ; preds = %sum_values.prologue
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   store i32 %return.pc, ptr %fiber.pc, align 4
   %return.sp = add i64 %frame.fp, 16
-  %fiber.sp21 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
-  store i64 %return.sp, ptr %fiber.sp21, align 8
-  %fiber.fp22 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
-  store i64 %saved.fp, ptr %fiber.fp22, align 8
+  %fiber.sp20 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
+  store i64 %return.sp, ptr %fiber.sp20, align 8
+  %fiber.fp21 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
+  store i64 %saved.fp, ptr %fiber.fp21, align 8
   ret i32 0
 
 sum_values.prologue.overflow:                     ; preds = %sum_values.prologue

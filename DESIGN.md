@@ -161,12 +161,15 @@ world replaces all of it:
   ordinary cursor, and `va_arg(T)` aligns and advances it by `T`. The callee
   receives no hidden count; as in C, its format, count or sentinel determines
   how many values it reads. Values such as `i128` occupy their full rounded
-  size. Clang represents a C aggregate passed by value as a pointer slot; the
-  caller copies the complete object after the argument tail and puts its
-  software-stack address in that slot. Indirect calls use the same layout
-  because every call instruction still carries its ABI signature, attributes,
-  and actual operands. The complete outgoing size is known at that call site,
-  so it is not stored in the frame or exposed through `va_list`.
+  size. Although Clang represents a C aggregate passed by value as a pointer
+  with a `byval` attribute, the managed slot contains the object itself; the
+  callee materializes that slot's address, with no pointer slot or second copy
+  area. The compiler wrapper preserves the size and alignment of aggregate
+  `va_arg` expressions until stackify for the same inline layout. Indirect
+  calls use it too because every call instruction still carries its ABI
+  signature, attributes, and actual operands. The complete outgoing size is
+  known at that call site, so it is not stored in the frame or exposed through
+  `va_list`.
 - **The fiber slice has two owners.** Managed frames and variable-size
   allocations occupy its upper half. Eligible scalar spills created by BPF
   register allocation use a transient extent in the lower half, reused by

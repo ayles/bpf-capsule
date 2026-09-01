@@ -307,15 +307,14 @@ struct ManagedFunction {
 };
 
 // One caller-owned outgoing area. The linkage is fixed, the optional result
-// and every actual slot retain their natural type and alignment. A byval slot
-// points at its full object copy after the cursor-visible arguments. Tail
-// padding restores the universal frame alignment. A variadic callee needs no
-// special signature: its fixed arguments use the prefix of this same layout,
-// and va_start begins at FixedArgsEnd.
+// and every actual slot retain their natural type and alignment. A byval
+// object's bytes are its slot; there is no pointer slot or second copy area.
+// Tail padding restores the universal frame alignment. A variadic callee
+// needs no special signature: its fixed arguments use the prefix of this same
+// layout, and va_start begins at FixedArgsEnd.
 struct ManagedCallLayout {
     SmallVector<uint64_t> ArgOffsets;
     SmallVector<uint64_t> ArgAlignments;
-    SmallVector<uint64_t> ByValCopyOffsets; // zero for an ordinary value
     uint64_t ResultOffset = 0;
     uint64_t ArgsEnd = LinkageBytes;
     uint64_t Size = LinkageBytes;
@@ -453,6 +452,12 @@ public:
                 }
                 marker->eraseFromParent();
             }
+        }
+        if (Function* marker = Module_.getFunction(bpf::sym::VaArg)) {
+            if (!marker->use_empty()) {
+                report_fatal_error("stackify: va_arg marker survived function transformation");
+            }
+            marker->eraseFromParent();
         }
         FormRegionsAndCreateAllocationUnits();
         ReplaceFiberUses();
@@ -1483,26 +1488,22 @@ private:
     bool IncludeCallValue(Function& owner, ManagedCallValue value, const Twine& role) {
         uint64_t bytes = 0;
         uint64_t alignment = 0;
-        if (!FixedTypeLayout(owner, value.SlotType, role, bytes, alignment)) {
+        Type* storageType = value.ByValType ? value.ByValType : value.SlotType;
+        if (!FixedTypeLayout(owner, storageType, role, bytes, alignment)) {
             return false;
         }
-        FrameAlignment_ = std::max<uint64_t>(FrameAlignment_, std::max<uint64_t>(8, alignment));
-        if (value.ByValType) {
-            if (!FixedTypeLayout(owner, value.ByValType, Twine(role) + " byval copy", bytes, alignment)) {
-                return false;
-            }
-            FrameAlignment_ = std::max<uint64_t>(FrameAlignment_, std::max({uint64_t(8), alignment, value.ByValAlignment}));
-        }
+        FrameAlignment_ = std::max<uint64_t>(FrameAlignment_, std::max({uint64_t(8), alignment, value.ByValAlignment}));
         return true;
     }
 
     std::optional<std::pair<uint64_t, uint64_t>> ReserveCallValue(Function& owner, uint64_t& cursor, ManagedCallValue value, const Twine& role) {
         uint64_t bytes = 0;
         uint64_t alignment = 0;
-        if (!FixedTypeLayout(owner, value.SlotType, role, bytes, alignment)) {
+        Type* storageType = value.ByValType ? value.ByValType : value.SlotType;
+        if (!FixedTypeLayout(owner, storageType, role, bytes, alignment)) {
             return std::nullopt;
         }
-        alignment = std::max<uint64_t>(8, alignment);
+        alignment = std::max<uint64_t>({8, alignment, value.ByValAlignment});
         bytes = alignTo(bytes, uint64_t(8));
         auto offset = ReserveFrameBytes(owner, cursor, bytes, alignment, role.str());
         if (!offset) {
@@ -1530,24 +1531,6 @@ private:
             layout.ArgAlignments.push_back(reserved->second);
         }
         layout.ArgsEnd = cursor;
-        for (ManagedCallValue argument : arguments) {
-            if (!argument.ByValType) {
-                layout.ByValCopyOffsets.push_back(0);
-                continue;
-            }
-            uint64_t bytes = 0;
-            uint64_t alignment = 0;
-            if (!FixedTypeLayout(owner, argument.ByValType, "a managed byval copy", bytes, alignment)) {
-                return layout;
-            }
-            alignment = std::max<uint64_t>({8, alignment, argument.ByValAlignment});
-            bytes = alignTo(bytes, uint64_t(8));
-            auto offset = ReserveFrameBytes(owner, cursor, bytes, alignment, "a managed byval copy");
-            if (!offset) {
-                return layout;
-            }
-            layout.ByValCopyOffsets.push_back(*offset);
-        }
         if (!ReserveFrameBytes(owner, cursor, 0, FrameAlignment_, "managed call tail padding")) {
             return layout;
         }
@@ -1572,9 +1555,9 @@ private:
     // and the actual variadic tail. Every value gets an eight-byte minimum
     // slot with its stronger natural alignment preserved; there is no global
     // maximum slot and no separately packed variadic buffer. LLVM represents
-    // a C by-value aggregate as a pointer slot with a byval attribute; its
-    // complete copy follows the cursor-visible arguments in the same outgoing
-    // area, so the pointer remains valid until the caller reclaims the call.
+    // a C by-value aggregate as a pointer plus a byval attribute; the managed
+    // ABI uses the attributed aggregate type as the slot type and the callee
+    // materializes that slot's address wherever LLVM used the formal pointer.
     void LayOutArguments() {
         // The fp anchor must satisfy every value and static-object alignment.
         // Discover the complete convention before assigning a single offset.
@@ -1686,6 +1669,12 @@ private:
                 if (!call) {
                     continue;
                 }
+                Function* directCallee = ResolveDirectCallee(*call);
+                if (directCallee && directCallee->getName() == bpf::sym::VaArg && !ManagedByFunction_.contains(&function)) {
+                    call->getContext().emitError(call, "stackify: __bpf_capsule_va_arg is outside the managed software-stack ABI");
+                    InputError_ = true;
+                    continue;
+                }
                 const bool boundary = call->getOperandBundle(bpf::md::CallBundle).has_value();
                 const bool managed = boundary || IsManagedCall(call);
                 if (managed) {
@@ -1708,7 +1697,7 @@ private:
                     }
                     continue;
                 }
-                Function* callee = ResolveDirectCallee(*call);
+                Function* callee = directCallee;
                 StringRef name = callee ? callee->getName() : StringRef("<indirect>");
                 call->getContext().emitError(call, Twine("stackify: variadic call to ") + name + " is outside the managed software-stack ABI");
                 InputError_ = true;
@@ -4136,6 +4125,16 @@ private:
         RematerializeUses(arg, [&](BasicBlock::iterator at) -> Value* {
             IRBuilder<> b(at->getParent(), at);
             auto* slot = b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, offset)});
+            if (arg.hasByValAttr()) {
+                Value* address = slot;
+                if (address->getType() != arg.getType()) {
+                    address = b.CreatePointerCast(address, arg.getType(), arg.getName());
+                }
+                if (auto* instruction = dyn_cast<Instruction>(address)) {
+                    instruction->setDebugLoc(debugLoc);
+                }
+                return address;
+            }
             auto* value = b.CreateLoad(arg.getType(), slot, arg.getName());
             value->setDebugLoc(debugLoc);
             return value;
@@ -4315,6 +4314,7 @@ private:
         SmallVector<VAEndInst*> ends;
         SmallVector<VACopyInst*> copies;
         SmallVector<VAArgInst*> arguments;
+        SmallVector<CallBase*> typedArguments;
         for (BasicBlock* block : body) {
             for (Instruction& instruction : *block) {
                 if (auto* start = dyn_cast<VAStartInst>(&instruction)) {
@@ -4325,6 +4325,11 @@ private:
                     copies.push_back(copy);
                 } else if (auto* argument = dyn_cast<VAArgInst>(&instruction)) {
                     arguments.push_back(argument);
+                } else if (auto* call = dyn_cast<CallBase>(&instruction)) {
+                    Function* callee = ResolveDirectCallee(*call);
+                    if (callee && callee->getName() == bpf::sym::VaArg) {
+                        typedArguments.push_back(call);
+                    }
                 }
             }
         }
@@ -4350,27 +4355,53 @@ private:
         for (VAEndInst* end : ends) {
             end->eraseFromParent();
         }
+        auto advanceCursor = [&](Instruction* at, Value* list, uint64_t size, uint64_t alignment) {
+            alignment = std::max<uint64_t>(8, alignment);
+            IRBuilder<> b(at);
+            b.SetCurrentDebugLocation(at->getDebugLoc());
+            Value* cursor = b.CreateLoad(PointerType::get(Ctx_, 0), list, "varargs.cursor");
+            Value* address = b.CreatePtrToInt(cursor, I64_);
+            address = b.CreateAnd(b.CreateAdd(address, ConstantInt::get(I64_, alignment - 1)), ConstantInt::get(I64_, ~(alignment - 1)), "varargs.aligned");
+            Value* pointer = b.CreateIntToPtr(address, PointerType::get(Ctx_, 0));
+            Value* next = b.CreateGEP(I8_, pointer, ConstantInt::get(I64_, alignTo(size, uint64_t(8))), "varargs.next");
+            b.CreateStore(next, list);
+            return pointer;
+        };
         for (VAArgInst* argument : arguments) {
             uint64_t bytes = 0;
             uint64_t alignment = 0;
             if (!FixedTypeLayout(*info.Original, argument->getType(), "variadic argument", bytes, alignment)) {
                 return;
             }
-            alignment = std::max<uint64_t>(8, alignment);
-            bytes = alignTo(bytes, uint64_t(8));
 
             IRBuilder<> b(argument);
             b.SetCurrentDebugLocation(argument->getDebugLoc());
-            Value* cursor = b.CreateLoad(PointerType::get(Ctx_, 0), argument->getPointerOperand(), "varargs.cursor");
-            Value* address = b.CreatePtrToInt(cursor, I64_);
-            if (alignment > 1) {
-                address = b.CreateAnd(b.CreateAdd(address, ConstantInt::get(I64_, alignment - 1)), ConstantInt::get(I64_, ~(alignment - 1)), "varargs.aligned");
-            }
-            Value* pointer = b.CreateIntToPtr(address, PointerType::get(Ctx_, 0));
-            Value* value = b.CreateAlignedLoad(argument->getType(), pointer, Align(alignment), argument->getName());
-            Value* next = b.CreateGEP(I8_, pointer, ConstantInt::get(I64_, bytes), "varargs.next");
-            b.CreateStore(next, argument->getPointerOperand());
+            Value* pointer = advanceCursor(argument, argument->getPointerOperand(), bytes, alignment);
+            Value* value = b.CreateAlignedLoad(argument->getType(), pointer, Align(std::max<uint64_t>(8, alignment)), argument->getName());
             argument->replaceAllUsesWith(value);
+            argument->eraseFromParent();
+        }
+        for (CallBase* argument : typedArguments) {
+            if (argument->arg_size() != 3 || !argument->getType()->isPointerTy() || !argument->getArgOperand(0)->getType()->isPointerTy()) {
+                argument->getContext().emitError(argument, "stackify: malformed __bpf_capsule_va_arg marker");
+                InputError_ = true;
+                continue;
+            }
+            auto* sizeValue = dyn_cast<ConstantInt>(argument->getArgOperand(1));
+            auto* alignmentValue = dyn_cast<ConstantInt>(argument->getArgOperand(2));
+            uint64_t size = sizeValue ? sizeValue->getZExtValue() : 0;
+            uint64_t alignment = alignmentValue ? alignmentValue->getZExtValue() : 0;
+            if (!sizeValue || !alignmentValue || size > FiberStackSize_ || alignment > FiberStackSize_ || !isPowerOf2_64(alignment)) {
+                argument->getContext().emitError(argument, "stackify: invalid __bpf_capsule_va_arg size or alignment");
+                InputError_ = true;
+                continue;
+            }
+            Value* pointer = advanceCursor(argument, argument->getArgOperand(0), size, alignment);
+            if (pointer->getType() != argument->getType()) {
+                IRBuilder<> b(argument);
+                pointer = b.CreatePointerCast(pointer, argument->getType());
+            }
+            argument->replaceAllUsesWith(pointer);
             argument->eraseFromParent();
         }
     }
@@ -4613,11 +4644,7 @@ private:
             if (Type* byVal = call.getParamByValType(i)) {
                 uint64_t sourceAlignment =
                     std::max<uint64_t>(Module_.getDataLayout().getABITypeAlign(byVal).value(), call.getParamAlign(i).valueOrOne().value());
-                Value* copied = b.CreateAlignedLoad(byVal, value, Align(sourceAlignment), "byval.copy");
-                Value* copySlot = b.CreateGEP(I8_, out, ConstantInt::get(I64_, layout.ByValCopyOffsets[i]), "byval.slot");
-                uint64_t copyAlignment = std::max<uint64_t>(Module_.getDataLayout().getABITypeAlign(byVal).value(), call.getParamAlign(i).valueOrOne().value());
-                b.CreateAlignedStore(copied, copySlot, Align(std::max<uint64_t>(8, copyAlignment)));
-                value = copySlot;
+                value = b.CreateAlignedLoad(byVal, value, Align(sourceAlignment), "byval.copy");
             }
             Value* slot = b.CreateGEP(I8_, out, ConstantInt::get(I64_, layout.ArgOffsets[i]));
             b.CreateAlignedStore(value, slot, Align(layout.ArgAlignments[i]));
