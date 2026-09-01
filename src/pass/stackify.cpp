@@ -4665,7 +4665,8 @@ private:
         Value* returnPc = b.CreateLoad(I32_, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, ReturnPcOffset)}), "return.pc");
         Value* savedFp = b.CreateLoad(I64_, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, SavedFpOffset)}), "saved.fp");
         b.CreateStore(returnPc, PcPtr(b));
-        b.CreateStore(b.CreateAdd(info.Fp, ConstantInt::get(I64_, LinkageBytes), "return.sp"), SpPtr(b));
+        Value* returnSp = b.CreateAdd(info.Fp, ConstantInt::get(I64_, LinkageBytes), "return.sp");
+        b.CreateStore(returnSp, SpPtr(b));
         b.CreateStore(savedFp, FpPtr(b));
         auto* newRet = b.CreateRet(ConstantInt::get(I32_, ActionContinue));
         newRet->setDebugLoc(ret->getDebugLoc() ? ret->getDebugLoc() : debugLoc);
