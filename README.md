@@ -1,5 +1,7 @@
 # BPF Capsule
 
+[![CI](https://github.com/ayles/bpf-capsule/actions/workflows/ci.yml/badge.svg)](https://github.com/ayles/bpf-capsule/actions/workflows/ci.yml)
+
 BPF Capsule compiles freestanding C, C++, and `no_std` Rust into ordinary
 libbpf-loadable eBPF objects. It lets programs with recursion, indirect calls,
 deep stacks, data-dependent loops, dynamic allocation, and large linked
