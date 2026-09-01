@@ -139,7 +139,7 @@ capsule_gtest_host(errors_test UNPRIVILEGED SOURCES errors/errors_test.cc)
 # The compact libm algorithms also have native, kernel-free edge contracts.
 # Their guest equivalents below prove the same behavior after soft-float
 # lowering; this executable makes algorithm mistakes fail early and directly.
-add_executable(math_contract_test libc/math_contract.c ${LIBC}/mathfns.c)
+add_executable(math_contract_test libc/math_contract.c ${LIBC}/mathfns.c ${LIBC}/strtod.c)
 target_include_directories(math_contract_test PRIVATE
     "${CMAKE_SOURCE_DIR}/src/runtime/guest")
 target_compile_options(math_contract_test PRIVATE -fno-builtin)
@@ -283,7 +283,7 @@ capsule_gtest_host(context_interop_test
 # defines.
 capsule_bpf_object(compiler
     SOURCES compiler/compiler_bpf.c ${LIBC}/freestanding.c ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c
-            ${LIBC}/softfloat.c ${LIBC}/mathfns.c
+            ${LIBC}/softfloat.c ${LIBC}/mathfns.c ${LIBC}/strtod.c
     FLAGS -I${D}/compiler ${LIBC_FLAGS} -DBPF_CAPSULE_MAX_FIBERS=2 -DBPF_CAPSULE_DRIVE_LEVEL=2
     RUNTIME_COMPILE_DEFINITIONS BPF_CAPSULE_MAX_FIBERS=2 BPF_CAPSULE_DRIVE_LEVEL=2
 )
@@ -295,10 +295,10 @@ capsule_gtest_host(compiler_test
 )
 
 # Freestanding libc under the transform: printf, strtoull edges, soft-float
-# specials, the null allocator.
+# specials, strtod, and allocator failure without a configured heap.
 capsule_bpf_object(libc
     SOURCES libc/libc_bpf.c ${LIBC}/freestanding.c ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c
-            ${LIBC}/softfloat.c ${LIBC}/mathfns.c
+            ${LIBC}/softfloat.c ${LIBC}/mathfns.c ${LIBC}/strtod.c
     FLAGS -I${D}/libc ${LIBC_FLAGS}
 )
 capsule_gtest_host(libc_test

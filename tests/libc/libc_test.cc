@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Freestanding libc under the transform: printf formatting incl. truncation,
-// strtoull/strtol edge cases, soft-float special values, and the null
-// allocator (no heap configured -> malloc reports ENOMEM).
+// strtoull/strtol/strtod edge cases, soft-float special values, and allocator
+// failure when no heap is configured.
 #include "capsule_gtest.h"
 
 #include "bpf_capsule_host.h"
@@ -39,6 +39,12 @@ TEST(Libc, FreestandingContracts) {
     const char* expected = "-7/-32000/-9/-9223372036854775808/17/-9223372036854775808/0x00002a/011/  Q/xy   /abc/%";
     EXPECT_EQ(result->formatted_length, (int)strlen(expected));
     EXPECT_STREQ((const char*)result->formatted, expected);
+    const char* expectedFloats = "12.5/+1.25/1.234e+03/0x1.8p+1/0X1.999999999999AP-4/2/2./inf/NAN";
+    EXPECT_EQ(result->float_length, (int)strlen(expectedFloats));
+    EXPECT_STREQ((const char*)result->floats, expectedFloats);
+    const char* expectedFloatEdges = "4.9406564584124654e-324|1.7976931348623157e+308|-000001.50|0x1.p+0|4|-0|1e+03|0.0001";
+    EXPECT_EQ(result->float_edge_length, (int)strlen(expectedFloatEdges));
+    EXPECT_STREQ((const char*)result->float_edges, expectedFloatEdges);
     EXPECT_EQ(result->parsed_max, ~0ull);
     EXPECT_EQ(result->parsed_overflow, ~0ull);
     EXPECT_EQ(result->parsed_negative, ~0ull);

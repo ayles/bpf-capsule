@@ -17,6 +17,7 @@ struct wasm3_bpf_ctrl {
     size_t output_capacity;
     int zlib_status;
     size_t output_size;
+    uint64_t float_result;
     struct capsule_result capsule;
 };
 
@@ -26,4 +27,5 @@ struct wasm_zlib_control {
     uint64_t status;
     uint64_t output_len;
     uint64_t adler;
+    uint64_t float_result;
 };

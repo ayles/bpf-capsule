@@ -16,11 +16,27 @@
 #include "lua.skel.h"
 
 enum {
-    LUA_MAX_DRAINS = 2000000,
     LUA_OUTPUT_BYTES = 1u << 20,
     LUA_ERROR_BYTES = 64u << 10,
     LUA_HEAP_BYTES = 16u << 20,
 };
+
+static int read_max_drains(unsigned long* result) {
+    const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
+    *result = 0;
+    if (!text || !*text) {
+        return 0;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (text[0] < '0' || text[0] > '9' || errno || !end || *end) {
+        fprintf(stderr, "BPF_CAPSULE_MAX_DRAINS must be a non-negative integer\n");
+        return -1;
+    }
+    *result = value;
+    return 0;
+}
 
 static char* read_stream(FILE* file, size_t* size) {
     size_t capacity = 64u << 10;
@@ -73,6 +89,10 @@ static int reserve_buffer(size_t* total, size_t size, size_t* offset) {
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: lua SCRIPT\n");
+        return 2;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains(&max_drains)) {
         return 2;
     }
 
@@ -155,8 +175,8 @@ int main(int argc, char** argv) {
     }
     unsigned long drains = 0;
     while (control->capsule.status == CAPSULE_PENDING) {
-        if (drains == LUA_MAX_DRAINS) {
-            fprintf(stderr, "gave up after %lu drains: computation still pending\n", drains);
+        if (drains == max_drains) {
+            fprintf(stderr, "computation is still pending after %lu drains; set BPF_CAPSULE_MAX_DRAINS to permit more\n", drains);
             goto cleanup;
         }
         if (bpf_prog_test_run_opts(drain_fd, &options)) {

@@ -9,5 +9,7 @@ end
 -- empty and both exercised in the kernel and the --native run.
 local first = io.read()
 local rest = io.read("a")
+local floats_work = tonumber("12.5") == 12.5 and 1.5 * 2 == 3 and 0x1.8p+1 == 3
+    and tostring(12.5) == "12.5" and string.format("%.2f", 1.25) == "1.25"
 
-print("Lua checksum", checksum, first == nil, #rest)
+print("Lua checksum", checksum, first == nil, #rest, floats_work)

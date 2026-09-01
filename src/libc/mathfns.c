@@ -396,13 +396,7 @@ double acos(double x) {
 double difftime(long a, long b) {
     return (double)a - (double)b;
 }
-double strtod(const char* s, char** end) {
-    // Deliberate stub: see the text-to-float limitation in README.md.
-    if (end) {
-        *end = (char*)s;
-    }
-    return 0.0;
-}
+
 int isnan(double x) {
     return x != x;
 }
@@ -586,8 +580,14 @@ static double round_to_even(double x) {
 double nearbyint(double x) {
     return round_to_even(x);
 }
+float nearbyintf(float x) {
+    return (float)round_to_even((double)x);
+}
 double rint(double x) {
     return round_to_even(x);
+}
+float rintf(float x) {
+    return (float)round_to_even((double)x);
 }
 
 int isfinite(double x) {
@@ -603,6 +603,12 @@ int signbit(double x) {
 long lrint(double x) {
     return (long)round_to_even(x);
 }
+long lrintf(float x) {
+    return (long)round_to_even((double)x);
+}
 long long llrint(double x) {
     return (long long)round_to_even(x);
+}
+long long llrintf(float x) {
+    return (long long)round_to_even((double)x);
 }

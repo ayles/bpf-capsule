@@ -5,6 +5,8 @@
   kernelPackages,
   targetKernel,
   llamaFixtures,
+  llamaModel,
+  llamaTokenizer,
   doomWad,
   arena ? false,
 }:
@@ -37,23 +39,34 @@ pkgs.testers.runNixOSTest {
 
     root = "${examples}/libexec/bpf-capsule/examples"
 
-    def run_example(name, command, marker):
+    def run_example(name, command, marker, drains=None):
         output = machine.succeed(
             "ulimit -l unlimited; " + command + " 2>&1"
         )
         print("RUN:" + name)
         print(output)
         assert marker in output, name + " did not print " + repr(marker)
+        if drains is not None:
+            expected = f"continuation drains: {drains}"
+            assert expected in output, name + " did not print " + repr(expected)
+        return output
 
     run_example("fib", root + "/fib/fib", "fib(20) = 6765")
-    run_example("zlib", root + "/zlib/zlib 65536", "continuation drains:")
-    run_example("sqlite", root + "/sqlite/sqlite", "rows=11 checksum=4e4d372ad01ecc09")
-    run_example("wasm3", root + "/wasm3/wasm3 4096", "stock zlib Wasm: 4096 ->")
-    run_example("lua", root + "/lua/lua " + root + "/lua/script.lua", "Lua checksum\t16898\ttrue\t0")
-    run_example("quickjs", root + "/quickjs/quickjs " + root + "/quickjs/script.js", "checksum 807746 text-bytes 743 matches 100")
-    run_example("rust", root + "/rust/rust", "Rust panic: status=exited code=101")
-    run_example("llama2", root + "/llama2/llama2 ${llamaFixtures}/llama2-tiny.bin 4", "tokens: 15 15 15 15")
-    run_example("llama2-q8", root + "/llama2/llama2q ${llamaFixtures}/llama2q-tiny.bin 4", "tokens: 15 15 15 15")
+    run_example("zlib", root + "/zlib/zlib 65536", "stock zlib:", 0)
+    run_example("sqlite", root + "/sqlite/sqlite", "rows=12 checksum=693506f4cc70de84", 0)
+    run_example("wasm3", root + "/wasm3/wasm3 4096", "stock zlib Wasm: 4096 ->", 0)
+    run_example("lua", root + "/lua/lua " + root + "/lua/script.lua", "Lua checksum\t16898\ttrue\t0\ttrue", 0)
+    run_example("quickjs", root + "/quickjs/quickjs " + root + "/quickjs/script.js", "checksum 807746 text-bytes 743 matches 100", 0)
+    run_example("rust", root + "/rust/rust", "Rust panic: status=exited code=101", 0)
+    llama_output = run_example(
+        "llama2",
+        "BPF_CAPSULE_MAX_DRAINS=15 " + root + "/llama2/llama2 ${llamaModel} 32 ${llamaTokenizer}",
+        "text: Once upon a time, there was a little girl named Lily. She loved to play outside in the park.",
+        15,
+    )
+    assert "native reference: match" in llama_output
+    llama_q8_output = run_example("llama2-q8", root + "/llama2/llama2q ${llamaFixtures}/llama2q-tiny.bin 4", "tokens: 15 15 15 15", 0)
+    assert "native reference: match" in llama_q8_output
 
     machine.succeed("mkdir -p /tmp/doom-frames")
     run_example(

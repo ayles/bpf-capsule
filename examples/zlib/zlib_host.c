@@ -16,21 +16,19 @@
 
 #include "zlib.skel.h"
 
-#define MAX_DRAINS 2000000
-
 // Run one entry and drain budget-driven continuations until the capsule
 // reaches a terminal state. Returns zero only when the capsule reports
 // CAPSULE_OK.
-static int run_to_completion(
-    int run_fd, int drain_fd, struct bpf_test_run_opts* options, volatile const struct capsule_result* capsule, unsigned long* drains) {
+static int run_to_completion(int run_fd, int drain_fd, struct bpf_test_run_opts* options, volatile const struct capsule_result* capsule,
+    unsigned long max_drains, unsigned long* drains) {
     if (bpf_prog_test_run_opts(run_fd, options)) {
         perror("run");
         return -1;
     }
     unsigned long run_drains = 0;
     while (capsule->status == CAPSULE_PENDING) {
-        if (run_drains == MAX_DRAINS) {
-            fprintf(stderr, "gave up after %lu drains: computation still pending\n", run_drains);
+        if (run_drains == max_drains) {
+            fprintf(stderr, "computation is still pending after %lu drains; set BPF_CAPSULE_MAX_DRAINS to permit more\n", run_drains);
             return -1;
         }
         if (bpf_prog_test_run_opts(drain_fd, options)) {
@@ -53,6 +51,23 @@ static int run_to_completion(
     return 0;
 }
 
+static int read_max_drains(unsigned long* result) {
+    const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
+    *result = 0;
+    if (!text || !*text) {
+        return 0;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (text[0] < '0' || text[0] > '9' || errno || !end || *end) {
+        fprintf(stderr, "BPF_CAPSULE_MAX_DRAINS must be a non-negative integer\n");
+        return -1;
+    }
+    *result = value;
+    return 0;
+}
+
 int main(int argc, char** argv) {
     if (argc > 2) {
         fprintf(stderr, "usage: zlib [BYTES]\n");
@@ -63,6 +78,10 @@ int main(int argc, char** argv) {
     size_t n = argc > 1 ? strtoul(argv[1], &size_end, 0) : (2u << 20);
     if (!n || n > UINT_MAX || errno || (size_end && *size_end)) {
         fprintf(stderr, "BYTES must be an integer from 1 through %u\n", UINT_MAX);
+        return 1;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains(&max_drains)) {
         return 1;
     }
 
@@ -141,7 +160,7 @@ int main(int argc, char** argv) {
     }
     struct bpf_test_run_opts options = {.sz = sizeof(options)};
     unsigned long continuation_drains = 0;
-    if (run_to_completion(run_fd, drain_fd, &options, &control->capsule, &continuation_drains)) {
+    if (run_to_completion(run_fd, drain_fd, &options, &control->capsule, max_drains, &continuation_drains)) {
         goto cleanup;
     }
     int pass = control->status == Z_STREAM_END && control->output_size == n && control->capsule.status == CAPSULE_OK && memcmp(output, data, n) == 0;

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // WebAssembly in the kernel — wasm3, unmodified, running a zlib module through
-// the same pipeline. wasm3 is built with float opcodes disabled; this workload
-// exercises its parser, compiler, interpreter dispatch and linear memory.
+// the same pipeline. The module also evaluates an input-dependent f64
+// expression, so the workload covers float opcodes as well as parser,
+// compiler, interpreter dispatch, and linear memory.
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
@@ -36,6 +37,7 @@ static int wasm_global_offset(IM3Module module, const char* name, uint32_t* offs
 static void wasm3_zlib_body(void) {
     w3ctrl.zlib_status = -2; // Z_STREAM_ERROR
     w3ctrl.output_size = 0;
+    w3ctrl.float_result = 0;
 
     if (!w3ctrl.input || !w3ctrl.input_size || w3ctrl.input_size > WASM_ZLIB_GUEST_INPUT_CAPACITY || !w3ctrl.output || !w3ctrl.output_capacity ||
         w3ctrl.output_capacity > WASM_ZLIB_GUEST_OUTPUT_CAPACITY) {
@@ -95,6 +97,7 @@ static void wasm3_zlib_body(void) {
 
     memcpy(&guest, memory + control_offset, sizeof(guest));
     w3ctrl.zlib_status = (int)(int64_t)guest.status;
+    w3ctrl.float_result = guest.float_result;
     if (guest.output_len > w3ctrl.output_capacity || guest.output_len > WASM_ZLIB_GUEST_OUTPUT_CAPACITY) {
         goto cleanup;
     }

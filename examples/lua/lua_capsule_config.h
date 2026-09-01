@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Force-included into stock Lua 5.4. Lua deliberately leaves these platform
+// Force-included into stock Lua. Lua deliberately leaves these platform
 // hooks open in luaconf.h/ldo.c, so Capsule does not patch the upstream tree.
 #pragma once
 

@@ -2,7 +2,9 @@
 // Run the built-in SQLite workload in the kernel and check its result.
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
+#include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "bpf_capsule_host.h"
 
@@ -10,12 +12,31 @@
 
 #include "sqlite.skel.h"
 
-#define MAX_DRAINS 2000000
+static int read_max_drains(unsigned long* result) {
+    const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
+    *result = 0;
+    if (!text || !*text) {
+        return 0;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (text[0] < '0' || text[0] > '9' || errno || !end || *end) {
+        fprintf(stderr, "BPF_CAPSULE_MAX_DRAINS must be a non-negative integer\n");
+        return -1;
+    }
+    *result = value;
+    return 0;
+}
 
 int main(int argc, char** argv) {
     (void)argv;
     if (argc != 1) {
         fprintf(stderr, "usage: sqlite\n");
+        return 1;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains(&max_drains)) {
         return 1;
     }
 
@@ -46,8 +67,8 @@ int main(int argc, char** argv) {
     }
     unsigned long drains = 0;
     while (control->capsule.status == CAPSULE_PENDING) {
-        if (drains == MAX_DRAINS) {
-            fprintf(stderr, "gave up after %lu drains: computation still pending\n", drains);
+        if (drains == max_drains) {
+            fprintf(stderr, "computation is still pending after %lu drains; set BPF_CAPSULE_MAX_DRAINS to permit more\n", drains);
             goto cleanup;
         }
         if (bpf_prog_test_run_opts(drain_fd, &options)) {
@@ -69,7 +90,7 @@ int main(int argc, char** argv) {
 
     printf("rows=%llu checksum=%llx\n", (unsigned long long)control->rows, (unsigned long long)control->checksum);
     fprintf(stderr, "continuation drains: %lu\n", drains);
-    int pass = !control->sqlite_rc && control->rows == 11 && control->checksum == 0x4e4d372ad01ecc09ull;
+    int pass = !control->sqlite_rc && control->rows == 12 && control->checksum == 0x693506f4cc70de84ull;
     if (!pass) {
         fprintf(stderr, "unexpected SQLite result: rc=%d rows=%llu checksum=%llx\n", control->sqlite_rc, (unsigned long long)control->rows,
             (unsigned long long)control->checksum);

@@ -49,7 +49,8 @@ static void llama2q_run_body(void) {
     }
     GS = group_size;
 
-    memory_map_weights(&t.weights, p, qmodel_image + 256, shared_classifier);
+    // Upstream advances the pointer variable but never mutates the checkpoint.
+    memory_map_weights(&t.weights, p, (void*)(qmodel_image + 256), shared_classifier);
     malloc_run_state(&t.state, p);
 
     // Greedy decoding from the BOS token: no sampler state, so the ids are a

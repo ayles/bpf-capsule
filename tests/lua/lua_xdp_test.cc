@@ -155,7 +155,14 @@ protected:
         }
         struct bpf_test_run_opts options = {};
         options.sz = sizeof(options);
-        if (capsule_test_drive(bpf_program__fd(initialize), bpf_program__fd(drain), &options, 2000000, nullptr, nullptr, &control_->initialization)) {
+        int possibleCpus = libbpf_num_possible_cpus();
+        if (possibleCpus < 1) {
+            errno = possibleCpus < 0 ? -possibleCpus : EINVAL;
+            return -1;
+        }
+        unsigned long drains = 0;
+        if (capsule_test_drive(
+                bpf_program__fd(initialize), bpf_program__fd(drain), &options, (unsigned long)possibleCpus, nullptr, &drains, &control_->initialization)) {
             return -1;
         }
         if (control_->initialization.status != CAPSULE_OK) {

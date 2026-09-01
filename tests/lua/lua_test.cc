@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// The full Lua 5.4 interpreter as a correctness test: publish guest buffers,
+// The full Lua interpreter as a correctness test: publish guest buffers,
 // stage a script through Capsule memory, run it in the kernel, and compare
 // the exact stdout the script must produce. The expected text is computed by
 // the script's own arithmetic: sum((1..2000)*17) mod 1000003 = 16898, io.read
-// on empty batch stdin yields nil, and io.read("a") yields "".
+// on empty batch stdin yields nil, io.read("a") yields "", and decimal plus
+// hexadecimal floating-point literals exercise the freestanding strtod path.
 #include "capsule_gtest.h"
 
 #include "bpf_capsule_host.h"
@@ -50,14 +51,12 @@ protected:
         lua_runner__destroy(skeleton_);
     }
 
-    // Enter once, then keep draining while the status is PENDING.
+    // The stock test workloads are expected to fit one drive span. Examples
+    // expose an explicit opt-in for larger user scripts; this test fails if a
+    // dependency or compiler change silently starts requiring continuations.
     void Drive(const char* entry) {
         ASSERT_EQ(capsule_test_run_program(skeleton_->obj, entry), 0) << entry << ": " << strerror(errno);
-        unsigned long drains = 0;
-        while (control_->capsule.status == CAPSULE_PENDING) {
-            ASSERT_LT(drains++, 2000000u) << "drain cap exceeded";
-            ASSERT_EQ(capsule_test_run_program(skeleton_->obj, "lua_drain"), 0) << strerror(errno);
-        }
+        ASSERT_NE(control_->capsule.status, (unsigned)CAPSULE_PENDING) << entry << " unexpectedly requires a continuation drain";
     }
 
     void RunScript(const std::string& script) {
@@ -103,7 +102,7 @@ TEST_F(LuaTest, ScriptChecksumAndBatchStdin) {
     RunScript(script);
     ASSERT_EQ(control_->capsule.status, (unsigned)CAPSULE_OK)
         << "status " << control_->capsule.status << " code " << control_->capsule.code << "; guest error: " << ErrorText();
-    EXPECT_EQ(Output(), "Lua checksum\t16898\ttrue\t0\n");
+    EXPECT_EQ(Output(), "Lua checksum\t16898\ttrue\t0\ttrue\n");
 }
 
 TEST_F(LuaTest, ProtectedCallRecovers) {

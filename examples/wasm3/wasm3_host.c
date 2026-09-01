@@ -17,9 +17,25 @@
 #include "wasm3.skel.h"
 
 enum {
-    MAX_DRAINS = 500000,
     WASM3_HEAP_BYTES = 4u << 20,
 };
+
+static int read_max_drains(unsigned long* result) {
+    const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
+    *result = 0;
+    if (!text || !*text) {
+        return 0;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (text[0] < '0' || text[0] > '9' || errno || !end || *end) {
+        fprintf(stderr, "BPF_CAPSULE_MAX_DRAINS must be a non-negative integer\n");
+        return -1;
+    }
+    *result = value;
+    return 0;
+}
 
 static void make_input(unsigned char* data, size_t size) {
     unsigned lcg = 12345;
@@ -39,6 +55,10 @@ int main(int argc, char** argv) {
     size_t input_size = argc > 1 ? strtoul(argv[1], &size_end, 0) : 65536;
     if (!input_size || input_size > WASM_ZLIB_GUEST_OUTPUT_CAPACITY || errno || (size_end && *size_end)) {
         fprintf(stderr, "BYTES must be an integer from 1 through %u\n", (unsigned int)WASM_ZLIB_GUEST_OUTPUT_CAPACITY);
+        return 1;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains(&max_drains)) {
         return 1;
     }
 
@@ -107,8 +127,8 @@ int main(int argc, char** argv) {
     }
     unsigned long drains = 0;
     while (control->capsule.status == CAPSULE_PENDING) {
-        if (drains == MAX_DRAINS) {
-            fprintf(stderr, "gave up after %lu drains: computation still pending\n", drains);
+        if (drains == max_drains) {
+            fprintf(stderr, "computation is still pending after %lu drains; set BPF_CAPSULE_MAX_DRAINS to permit more\n", drains);
             goto cleanup;
         }
         if (bpf_prog_test_run_opts(drain_fd, &options)) {
@@ -127,9 +147,14 @@ int main(int argc, char** argv) {
         }
         goto cleanup;
     }
-    int pass = control->zlib_status == Z_STREAM_END && control->output_size == input_size && !memcmp(output, input, input_size);
+    double expected_float = (double)compressed_size / 8.0 + 0.5;
+    uint64_t expected_float_bits = 0;
+    memcpy(&expected_float_bits, &expected_float, sizeof(expected_float_bits));
+    int pass = control->zlib_status == Z_STREAM_END && control->output_size == input_size && control->float_result == expected_float_bits &&
+        !memcmp(output, input, input_size);
     if (!pass) {
-        fprintf(stderr, "Wasm inflate failed: status=%d output=%zu expected=%zu\n", control->zlib_status, control->output_size, input_size);
+        fprintf(stderr, "Wasm workload failed: status=%d output=%zu expected=%zu float=%llx expected_float=%llx\n", control->zlib_status, control->output_size,
+            input_size, (unsigned long long)control->float_result, (unsigned long long)expected_float_bits);
     } else {
         printf("stock zlib Wasm: %zu -> %lu compressed bytes\n", input_size, (unsigned long)compressed_size);
         fprintf(stderr, "continuation drains: %lu\n", drains);

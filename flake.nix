@@ -55,6 +55,14 @@
         } ''
           ${pkgs.python3}/bin/python3 ${./tests/vm/generate-llama-fixtures.py} "$out"
         '';
+        llamaModel = pkgs.fetchurl {
+          url = "https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/stories260K.bin";
+          hash = "sha256-sKUH560PYmYk8XESMl5maR+QdtYi4dMnTRA9ACmfJpY=";
+        };
+        llamaTokenizer = pkgs.fetchurl {
+          url = "https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/tok512.bin";
+          hash = "sha256-A3yzNauyXR+p6OyuMO0qOorOkwKGLrzcBdUaa7sQwxI=";
+        };
         freedoomArchive = pkgs.fetchurl {
           url = "https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip";
           hash = "sha256-P5smTz485QO0+39r3LH0Gdk8e1RvTfPodN2Hjbloj1k=";
@@ -79,7 +87,17 @@
           };
         exampleVmCheck = targetKernel: kernelPackages: examples: arena:
           import ./tests/vm/examples.nix {
-            inherit pkgs targetKernel kernelPackages examples arena llamaFixtures doomWad;
+            inherit
+              pkgs
+              targetKernel
+              kernelPackages
+              examples
+              arena
+              llamaFixtures
+              llamaModel
+              llamaTokenizer
+              doomWad
+              ;
           };
       in
       {
@@ -134,6 +152,7 @@
             bpftools
             llvmPkgs.libllvm
             llvmPkgs.clang-unwrapped
+            llvmPkgs.lld
             cargo
             rustc
             csmith

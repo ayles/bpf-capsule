@@ -5,6 +5,7 @@
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "bpf_capsule_host.h"
@@ -12,13 +13,12 @@
 #include "rust_ctrl.h"
 #include "rust.skel.h"
 
-enum { MAX_DRAINS = 100000 };
-
-static int drain_to_completion(int drain_fd, struct bpf_test_run_opts* options, volatile const struct capsule_result* capsule, unsigned long* drains) {
+static int drain_to_completion(
+    int drain_fd, struct bpf_test_run_opts* options, volatile const struct capsule_result* capsule, unsigned long max_drains, unsigned long* drains) {
     unsigned long run_drains = 0;
     while (capsule->status == CAPSULE_PENDING) {
-        if (run_drains == MAX_DRAINS) {
-            fprintf(stderr, "gave up after %lu drains: computation still pending\n", run_drains);
+        if (run_drains == max_drains) {
+            fprintf(stderr, "computation is still pending after %lu drains; set BPF_CAPSULE_MAX_DRAINS to permit more\n", run_drains);
             return -1;
         }
         if (bpf_prog_test_run_opts(drain_fd, options)) {
@@ -28,6 +28,23 @@ static int drain_to_completion(int drain_fd, struct bpf_test_run_opts* options, 
         run_drains++;
         (*drains)++;
     }
+    return 0;
+}
+
+static int read_max_drains(unsigned long* result) {
+    const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
+    *result = 0;
+    if (!text || !*text) {
+        return 0;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (text[0] < '0' || text[0] > '9' || errno || !end || *end) {
+        fprintf(stderr, "BPF_CAPSULE_MAX_DRAINS must be a non-negative integer\n");
+        return -1;
+    }
+    *result = value;
     return 0;
 }
 
@@ -45,6 +62,10 @@ int main(int argc, char** argv) {
     (void)argv;
     if (argc != 1) {
         fprintf(stderr, "usage: rust\n");
+        return 1;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains(&max_drains)) {
         return 1;
     }
 
@@ -81,7 +102,7 @@ int main(int argc, char** argv) {
         perror("run");
         goto cleanup;
     }
-    if (drain_to_completion(drain_fd, &options, &control->capsule, &drains)) {
+    if (drain_to_completion(drain_fd, &options, &control->capsule, max_drains, &drains)) {
         goto cleanup;
     }
     if (control->capsule.status != CAPSULE_OK) {
@@ -94,7 +115,7 @@ int main(int argc, char** argv) {
         perror("panic run");
         goto cleanup;
     }
-    if (drain_to_completion(panic_drain_fd, &options, &control->capsule, &drains)) {
+    if (drain_to_completion(panic_drain_fd, &options, &control->capsule, max_drains, &drains)) {
         goto cleanup;
     }
     printf("Rust panic: status=%s code=%lld\n", bpf_capsule_status_string(control->capsule.status), (long long)control->capsule.code);

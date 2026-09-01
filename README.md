@@ -5,7 +5,7 @@ libbpf-loadable eBPF objects. It lets programs with recursion, indirect calls,
 deep stacks, data-dependent loops, dynamic allocation, and large linked
 libraries run in the kernel without a custom kernel or a userspace VM.
 
-It already runs PureDOOM, Lua 5.4, QuickJS, SQLite, zlib, wasm3, llama2.c, and
+It already runs PureDOOM, Lua, QuickJS, SQLite, zlib, wasm3, llama2.c, and
 Rust `core`/`alloc` inside BPF.
 
 ## How can large programs run in the kernel?
@@ -201,8 +201,6 @@ The Capsule environment is freestanding:
 - Capsule atomic loads and stores support the checked, naturally aligned
   forms, while read-modify-write operations and compare-exchange on Capsule
   memory, fences, and unsupported orderings are rejected;
-- freestanding `strtod` reports no conversion and `atof` returns zero; Lua
-  cannot parse floating-point literals or strings, though arithmetic works;
 - an entry context may be lent explicitly with `capsule_call_ctx()` and read in
   managed code with `capsule_borrowed_ctx()`; verifier-owned pointers derived
   from it may not be stored in Capsule state across a region boundary;

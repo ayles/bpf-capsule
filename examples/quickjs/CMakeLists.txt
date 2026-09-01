@@ -19,8 +19,29 @@ if(NOT QUICKJS_BPF_SOURCE_DIR OR NOT EXISTS "${QUICKJS_BPF_SOURCE_DIR}/quickjs.c
     set(QUICKJS_BPF_SOURCE_DIR "${fetched_quickjs}")
 endif()
 
+set(QUICKJS_PATCH "${CMAKE_CURRENT_SOURCE_DIR}/patches/0001-add-bpf-configuration.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${QUICKJS_PATCH}")
+set(QUICKJS_BUILD_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/quickjs-source")
+file(MAKE_DIRECTORY "${QUICKJS_BUILD_SOURCE_DIR}")
+configure_file("${QUICKJS_BPF_SOURCE_DIR}/quickjs.c" "${QUICKJS_BUILD_SOURCE_DIR}/quickjs.c"
+               COPYONLY
+)
+file(
+    CHMOD "${QUICKJS_BUILD_SOURCE_DIR}/quickjs.c"
+    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
+)
+find_program(PATCH_EXECUTABLE patch REQUIRED)
+execute_process(
+    COMMAND "${PATCH_EXECUTABLE}" --quiet --batch -p1 -i "${QUICKJS_PATCH}"
+    WORKING_DIRECTORY "${QUICKJS_BUILD_SOURCE_DIR}"
+    RESULT_VARIABLE QUICKJS_PATCH_RESULT
+)
+if(NOT QUICKJS_PATCH_RESULT EQUAL 0)
+    message(FATAL_ERROR "QuickJS example: cannot apply ${QUICKJS_PATCH}")
+endif()
+
 set(QUICKJS_SRC
-    ${QUICKJS_BPF_SOURCE_DIR}/quickjs.c ${QUICKJS_BPF_SOURCE_DIR}/cutils.c
+    ${QUICKJS_BUILD_SOURCE_DIR}/quickjs.c ${QUICKJS_BPF_SOURCE_DIR}/cutils.c
     ${QUICKJS_BPF_SOURCE_DIR}/libregexp.c ${QUICKJS_BPF_SOURCE_DIR}/libunicode.c
     ${QUICKJS_BPF_SOURCE_DIR}/dtoa.c
 )
@@ -30,33 +51,27 @@ set(QUICKJS_BPF_INCLUDE_DIRECTORIES ${BPF_CAPSULE_LIBC_DIR} ${BPF_CAPSULE_LIBC_D
 )
 set(QUICKJS_BPF_DEFINITIONS
     CONFIG_VERSION="bpf"
-    # Disable OS-thread atomics, computed-goto dispatch, native stack probing
-    # and malloc_usable_size; Capsule supplies the relevant runtime bounds.
-    __EMSCRIPTEN__=1
-    _GNU_SOURCE
-)
-set(QUICKJS_BPF_OPTIONS
-    # Without this QuickJS picks 64-bit bignum limbs and 128-bit arithmetic,
-    # which BPF cannot lower (__multi3/__udivti3 libcalls).
-    -U__SIZEOF_INT128__ -Wno-implicit-function-declaration -Wno-incompatible-pointer-types
-    -Wno-return-type
+    # Disable the thread-backed Atomics object and computed-goto dispatch while
+    # retaining stack checks and the ordinary allocator accounting path.
+    CONFIG_BPF=1
 )
 # Debug info comes from our integration source, not the large upstream files.
 bpf_capsule_bitcode(
     QUICKJS_DRIVER_BC
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/quickjs_bpf.c ${BPF_CAPSULE_LIBC_DIR}/freestanding.c
             ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
-            ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
+            ${BPF_CAPSULE_LIBC_DIR}/mathfns.c ${BPF_CAPSULE_LIBC_DIR}/strtod.c
+            ${BPF_CAPSULE_LIBC_DIR}/int128.c
     INCLUDE_DIRECTORIES ${QUICKJS_BPF_INCLUDE_DIRECTORIES}
     COMPILE_DEFINITIONS ${QUICKJS_BPF_DEFINITIONS}
-    COMPILE_OPTIONS ${QUICKJS_BPF_OPTIONS} -g
+    COMPILE_OPTIONS -g
 )
 bpf_capsule_bitcode(
     QUICKJS_UPSTREAM_BC
     SOURCES ${QUICKJS_SRC}
     INCLUDE_DIRECTORIES ${QUICKJS_BPF_INCLUDE_DIRECTORIES}
     COMPILE_DEFINITIONS ${QUICKJS_BPF_DEFINITIONS}
-    COMPILE_OPTIONS ${QUICKJS_BPF_OPTIONS} -g0
+    COMPILE_OPTIONS -g0
 )
 
 bpf_capsule_object(

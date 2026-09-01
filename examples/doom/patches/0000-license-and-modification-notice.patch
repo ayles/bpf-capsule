@@ -7,7 +7,7 @@ diff --git a/PureDOOM.h b/PureDOOM.h
  //-----------------------------------------------------------------------------
 +/*
 + * Modified by the BPF Capsule contributors in 2026. The build applies this
-+ * notice and the separately recorded framebuffer and cached-lump fixes to
++ * notice and the separately recorded fixes to
 + * PureDOOM revision 355cfbd16fac119718879239336ee2ea408886bd. The original
 + * header, every patch, and the build sources are distributed together under
 + * the GPL-2.0 terms supplied with that PureDOOM revision.

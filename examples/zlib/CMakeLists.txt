@@ -12,7 +12,7 @@ if(NOT ZLIB_BPF_SOURCE_DIR OR NOT EXISTS "${ZLIB_BPF_SOURCE_DIR}/inflate.c")
         GIT_REPOSITORY
         https://github.com/madler/zlib.git
         GIT_TAG
-        e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca
+        da607da739fa6047df13e66a2af6b8bec7c2a498
         MARKER
         inflate.c
     )
@@ -22,14 +22,14 @@ endif()
 set(ZLIB_SRC
     ${ZLIB_BPF_SOURCE_DIR}/inflate.c ${ZLIB_BPF_SOURCE_DIR}/inftrees.c
     ${ZLIB_BPF_SOURCE_DIR}/inffast.c ${ZLIB_BPF_SOURCE_DIR}/adler32.c
-    ${ZLIB_BPF_SOURCE_DIR}/zutil.c
+    ${ZLIB_BPF_SOURCE_DIR}/crc32.c ${ZLIB_BPF_SOURCE_DIR}/zutil.c
 )
 
 bpf_capsule_bitcode(
     ZLIB_BC
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/zlib_bpf.c ${ZLIB_SRC}
     INCLUDE_DIRECTORIES ${BPF_CAPSULE_LIBC_DIR}/include ${ZLIB_BPF_SOURCE_DIR}
-    COMPILE_DEFINITIONS Z_SOLO NO_GZIP
+    COMPILE_DEFINITIONS Z_SOLO
     COMPILE_OPTIONS -g
 )
 

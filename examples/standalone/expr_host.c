@@ -5,6 +5,7 @@
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "bpf_capsule_host.h"
@@ -14,13 +15,33 @@
 
 enum {
     EXPR_INPUT_MAX = 4096,
-    MAX_DRAINS = 200000,
     EXPR_HEAP_BYTES = 1u << 20,
 };
+
+static int read_max_drains(unsigned long* result) {
+    const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
+    *result = 0;
+    if (!text || !*text) {
+        return 0;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (text[0] < '0' || text[0] > '9' || errno || !end || *end) {
+        fprintf(stderr, "BPF_CAPSULE_MAX_DRAINS must be a non-negative integer\n");
+        return -1;
+    }
+    *result = value;
+    return 0;
+}
 
 int main(int argc, char** argv) {
     if (argc > 2) {
         fprintf(stderr, "usage: expr [EXPRESSION]\n");
+        return 1;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains(&max_drains)) {
         return 1;
     }
 
@@ -88,8 +109,8 @@ int main(int argc, char** argv) {
     }
     unsigned long drains = 0;
     while (control->capsule.status == CAPSULE_PENDING) {
-        if (drains == MAX_DRAINS) {
-            fprintf(stderr, "gave up after %lu drains: computation still pending\n", drains);
+        if (drains == max_drains) {
+            fprintf(stderr, "computation is still pending after %lu drains; set BPF_CAPSULE_MAX_DRAINS to permit more\n", drains);
             goto cleanup;
         }
         if (bpf_prog_test_run_opts(drain_fd, &options)) {

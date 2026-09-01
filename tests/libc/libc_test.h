@@ -13,6 +13,10 @@ struct libc_test_result {
     unsigned int overflow_errno;
     int truncated_length;
     int formatted_length;
+    int float_length;
+    int float_edge_length;
     char truncated[5];
     char formatted[160];
+    char floats[160];
+    char float_edges[160];
 };

@@ -10,74 +10,55 @@ if(NOT SQLITE_BPF_SOURCE_DIR OR NOT EXISTS "${SQLITE_BPF_SOURCE_DIR}/sqlite3.c")
         fetched_sqlite
         bpf_capsule_sqlite
         URL
-        https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip
+        https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip
         URL_HASH
-        5592243caf28b2cdef41e6ab58d25d653dfc53deded8450eb66072c929f030c4
+        1e71ddf93849c6a6ecf58b827c0692073d2dd7ee40196158068f7b29f422e87d
         ROOT_SUBDIR
-        sqlite-amalgamation-3450100
+        sqlite-amalgamation-3530400
         MARKER
         sqlite3.c
     )
     set(SQLITE_BPF_SOURCE_DIR "${fetched_sqlite}")
 endif()
 
-# Integer-only, no OS, no libc malloc (memsys5 over the Capsule heap), no threads:
-# the same configuration the kernel can actually express.
+# SQLite needs a VFS supplied by the embedder and this example has no threads.
+# Loading dynamic extensions cannot exist in a freestanding BPF program;
+# everything else, including floating-point SQL and SQLite's ordinary malloc
+# path, stays enabled.
 set(SQLITE_DEFS
     -DSQLITE_OS_OTHER=1
     -DSQLITE_THREADSAFE=0
     -DSQLITE_OMIT_LOAD_EXTENSION
-    -DSQLITE_OMIT_WAL
-    -DSQLITE_TEMP_STORE=3
-    -DSQLITE_OMIT_DEPRECATED
-    -DSQLITE_OMIT_PROGRESS_CALLBACK
-    -DSQLITE_OMIT_SHARED_CACHE
-    -DSQLITE_OMIT_AUTOINIT
-    -DSQLITE_OMIT_UTF16
-    -DSQLITE_OMIT_AUTHORIZATION
-    -DSQLITE_OMIT_COMPLETE
-    -DSQLITE_OMIT_TRACE
-    -DSQLITE_UNTESTABLE
-    -DSQLITE_OMIT_FLOATING_POINT
-    -DSQLITE_OMIT_LOCALTIME
-    -DSQLITE_OMIT_DATETIME_FUNCS
-    -DSQLITE_ENABLE_MEMSYS5
-    -Dfabs=__builtin_fabs
 )
 
-# SQLite retains a handful of double operations even with floating-point SQL
-# disabled. softfloat.c implements their arithmetic and mathfns.c supplies
-# scalar operations such as fabs which the soft-float pass lowers explicitly.
+# softfloat.c implements SQLite's arithmetic and mathfns.c supplies scalar
+# operations such as fabs which the soft-float pass lowers explicitly.
 # Full debug information on the amalgamation needlessly bloats every compiler
 # stage. The driver still supplies the BTF needed for programs and maps.
 set(SQLITE_BPF_INCLUDE_DIRECTORIES ${SQLITE_BPF_SOURCE_DIR} ${BPF_CAPSULE_LIBC_DIR}
                                    ${BPF_CAPSULE_LIBC_DIR}/include
 )
-set(SQLITE_BPF_OPTIONS -Wno-absolute-value -Wno-literal-conversion)
 bpf_capsule_bitcode(
     SQLITE_DRIVER_BC
     SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/sqlite_bpf.c ${BPF_CAPSULE_LIBC_DIR}/freestanding.c
+            ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/int128.c
             ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
     INCLUDE_DIRECTORIES ${SQLITE_BPF_INCLUDE_DIRECTORIES}
-    # memsys5 owns the Capsule heap; libc allocation symbols only satisfy
-    # unreachable references retained by the amalgamation.
-    COMPILE_DEFINITIONS ${SQLITE_DEFS} BPF_CAPSULE_FREESTANDING_NULL_ALLOCATOR
-    COMPILE_OPTIONS ${SQLITE_BPF_OPTIONS} -g
+    COMPILE_DEFINITIONS ${SQLITE_DEFS}
+    COMPILE_OPTIONS -g
 )
-# Do not expose SQLite's source-compatibility `fabs=__builtin_fabs` define to
-# the implementation of fabs itself.
 bpf_capsule_bitcode(
     SQLITE_MATH_BC
-    SOURCES ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
+    SOURCES ${BPF_CAPSULE_LIBC_DIR}/mathfns.c ${BPF_CAPSULE_LIBC_DIR}/strtod.c
     INCLUDE_DIRECTORIES ${SQLITE_BPF_INCLUDE_DIRECTORIES}
-    COMPILE_OPTIONS ${SQLITE_BPF_OPTIONS} -g
+    COMPILE_OPTIONS -g
 )
 bpf_capsule_bitcode(
     SQLITE_UPSTREAM_BC
     SOURCES ${SQLITE_BPF_SOURCE_DIR}/sqlite3.c
     INCLUDE_DIRECTORIES ${SQLITE_BPF_INCLUDE_DIRECTORIES}
     COMPILE_DEFINITIONS ${SQLITE_DEFS}
-    COMPILE_OPTIONS ${SQLITE_BPF_OPTIONS} -g0
+    COMPILE_OPTIONS -g0
 )
 
 bpf_capsule_object(

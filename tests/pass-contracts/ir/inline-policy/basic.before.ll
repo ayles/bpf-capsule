@@ -25,6 +25,12 @@ entry:
   ret i32 %value
 }
 
+; Function Attrs: alwaysinline
+define i32 @variadic(i32 %value, ...) #0 {
+entry:
+  ret i32 %value
+}
+
 define i32 @policy_veto(i32 %value) {
 entry:
   %buffer = alloca [257 x i8], align 1

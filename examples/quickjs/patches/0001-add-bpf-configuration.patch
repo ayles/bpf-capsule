@@ -1,0 +1,19 @@
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -49,7 +49,7 @@
+
+ #define OPTIMIZE         1
+ #define SHORT_OPCODES    1
+-#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) || defined(CONFIG_BPF)
+ #define DIRECT_DISPATCH  0
+ #else
+ #define DIRECT_DISPATCH  1
+@@ -68,7 +68,7 @@
+
+ /* define to include Atomics.* operations which depend on the OS
+    threads */
+-#if !defined(__EMSCRIPTEN__)
++#if !defined(__EMSCRIPTEN__) && !defined(CONFIG_BPF)
+ #define CONFIG_ATOMICS
+ #endif

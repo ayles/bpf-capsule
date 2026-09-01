@@ -71,7 +71,24 @@ static int configure_capsule(struct bpf_capsule* capsule, struct bpf_object* obj
         });
 }
 
-static int initialize_states(struct bpf_object* object, volatile struct lua_xdp_ctrl* control) {
+static int read_max_drains(unsigned long fallback, unsigned long* result) {
+    const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
+    *result = fallback;
+    if (!text || !*text) {
+        return 0;
+    }
+    char* end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (text[0] < '0' || text[0] > '9' || errno || !end || *end) {
+        fprintf(stderr, "BPF_CAPSULE_MAX_DRAINS must be a non-negative integer\n");
+        return -1;
+    }
+    *result = value;
+    return 0;
+}
+
+static int initialize_states(struct bpf_object* object, volatile struct lua_xdp_ctrl* control, unsigned long* completed_drains) {
     struct bpf_program* initialize = bpf_object__find_program_by_name(object, "lua_xdp_initialize");
     struct bpf_program* drain = bpf_object__find_program_by_name(object, "lua_xdp_initialize_drain");
     if (!initialize || !drain) {
@@ -80,10 +97,22 @@ static int initialize_states(struct bpf_object* object, volatile struct lua_xdp_
     }
 
     struct bpf_test_run_opts options = {.sz = sizeof(options)};
+    int possible_cpus = libbpf_num_possible_cpus();
+    if (possible_cpus < 1) {
+        errno = possible_cpus < 0 ? -possible_cpus : EINVAL;
+        return -1;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains((unsigned long)possible_cpus, &max_drains)) {
+        return -1;
+    }
     unsigned long drains = 0;
     int error = bpf_prog_test_run_opts(bpf_program__fd(initialize), &options);
     while (!error && control->initialization.status == CAPSULE_PENDING) {
-        if (drains == 2000000) {
+        // One interpreter is created per possible CPU, so that count is the
+        // useful default. More complex scripts can opt into a larger budget.
+        if (drains == max_drains) {
+            fprintf(stderr, "initialization is still pending after %lu drains; set BPF_CAPSULE_MAX_DRAINS to permit more\n", drains);
             errno = ETIMEDOUT;
             return -1;
         }
@@ -94,6 +123,7 @@ static int initialize_states(struct bpf_object* object, volatile struct lua_xdp_
         return -1;
     }
     if (control->initialization.status == CAPSULE_OK) {
+        *completed_drains = drains;
         return 0;
     }
     if (control->initialization.status == CAPSULE_EXITED && control->initialization.code < 0) {
@@ -148,6 +178,7 @@ int main(int argc, char** argv) {
     struct ring_buffer* ring = NULL;
     struct bpf_link* link = NULL;
     struct bpf_object* object = skeleton ? skeleton->obj : NULL;
+    unsigned long initialization_drains = 0;
     if (!object) {
         fprintf(stderr, "cannot open Lua XDP object\n");
         goto cleanup;
@@ -168,12 +199,13 @@ int main(int argc, char** argv) {
     }
     control->script = bpf_capsule_memory_reserved_start(&capsule);
     control->script_size = source_size;
-    if (bpf_capsule_memcpy(&capsule, control->script, source, source_size) || initialize_states(object, control)) {
+    if (bpf_capsule_memcpy(&capsule, control->script, source, source_size) || initialize_states(object, control, &initialization_drains)) {
         fprintf(stderr, "cannot stage Lua XDP observer: %s\n", strerror(errno));
         goto cleanup;
     }
     free(source);
     source = NULL;
+    fprintf(stderr, "initialization drains: %lu\n", initialization_drains);
 
     ring = ring_buffer__new(bpf_map__fd(events), print_event, NULL, NULL);
     if (!ring) {

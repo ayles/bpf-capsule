@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include "wasm3_ctrl.h"
-/* Source of the generated wasm32 module in zlib_wasm_module.h: this file is
- * only the freestanding entry shim; the inflate implementation is unmodified
- * zlib. See the rebuild recipe in zlib_wasm_module.h. */
+/* Source of the generated wasm32 module: this file is only the freestanding
+ * entry shim; the inflate implementation is unmodified zlib. */
 #include "zlib.h"
 
 #define GUEST_HEAP_CAPACITY (512u << 10)
@@ -78,5 +77,10 @@ __attribute__((used)) int guest_zlib_run(void) {
     guest_zctrl.status = (uint64_t)(int64_t)result;
     guest_zctrl.output_len = stream.total_out;
     guest_zctrl.adler = stream.adler;
+    // Keep this dependent on the input so the wasm32 compiler emits genuine
+    // f64 conversion, division, and addition instructions. The outer wasm3
+    // example checks the exact result after interpreting them in BPF.
+    double float_result = (double)guest_zctrl.input_len / 8.0 + 0.5;
+    memcpy(&guest_zctrl.float_result, &float_result, sizeof(float_result));
     return result;
 }

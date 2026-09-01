@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Stock SQLite in the kernel.
 //
-// Stock amalgamation, integer-only build (no floating point in BPF), memsys5
-// over the configured Capsule heap, and a null VFS: the database lives
-// in :memory: and temp space is SQLITE_TEMP_STORE=3. The host reads results
+// Stock amalgamation, soft-float SQL, Capsule's allocator, and a null VFS: the
+// database and its temporary storage live in memory. The host reads results
 // from the ctrl map; entries follow the driver convention (one void managed
 // call, results written by managed code).
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
-#include <limits.h>
-
 #include "bpf_capsule.h"
 
 #include "sqlite3.h"
@@ -43,13 +40,13 @@ static int vfs_open_fail(sqlite3_vfs* v, sqlite3_filename f, sqlite3_file* file,
     (void)file;
     (void)flags;
     (void)out;
-    return SQLITE_CANTOPEN; // :memory: + TEMP_STORE=3 never open files
+    return SQLITE_CANTOPEN; // this example deliberately has no file-backed databases
 }
 static int vfs_delete(sqlite3_vfs* v, const char* n, int s) {
     (void)v;
     (void)n;
     (void)s;
-    return SQLITE_OK;
+    return SQLITE_IOERR_DELETE;
 }
 static int vfs_access(sqlite3_vfs* v, const char* n, int f, int* out) {
     (void)v;
@@ -108,17 +105,7 @@ static int checksum_callback(void* arg, int ncol, char** vals, char** names) {
 static void sqlite_run_body(void) {
     sctrl.rows = 0;
     sctrl.checksum = 0;
-    uint64_t heap_bytes = capsule_heap_size();
-    if (heap_bytes > INT_MAX) {
-        sctrl.sqlite_rc = SQLITE_NOMEM;
-        return;
-    }
-    int rc = sqlite3_config(SQLITE_CONFIG_HEAP, capsule_heap_start(), (int)heap_bytes, 64);
-    if (rc) {
-        sctrl.sqlite_rc = rc;
-        return;
-    }
-    rc = sqlite3_initialize();
+    int rc = sqlite3_initialize();
     if (rc) {
         sctrl.sqlite_rc = rc;
         return;
@@ -126,6 +113,10 @@ static void sqlite_run_body(void) {
 
     sqlite3* db = 0;
     rc = sqlite3_open(":memory:", &db);
+    if (rc) {
+        goto close_database;
+    }
+    rc = sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", 0, 0, 0);
     if (rc) {
         goto close_database;
     }
@@ -140,7 +131,8 @@ static void sqlite_run_body(void) {
     rc = sqlite3_exec(db,
         "SELECT count(*), sum(b) FROM t;"
         "SELECT c FROM t WHERE a % 97 = 0 ORDER BY a DESC;"
-        "SELECT b FROM t WHERE c LIKE 'row-1%' ORDER BY a LIMIT 5;",
+        "SELECT b FROM t WHERE c LIKE 'row-1%' ORDER BY a LIMIT 5;"
+        "SELECT 12.5 / 2.0;",
         checksum_callback, 0, 0);
 close_database:
     if (db) {
@@ -149,8 +141,9 @@ close_database:
             rc = close_rc;
         }
     }
-    if (!rc) {
-        rc = sqlite3_shutdown();
+    int shutdown_rc = sqlite3_shutdown();
+    if (!rc && shutdown_rc) {
+        rc = shutdown_rc;
     }
     sctrl.sqlite_rc = rc;
 }

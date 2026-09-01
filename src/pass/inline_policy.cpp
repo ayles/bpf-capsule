@@ -44,6 +44,16 @@ public:
         // into an unresolved declaration during -O2.
         function.addFnAttr("no-builtins");
         bpf::MaterializeFunctionClasses(*function.getParent());
+        // A managed variadic function owns the caller-laid argument tail in
+        // its software frame. Inlining it would move llvm.va_start into a
+        // non-variadic caller and destroy the frame boundary that gives the
+        // cursor meaning. This is an ABI veto, not the size-policy veto below:
+        // Stackify must never reconsider it as a single-use helper.
+        if (function.isVarArg()) {
+            function.removeFnAttr(Attribute::AlwaysInline);
+            function.addFnAttr(Attribute::NoInline);
+            return PreservedAnalyses::none();
+        }
         // Heap accessors stay inlinable regardless of shape: each is a
         // memory access, and a call at every access clobbers the
         // caller-saved registers and spills the caller past its native

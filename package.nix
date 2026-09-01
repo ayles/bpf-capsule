@@ -42,20 +42,20 @@ let
   # discovers the pinned unwrapped Clang separately; the host compiler has no
   # bearing on generated BPF and must retain its ordinary libc startup paths.
   zlibSource = fetchzip {
-    url = "https://github.com/madler/zlib/archive/e3dc0a85b7032e98380dec011bc8f2c2ee0d8fca.tar.gz";
-    hash = "sha256-tA199foI8bwi/j8AHZQ8Y5QzxPoyoo7NZMeBHO12okk=";
+    url = "https://github.com/madler/zlib/archive/da607da739fa6047df13e66a2af6b8bec7c2a498.tar.gz";
+    hash = "sha256-Sthd9RsydSLaITNlBp6g1X35WKZdS4h7gr0QhRqdGoI=";
   };
   sqliteSource = fetchzip {
-    url = "https://www.sqlite.org/2024/sqlite-amalgamation-3450100.zip";
-    hash = "sha256-bJoMjirsBjm2Qk9KPiy3yV3+8b/POlYe76/FQbciHro=";
+    url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip";
+    hash = "sha256-ij7Yw6LuWXeetH3Zs6ir+4HdQTpynPlSIMspl0nTuUI=";
   };
   luaSource = fetchzip {
-    url = "https://www.lua.org/ftp/lua-5.4.8.tar.gz";
-    hash = "sha256-6TMsVp2D3WtvnwyhvwodjQH3kvTXz1rSMWwiHazvKys=";
+    url = "https://www.lua.org/ftp/lua-5.5.1.tar.gz";
+    hash = "sha256-vb3Nt5dMPL/G6L1MmJPGQnQT3F8p6iK6Gu2F/cG00ho=";
   };
   wasm3Source = fetchzip {
-    url = "https://github.com/wasm3/wasm3/archive/6b8bcb1e07bf26ebef09a7211b0a37a446eafd52.tar.gz";
-    hash = "sha256-QkXOBJ5luml6VCYLowQKv0K4mI7S2gy7bx5Jc86s/x8=";
+    url = "https://github.com/wasm3/wasm3/archive/0cd38327f0c721e75172f4f1eeb55854dc0517af.tar.gz";
+    hash = "sha256-0LFsyAhT51rhXORnxMQ8/Jt22F6neE5aZZSxF5c7HBw=";
   };
   llama2Source = fetchzip {
     url = "https://github.com/karpathy/llama2.c/archive/350e04fe35433e6d2941dce5a1f53308f87058eb.tar.gz";
@@ -119,7 +119,7 @@ stdenv.mkDerivation {
     "-DBPF_CAPSULE_CSMITH_INCLUDE_DIR=${csmith}/include"
   ] ++ lib.optionals (buildTests || builds "lua" || builds "lua-xdp") [
     "-DLUA_BPF_SOURCE_DIR=${luaSource}"
-  ] ++ lib.optionals (builds "zlib") [
+  ] ++ lib.optionals (builds "zlib" || builds "wasm3") [
     "-DZLIB_BPF_SOURCE_DIR=${zlibSource}"
   ] ++ lib.optionals (builds "sqlite") [
     "-DSQLITE_BPF_SOURCE_DIR=${sqliteSource}"
@@ -139,6 +139,8 @@ stdenv.mkDerivation {
     llvmPackages.libllvm
     llvmPackages.clang-unwrapped
     bpftools
+  ] ++ lib.optionals (builds "wasm3") [
+    llvmPackages.lld
   ] ++ lib.optionals (builds "rust") [
     cargo
     rustc
@@ -151,7 +153,7 @@ stdenv.mkDerivation {
     gtest
   ] ++ lib.optionals buildBenchmarks [
     gbenchmark
-  ] ++ lib.optionals (builds "zlib") [
+  ] ++ lib.optionals (builds "zlib" || builds "wasm3") [
     zlib
   ];
 

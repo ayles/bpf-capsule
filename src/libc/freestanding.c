@@ -5,8 +5,7 @@
 // is program-specific, so it lives here rather than being retyped per port.
 // Three groups:
 //   - real implementations (string and memory routines),
-//   - a synchronized TLSF allocator over the configured Capsule heap (or
-//     null-returning allocator symbols for a library that owns the heap),
+//   - a synchronized TLSF allocator over the configured Capsule heap,
 //   - honest failures for everything that would need an OS (files, time,
 //     processes) — they return errors rather than pretending to work.
 // Only the guest ABI is needed here; the single-include runtime header that
@@ -14,6 +13,7 @@
 #include "bpf_capsule.h"
 
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -93,7 +93,7 @@ __attribute__((noinline)) void* memcpy(void* d, const void* s, unsigned long n) 
     return d;
 }
 __attribute__((noinline)) void* memmove(void* d, const void* s, unsigned long n) {
-    if (d < s) {
+    if ((uintptr_t)d < (uintptr_t)s) {
         return memcpy(d, s, n);
     }
     char* dp = (char*)d;
@@ -260,14 +260,36 @@ char* strstr(const char* h, const char* n) {
     return 0;
 }
 char* strerror(int e) {
-    return "error";
+    switch (e) {
+        case 0:
+            return "Success";
+        case EINTR:
+            return "Interrupted system call";
+        case ENOENT:
+            return "No such file or directory";
+        case EBADF:
+            return "Bad file descriptor";
+        case ENOMEM:
+            return "Cannot allocate memory";
+        case EINVAL:
+            return "Invalid argument";
+        case EDOM:
+            return "Numerical argument out of domain";
+        case ERANGE:
+            return "Numerical result out of range";
+        case ENOSYS:
+            return "Function not implemented";
+        case EOVERFLOW:
+            return "Value too large for defined data type";
+        default:
+            return "Unknown error";
+    }
 }
 
 // ------------------------------------------------------------------ allocator
 //
 // Allocation is TLSF (see thirdparty/tlsf/): two-level segregated
 // fit and O(1) malloc/free over the load-time-sized Capsule heap.
-#ifndef BPF_CAPSULE_FREESTANDING_NULL_ALLOCATOR
 #include "tlsf.h"
 
 static tlsf_t fs_tlsf;
@@ -462,43 +484,6 @@ void* memalign(unsigned long align, unsigned long n) {
     }
     return (void*)(unsigned long)result;
 }
-#else
-// Some libraries retain unreachable libc allocation references even when
-// configured to use their own heap. Resolve those references without creating
-// a second allocator over the same Capsule memory.
-void* malloc(unsigned long n) {
-    (void)n;
-    return 0;
-}
-
-void free(void* p) {
-    (void)p;
-}
-
-void* calloc(unsigned long n, unsigned long sz) {
-    (void)n;
-    (void)sz;
-    return 0;
-}
-
-unsigned long malloc_usable_size(void* p) {
-    (void)p;
-    return 0;
-}
-
-void* realloc(void* p, unsigned long n) {
-    (void)p;
-    (void)n;
-    return 0;
-}
-
-void* memalign(unsigned long align, unsigned long n) {
-    (void)align;
-    (void)n;
-    return 0;
-}
-#endif
-
 // -------------------------------------------------------------- conversions
 int abs(int v) {
     return v < 0 ? -v : v;
@@ -868,11 +853,9 @@ int raise(int sig) {
 
 // ------------------------------------------------------------- formatting
 //
-// Enough of printf for programs that turn numbers into strings: integer
-// conversions (including the standard length modifiers), strings,
-// characters, pointers, width and precision. Floating point cannot yet be
-// rendered here, so those conversions consume the required double argument
-// and produce an explicit marker rather than plausible-looking wrong output.
+// Enough of printf for programs that turn numbers into strings: integer and
+// floating-point conversions, strings, characters, pointers, width and
+// precision.
 // Output is emitted directly under the caller's bound; there is no hidden
 // fixed-size staging buffer whose numeric writes can run past its end.
 struct fs_format_output {
@@ -923,6 +906,418 @@ static unsigned int fs_utoa_reverse(char* digits, unsigned long long value, unsi
     } while (value);
     return length;
 }
+
+static char* fs_utoa_end(char* end, unsigned int value) {
+    do {
+        *--end = (char)('0' + value % 10u);
+        value /= 10u;
+    } while (value);
+    return end;
+}
+
+/*
+ * The decimal expansion and rounding below are adapted from musl libc's
+ * fmt_fp (src/stdio/vfprintf.c), specialized for the BPF ABI's binary64
+ * double and this file's bounded output sink.
+ *
+ * Copyright (c) 2005-2020 Rich Felker, et al.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ */
+#define FS_DBL_MANT_DIG __DBL_MANT_DIG__
+#define FS_DBL_MAX_EXP __DBL_MAX_EXP__
+#define FS_MIN(a, b) ((a) < (b) ? (a) : (b))
+#define FS_MAX(a, b) ((a) > (b) ? (a) : (b))
+
+static void fs_format_float_padding(struct fs_format_output* output, const char* prefix, unsigned int prefix_length, unsigned long width,
+    unsigned long body_length, int left, int zero_pad, int before) {
+    unsigned long content = prefix_length + body_length;
+    unsigned long padding = width > content ? width - content : 0;
+    if (before) {
+        if (!left && !zero_pad) {
+            fs_format_repeat(output, ' ', padding);
+        }
+        fs_format_bytes(output, prefix, prefix_length);
+        if (!left && zero_pad) {
+            fs_format_repeat(output, '0', padding);
+        }
+    } else if (left) {
+        fs_format_repeat(output, ' ', padding);
+    }
+}
+
+static int fs_format_float(struct fs_format_output* output, double input, unsigned long width, int precision, int left, int plus, int space, int alternate,
+    int zero_pad, int conversion) {
+    enum {
+        FS_FLOAT_MANTISSA_WORDS = 1 + (FS_DBL_MANT_DIG - 29 + 7) / 8 + 1,
+        FS_FLOAT_EXPONENT_WORDS = (FS_DBL_MAX_EXP + FS_DBL_MANT_DIG + 28 + 8) / 9,
+        FS_FLOAT_WORDS = FS_FLOAT_MANTISSA_WORDS + FS_FLOAT_EXPONENT_WORDS,
+    };
+    uint32_t big[FS_FLOAT_WORDS];
+    uint32_t *a, *d, *r, *z;
+    int exponent2 = 0;
+    int exponent10;
+    int i;
+    int j;
+    int body_length;
+    char digits[9 + FS_DBL_MANT_DIG / 4];
+    char* cursor;
+    char exponent_buffer[3 * sizeof(int)];
+    char* exponent_end = exponent_buffer + sizeof(exponent_buffer);
+    char* exponent_text = exponent_end;
+    char prefix[3];
+    unsigned int prefix_length = 0;
+
+    uint64_t bits;
+    memcpy(&bits, &input, sizeof(bits));
+    int negative = (int)(bits >> 63);
+    uint64_t magnitude = bits & UINT64_C(0x7fffffffffffffff);
+    uint64_t fraction = magnitude & UINT64_C(0x000fffffffffffff);
+    unsigned int exponent_field = (unsigned int)(magnitude >> 52);
+    if (negative) {
+        prefix[prefix_length++] = '-';
+    } else if (plus) {
+        prefix[prefix_length++] = '+';
+    } else if (space) {
+        prefix[prefix_length++] = ' ';
+    }
+
+    if (exponent_field == 0x7ffu) {
+        const char* special = fraction ? ((conversion & 32) ? "nan" : "NAN") : ((conversion & 32) ? "inf" : "INF");
+        unsigned long special_body = 3;
+        fs_format_float_padding(output, prefix, prefix_length, width, special_body, left, 0, 1);
+        fs_format_bytes(output, special, special_body);
+        fs_format_float_padding(output, prefix, prefix_length, width, special_body, left, 0, 0);
+        return 0;
+    }
+
+    double value = 0.0;
+    if (exponent_field) {
+        uint64_t normalized = UINT64_C(0x3ff0000000000000) | fraction;
+        memcpy(&value, &normalized, sizeof(value));
+        exponent2 = (int)exponent_field - 1023;
+    } else if (fraction) {
+        unsigned int top = 63u - (unsigned int)__builtin_clzll(fraction);
+        uint64_t normalized = UINT64_C(0x3ff0000000000000) | ((fraction << (52u - top)) & UINT64_C(0x000fffffffffffff));
+        memcpy(&value, &normalized, sizeof(value));
+        exponent2 = (int)top - 1074;
+    }
+
+    if ((conversion | 32) == 'a') {
+        double round = 1.0;
+        int removed;
+        prefix[prefix_length++] = '0';
+        prefix[prefix_length++] = (char)((conversion & 32) ? 'x' : 'X');
+
+        if (precision < 0 || precision >= (FS_DBL_MANT_DIG - 1 + 3) / 4) {
+            removed = 0;
+        } else {
+            removed = (FS_DBL_MANT_DIG - 1 + 3) / 4 - precision;
+        }
+        if (removed) {
+            while (removed--) {
+                round *= 16.0;
+            }
+            if (negative) {
+                value = -value;
+                value -= round;
+                value += round;
+                value = -value;
+            } else {
+                value += round;
+                value -= round;
+            }
+        }
+
+        exponent_text = fs_utoa_end(exponent_end, exponent2 < 0 ? (unsigned int)-exponent2 : (unsigned int)exponent2);
+        *--exponent_text = exponent2 < 0 ? '-' : '+';
+        *--exponent_text = (char)(conversion + ('p' - 'a'));
+
+        static const char hex_digits[] = "0123456789ABCDEF";
+        cursor = digits;
+        do {
+            int digit = (int)value;
+            *cursor++ = (char)(hex_digits[digit] | (conversion & 32));
+            value = 16.0 * (value - digit);
+            if (cursor == digits + 1 && (value || precision > 0 || alternate)) {
+                *cursor++ = '.';
+            }
+        } while (value);
+
+        int exponent_length = (int)(exponent_end - exponent_text);
+        int produced = (int)(cursor - digits);
+        if (precision > 0x7fffffff - 2 - exponent_length - (int)prefix_length) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        if (precision > 0 && produced - 2 < precision) {
+            body_length = precision + 2 + exponent_length;
+        } else {
+            body_length = produced + exponent_length;
+        }
+        fs_format_float_padding(output, prefix, prefix_length, width, (unsigned long)body_length, left, zero_pad, 1);
+        fs_format_bytes(output, digits, (unsigned long)produced);
+        int zeroes = body_length - exponent_length - produced;
+        if (zeroes > 0) {
+            fs_format_repeat(output, '0', (unsigned long)zeroes);
+        }
+        fs_format_bytes(output, exponent_text, (unsigned long)exponent_length);
+        fs_format_float_padding(output, prefix, prefix_length, width, (unsigned long)body_length, left, zero_pad, 0);
+        return 0;
+    }
+
+    if (precision < 0) {
+        precision = 6;
+    }
+    if (value) {
+        value *= 0x1p28;
+        exponent2 -= 28;
+    }
+
+    if (exponent2 < 0) {
+        a = r = z = big;
+    } else {
+        a = r = z = big + FS_FLOAT_WORDS - FS_FLOAT_MANTISSA_WORDS - 1;
+    }
+    do {
+        *z = (uint32_t)value;
+        value = 1000000000.0 * (value - *z++);
+    } while (value);
+
+    while (exponent2 > 0) {
+        uint32_t carry = 0;
+        int shift = FS_MIN(29, exponent2);
+        for (d = z; d > a;) {
+            --d;
+            uint64_t expanded = ((uint64_t)*d << shift) + carry;
+            *d = (uint32_t)(expanded % 1000000000u);
+            carry = (uint32_t)(expanded / 1000000000u);
+        }
+        if (carry) {
+            *--a = carry;
+        }
+        while (z > a && !z[-1]) {
+            --z;
+        }
+        exponent2 -= shift;
+    }
+    while (exponent2 < 0) {
+        uint32_t carry = 0;
+        int shift = FS_MIN(9, -exponent2);
+        int needed = 1 + (precision + FS_DBL_MANT_DIG / 3 + 8) / 9;
+        for (d = a; d < z; ++d) {
+            uint32_t remainder = *d & ((1u << shift) - 1u);
+            *d = (*d >> shift) + carry;
+            carry = (1000000000u >> shift) * remainder;
+        }
+        if (!*a) {
+            ++a;
+        }
+        if (carry) {
+            *z++ = carry;
+        }
+        uint32_t* base = (conversion | 32) == 'f' ? r : a;
+        if (z - base > needed) {
+            z = base + needed;
+        }
+        exponent2 += shift;
+    }
+
+    if (a < z) {
+        for (i = 10, exponent10 = 9 * (int)(r - a); *a >= (uint32_t)i; i *= 10) {
+            ++exponent10;
+        }
+    } else {
+        exponent10 = 0;
+    }
+
+    j = precision - ((conversion | 32) != 'f') * exponent10 - ((conversion | 32) == 'g' && precision);
+    if (j < 9 * (int)(z - r - 1)) {
+        uint32_t x;
+        d = r + 1 + ((j + 9 * FS_DBL_MAX_EXP) / 9 - FS_DBL_MAX_EXP);
+        j += 9 * FS_DBL_MAX_EXP;
+        j %= 9;
+        for (i = 10, ++j; j < 9; i *= 10, ++j) {
+        }
+        x = *d % (uint32_t)i;
+        if (x || d + 1 != z) {
+            double round = 2.0 / __DBL_EPSILON__;
+            double small;
+            if (((*d / (uint32_t)i) & 1u) || (i == 1000000000 && d > a && (d[-1] & 1u))) {
+                round += 2.0;
+            }
+            if (x < (uint32_t)i / 2u) {
+                small = 0x0.8p0;
+            } else if (x == (uint32_t)i / 2u && d + 1 == z) {
+                small = 0x1.0p0;
+            } else {
+                small = 0x1.8p0;
+            }
+            if (negative) {
+                round = -round;
+                small = -small;
+            }
+            *d -= x;
+            if (round + small != round) {
+                *d += (uint32_t)i;
+                while (*d > 999999999u) {
+                    *d = 0;
+                    if (d == a) {
+                        *--a = 0;
+                        d = a;
+                    } else {
+                        --d;
+                    }
+                    ++*d;
+                }
+                for (i = 10, exponent10 = 9 * (int)(r - a); *a >= (uint32_t)i; i *= 10) {
+                    ++exponent10;
+                }
+            }
+        }
+        if (z > d + 1) {
+            z = d + 1;
+        }
+    }
+    while (z > a && !z[-1]) {
+        --z;
+    }
+
+    if ((conversion | 32) == 'g') {
+        if (!precision) {
+            ++precision;
+        }
+        if (precision > exponent10 && exponent10 >= -4) {
+            --conversion;
+            precision -= exponent10 + 1;
+        } else {
+            conversion -= 2;
+            --precision;
+        }
+        if (!alternate) {
+            if (z > a && z[-1]) {
+                for (i = 10, j = 0; z[-1] % (uint32_t)i == 0; i *= 10) {
+                    ++j;
+                }
+            } else {
+                j = 9;
+            }
+            if ((conversion | 32) == 'f') {
+                precision = FS_MIN(precision, FS_MAX(0, 9 * (int)(z - r - 1) - j));
+            } else {
+                precision = FS_MIN(precision, FS_MAX(0, 9 * (int)(z - r - 1) + exponent10 - j));
+            }
+        }
+    }
+
+    if (precision > 0x7fffffff - 1 - (precision != 0 || alternate)) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    body_length = 1 + precision + (precision != 0 || alternate);
+    if ((conversion | 32) == 'f') {
+        if (exponent10 > 0x7fffffff - body_length) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        if (exponent10 > 0) {
+            body_length += exponent10;
+        }
+    } else {
+        exponent_text = fs_utoa_end(exponent_end, exponent10 < 0 ? (unsigned int)-exponent10 : (unsigned int)exponent10);
+        while (exponent_end - exponent_text < 2) {
+            *--exponent_text = '0';
+        }
+        *--exponent_text = exponent10 < 0 ? '-' : '+';
+        *--exponent_text = (char)conversion;
+        if (exponent_end - exponent_text > 0x7fffffff - body_length) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        body_length += (int)(exponent_end - exponent_text);
+    }
+
+    fs_format_float_padding(output, prefix, prefix_length, width, (unsigned long)body_length, left, zero_pad, 1);
+    if ((conversion | 32) == 'f') {
+        if (a > r) {
+            a = r;
+        }
+        for (d = a; d <= r; ++d) {
+            char* text = fs_utoa_end(digits + 9, *d);
+            if (d != a) {
+                while (text > digits) {
+                    *--text = '0';
+                }
+            } else if (text == digits + 9) {
+                *--text = '0';
+            }
+            fs_format_bytes(output, text, (unsigned long)(digits + 9 - text));
+        }
+        if (precision || alternate) {
+            fs_format_char(output, '.');
+        }
+        for (; d < z && precision > 0; ++d, precision -= 9) {
+            char* text = fs_utoa_end(digits + 9, *d);
+            while (text > digits) {
+                *--text = '0';
+            }
+            fs_format_bytes(output, text, (unsigned long)FS_MIN(9, precision));
+        }
+        if (precision > 0) {
+            fs_format_repeat(output, '0', (unsigned long)precision);
+        }
+    } else {
+        if (z <= a) {
+            z = a + 1;
+        }
+        for (d = a; d < z && precision >= 0; ++d) {
+            char* text = fs_utoa_end(digits + 9, *d);
+            if (text == digits + 9) {
+                *--text = '0';
+            }
+            if (d != a) {
+                while (text > digits) {
+                    *--text = '0';
+                }
+            } else {
+                fs_format_char(output, *text++);
+                if (precision > 0 || alternate) {
+                    fs_format_char(output, '.');
+                }
+            }
+            int available = (int)(digits + 9 - text);
+            fs_format_bytes(output, text, (unsigned long)FS_MIN(available, precision));
+            precision -= available;
+        }
+        if (precision > 0) {
+            fs_format_repeat(output, '0', (unsigned long)precision);
+        }
+        fs_format_bytes(output, exponent_text, (unsigned long)(exponent_end - exponent_text));
+    }
+    fs_format_float_padding(output, prefix, prefix_length, width, (unsigned long)body_length, left, zero_pad, 0);
+    return 0;
+}
+
+#undef FS_DBL_MANT_DIG
+#undef FS_DBL_MAX_EXP
+#undef FS_MIN
+#undef FS_MAX
 
 enum fs_format_length {
     FS_LENGTH_DEFAULT,
@@ -1127,13 +1522,18 @@ int vsnprintf(char* out, unsigned long cap, const char* fmt, va_list ap) {
             case 'f':
             case 'e':
             case 'G':
+            case 'F':
             case 'E':
             case 'a':
             case 'A': {
-                (void)va_arg(ap, double);
-                const char* s = "<float>";
-                unsigned long length = 7;
-                fs_format_padded_bytes(&output, s, length, width, left);
+                double value = va_arg(ap, double);
+                if (fs_format_float(&output, value, width, precision < 0 ? -1 : (int)precision, left, plus, space, alternate, zero_pad, *f)) {
+                    if (out && cap) {
+                        unsigned long terminator = output.length < cap ? output.length : cap - 1u;
+                        out[terminator] = 0;
+                    }
+                    return -1;
+                }
                 break;
             }
             case '%':
@@ -1206,6 +1606,9 @@ unsigned long long strtoull(const char* s, char** end, int base) {
 int putc(int c, FILE* f) {
     return fputc(c, f);
 }
+int putchar(int c) {
+    return fputc(c, stdout);
+}
 
 // File-backed mapping has no meaning without an operating system; programs
 // that reach for it are given a clean failure, and the ports stage their data
@@ -1263,22 +1666,11 @@ void* bsearch(const void* key, const void* base, unsigned long n, unsigned long 
     return 0;
 }
 
-// Text-to-float parsing is not implemented in the freestanding environment.
 double atof(const char* s) {
-    (void)s;
-    return 0.0;
+    return strtod(s, 0);
 }
 int atoi(const char* s) {
     return (int)strtol(s, 0, 10);
-}
-
-// Scanning text into values needs float parsing this environment lacks; the
-// declaration exists so callers compile, and it reports that it matched
-// nothing.
-int sscanf(const char* s, const char* fmt, ...) {
-    (void)s;
-    (void)fmt;
-    return 0;
 }
 
 int gettimeofday(struct timeval* tv, struct timezone* tz) {

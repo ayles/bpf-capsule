@@ -22,16 +22,16 @@ if(NOT PUREDOOM_SOURCE_DIR OR NOT EXISTS "${PUREDOOM_SOURCE_DIR}/PureDOOM.h")
 endif()
 set(PUREDOOM_UPSTREAM_SOURCE_DIR "${PUREDOOM_SOURCE_DIR}")
 
-# PureDOOM has two allocator-layout-dependent rendering paths: I_InitGraphics
-# leaves its newly allocated framebuffer uninitialized, and the vanilla column
-# drawer can sample up to 127 bytes beyond the content of a sparse cached lump.
-# Patch a private build-tree copy so a supplied source checkout is never
-# modified, the distributed changes are identified, and identical inputs
-# render byte-identical frames.
+# PureDOOM leaves its framebuffer uninitialized, can over-read sparse cached
+# lumps in the vanilla column drawer, and confuses game mode with mission when
+# choosing TNT and Plutonia skies. Patch a private build-tree copy so a
+# supplied checkout is never modified, the distributed changes are identified,
+# and identical inputs render byte-identical frames.
 set(PUREDOOM_PATCHES
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/0000-license-and-modification-notice.patch"
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/0001-initialize-framebuffer.patch"
     "${CMAKE_CURRENT_SOURCE_DIR}/patches/0002-pad-cached-lumps.patch"
+    "${CMAKE_CURRENT_SOURCE_DIR}/patches/0003-select-mission-sky.patch"
 )
 set_property(
     DIRECTORY
@@ -42,6 +42,10 @@ set(PUREDOOM_BUILD_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/puredoom-source")
 file(MAKE_DIRECTORY "${PUREDOOM_BUILD_SOURCE_DIR}")
 configure_file(
     "${PUREDOOM_SOURCE_DIR}/PureDOOM.h" "${PUREDOOM_BUILD_SOURCE_DIR}/PureDOOM.h" COPYONLY
+)
+file(
+    CHMOD "${PUREDOOM_BUILD_SOURCE_DIR}/PureDOOM.h"
+    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
 )
 find_program(PATCH_EXECUTABLE patch REQUIRED)
 foreach(PUREDOOM_PATCH IN LISTS PUREDOOM_PATCHES)
@@ -62,7 +66,8 @@ bpf_capsule_bitcode(
             ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} ${PUREDOOM_SOURCE_DIR} ${BPF_CAPSULE_LIBC_DIR}
                         ${BPF_CAPSULE_LIBC_DIR}/include
-    COMPILE_OPTIONS -Wno-unused-function -Wno-unused-variable -Wno-parentheses -Wno-enum-compare -g
+    # Upstream intentionally uses assignment in its WAD-probing conditions.
+    COMPILE_OPTIONS -Wno-parentheses -g
 )
 
 bpf_capsule_object(
@@ -83,7 +88,7 @@ target_include_directories(
     doom PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS}
                  "${CMAKE_CURRENT_SOURCE_DIR}"
 )
-target_compile_options(doom PRIVATE -Wall -Wextra -Wno-unused-parameter)
+target_compile_options(doom PRIVATE -Wall -Wextra)
 target_link_libraries(doom ${BPF_CAPSULE_HOST_TARGET})
 add_dependencies(doom doom_skeleton)
 

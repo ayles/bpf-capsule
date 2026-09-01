@@ -30,6 +30,8 @@ bpf_capsule_bitcode(
             ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
             ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
     INCLUDE_DIRECTORIES ${LLAMA2_BPF_INCLUDE_DIRECTORIES}
+    # run.c contains an unused tokenizer path that calls sscanf. Internalizing
+    # removes it from the linked guest, but Clang must still parse the source.
     COMPILE_OPTIONS -Wno-implicit-function-declaration -g
 )
 
@@ -50,8 +52,9 @@ add_executable(llama2 llama2_host.c "${CMAKE_CURRENT_BINARY_DIR}/llama2.skel.h")
 target_include_directories(
     llama2 PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS}
 )
+target_include_directories(llama2 SYSTEM PRIVATE "${LLAMA2_BPF_SOURCE_DIR}")
 target_compile_options(llama2 PRIVATE -Wall -Wextra)
-target_link_libraries(llama2 ${BPF_CAPSULE_HOST_TARGET})
+target_link_libraries(llama2 ${BPF_CAPSULE_HOST_TARGET} m)
 add_dependencies(llama2 llama2_skeleton)
 
 # The int8 path uses checkpoint-selected scale groups. Most arithmetic becomes
@@ -82,9 +85,10 @@ add_executable(llama2q llama2_host.c "${CMAKE_CURRENT_BINARY_DIR}/llama2q.skel.h
 target_include_directories(
     llama2q PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS}
 )
+target_include_directories(llama2q SYSTEM PRIVATE "${LLAMA2_BPF_SOURCE_DIR}")
 target_compile_options(llama2q PRIVATE -Wall -Wextra)
 target_compile_definitions(llama2q PRIVATE LLAMA2_QUANTIZED)
-target_link_libraries(llama2q ${BPF_CAPSULE_HOST_TARGET})
+target_link_libraries(llama2q ${BPF_CAPSULE_HOST_TARGET} m)
 add_dependencies(llama2q llama2q_skeleton)
 
 install(TARGETS llama2 llama2q RUNTIME DESTINATION libexec/bpf-capsule/examples/llama2)

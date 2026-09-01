@@ -1,24 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 set(LUA_BPF_SOURCE_DIR
     ""
-    CACHE PATH "use an existing Lua 5.4 source tree"
+    CACHE PATH "use an existing Lua source tree"
 )
 if(NOT LUA_BPF_SOURCE_DIR OR NOT EXISTS "${LUA_BPF_SOURCE_DIR}/src/lvm.c")
     fetch_example_source(
         fetched_lua
         bpf_capsule_lua
         URL
-        https://www.lua.org/ftp/lua-5.4.8.tar.gz
+        https://www.lua.org/ftp/lua-5.5.1.tar.gz
         URL_HASH
-        4f18ddae154e793e46eeab727c59ef1c0c0c2b744e7b94219710d76f530629ae
+        1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
         ROOT_SUBDIR
-        lua-5.4.8
+        lua-5.5.1
         MARKER
         src/lvm.c
     )
     set(LUA_BPF_SOURCE_DIR
         "${fetched_lua}"
-        CACHE PATH "use an existing Lua 5.4 source tree" FORCE
+        CACHE PATH "use an existing Lua source tree" FORCE
     )
 endif()
 
@@ -28,15 +28,16 @@ list(FILTER LUA_BPF_SOURCES EXCLUDE REGEX "/(lua|luac)\\.c$")
 set(LUA_BPF_INCLUDE_DIRECTORIES ${BPF_CAPSULE_LIBC_DIR} ${BPF_CAPSULE_LIBC_DIR}/include
                                 ${LUA_BPF_SOURCE_DIR}/src
 )
-set(LUA_BPF_COMPILE_DEFINITIONS LUA_USE_JUMPTABLE=0 LUA_USE_C89)
-set(LUA_BPF_COMPILE_OPTIONS -include ${CMAKE_CURRENT_SOURCE_DIR}/lua_capsule_config.h
-                            -Wno-invalid-noreturn
-)
+# Lua's computed-goto VM emits LLVM blockaddress constants, which the BPF
+# target cannot lower (the link otherwise fails on an undefined .Ltmp symbol).
+set(LUA_BPF_COMPILE_DEFINITIONS LUA_USE_JUMPTABLE=0)
+set(LUA_BPF_COMPILE_OPTIONS -include ${CMAKE_CURRENT_SOURCE_DIR}/lua_capsule_config.h)
 
 bpf_capsule_bitcode(
     LUA_XDP_SUPPORT_BC
     SOURCES ${BPF_CAPSULE_LIBC_DIR}/freestanding.c ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c
             ${BPF_CAPSULE_LIBC_DIR}/softfloat.c ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
+            ${BPF_CAPSULE_LIBC_DIR}/strtod.c
     INCLUDE_DIRECTORIES ${LUA_BPF_INCLUDE_DIRECTORIES}
     COMPILE_DEFINITIONS ${LUA_BPF_COMPILE_DEFINITIONS}
     COMPILE_OPTIONS ${LUA_BPF_COMPILE_OPTIONS} -g
