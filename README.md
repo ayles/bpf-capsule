@@ -111,6 +111,10 @@ Each example is also directly runnable. For example:
 sudo nix run .#lua-xdp -- "$PWD/examples/lua-xdp/packet_observer.lua" eth0
 ```
 
+Examples that can span multiple BPF entries reject pending work by default.
+Set `BPF_CAPSULE_MAX_DRAINS` to the maximum number of continuations a modified
+workload may use; the example reports the actual count.
+
 The compiler drivers are exposed explicitly as `.#bpf-capsule-cc` and
 `.#bpf-capsule-ld`; there is no default app because the flake has no single
 main executable.
@@ -118,15 +122,14 @@ main executable.
 Without Nix, provide CMake 3.21 or newer, LLVM and Clang 23 from the same
 installation, libbpf 1.4 or newer, bpftool, pkg-config, libelf, zlib, and zstd.
 
-For source changes, enter `nix develop`, configure and build with CMake, then
-run both test labels and the release matrix:
+The complete build and compiler-contract matrix, plus unit and example tests
+in real kernel VMs, is a single command. The benchmarks are a second direct
+Nix app because they must run against the host kernel rather than in the Nix
+build sandbox:
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build -L '^unprivileged$' --output-on-failure
-sudo "$(command -v ctest)" --test-dir build -L '^privileged$' --output-on-failure
 nix flake check
+nix run .#benchmarks
 ```
 
 Useful configuration variables are:

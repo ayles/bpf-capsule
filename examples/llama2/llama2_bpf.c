@@ -8,6 +8,11 @@
 #include "bpf_capsule.h"
 #include "llama2_ctrl.h"
 
+// The guest uses upstream's model and argmax code, not its file-backed
+// tokenizer. Declare the tokenizer's libc dependency so the complete upstream
+// translation unit parses; internalization removes that unused path.
+extern int sscanf(const char*, const char*, ...);
+
 // run.c's main() wants argv and a clock; the rest of the file is the model.
 #define main llama2_unused_main
 #include "run.c"

@@ -4,8 +4,8 @@
   examples,
   kernelPackages,
   targetKernel,
-  llamaFixtures,
   llamaModel,
+  llamaQ8Model,
   llamaTokenizer,
   doomWad,
   arena ? false,
@@ -65,7 +65,12 @@ pkgs.testers.runNixOSTest {
         15,
     )
     assert "native reference: match" in llama_output
-    llama_q8_output = run_example("llama2-q8", root + "/llama2/llama2q ${llamaFixtures}/llama2q-tiny.bin 4", "tokens: 15 15 15 15", 0)
+    llama_q8_output = run_example(
+        "llama2-q8",
+        "BPF_CAPSULE_MAX_DRAINS=10 " + root + "/llama2/llama2q ${llamaQ8Model} 32 ${llamaTokenizer}",
+        "text: Once upon a time, there was a little girl named Lily. She loved to play outside in the park.",
+        10,
+    )
     assert "native reference: match" in llama_q8_output
 
     machine.succeed("mkdir -p /tmp/doom-frames")

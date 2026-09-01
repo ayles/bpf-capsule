@@ -28,36 +28,20 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: system-features = nixos-test benchmark big-parallel kvm
 
-      - name: Run all checks
+      - name: Build and run all in-kernel tests
         run: nix flake check --print-build-logs --max-jobs 1 --cores 4
 
       - name: Restore benchmark history
-        if: github.event_name != 'pull_request'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: benchmark-cache
           key: benchmark-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: benchmark-${{ runner.arch }}-
 
-      - name: Run benchmarks
-        if: github.event_name != 'pull_request'
-        run: |
-          set -euo pipefail
-          artifact=$(nix build .#tests-69 --no-link --print-out-paths)
-          mkdir -p benchmark-results
-          for name in smoke_benchmark lua_benchmark overhead_benchmark; do
-            sudo taskset -c 0 env \
-              BPF_CAPSULE_LUA_SCRIPT="$artifact/libexec/bpf-capsule/tests/script.lua" \
-              "$artifact/libexec/bpf-capsule/benchmarks/$name" \
-              --benchmark_min_time=0.1s \
-              --benchmark_out="benchmark-results/$name.json" \
-              --benchmark_out_format=json
-          done
-          jq -s '.[0] * {benchmarks: (map(.benchmarks) | add)}' \
-            benchmark-results/*_benchmark.json > benchmark-results/all.json
+      - name: Run in-kernel benchmarks
+        run: nix run .#benchmarks
 
       - name: Publish benchmark summary
-        if: github.event_name != 'pull_request'
         uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba
         with:
           name: BPF Capsule
@@ -65,10 +49,11 @@ jobs:
           output-file-path: benchmark-results/all.json
           external-data-json-path: benchmark-cache/data.json
           summary-always: true
-          fail-on-alert: false
+          save-data-file: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          fail-on-alert: true
 
       - name: Save benchmark history
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: benchmark-cache

@@ -30,9 +30,7 @@ bpf_capsule_bitcode(
             ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
             ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
     INCLUDE_DIRECTORIES ${LLAMA2_BPF_INCLUDE_DIRECTORIES}
-    # run.c contains an unused tokenizer path that calls sscanf. Internalizing
-    # removes it from the linked guest, but Clang must still parse the source.
-    COMPILE_OPTIONS -Wno-implicit-function-declaration -g
+    COMPILE_OPTIONS -g
 )
 
 bpf_capsule_object(
@@ -65,7 +63,7 @@ bpf_capsule_bitcode(
             ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
             ${BPF_CAPSULE_LIBC_DIR}/mathfns.c
     INCLUDE_DIRECTORIES ${LLAMA2_BPF_INCLUDE_DIRECTORIES}
-    COMPILE_OPTIONS -Wno-implicit-function-declaration -g
+    COMPILE_OPTIONS -g
 )
 
 bpf_capsule_object(

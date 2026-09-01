@@ -19,8 +19,8 @@ function(capsule_benchmark name)
     endif()
     # Google Benchmark has no ctest discovery module; one entry per binary is
     # the standard integration. Every ctest run also leaves machine-readable
-    # results under build/benchmark-results/ — the input for CI regression
-    # gating with benchmark's tools/compare.py between two runs.
+    # results under build/benchmark-results/. The Nix benchmark app combines
+    # the three files for CI reporting and history.
     add_test(NAME ${name} COMMAND ${name} --benchmark_min_time=0.2s
                           --benchmark_out=${CMAKE_BINARY_DIR}/benchmark-results/${name}.json
                           --benchmark_out_format=json
@@ -46,7 +46,14 @@ capsule_benchmark(
     INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/tests/lua" "${CMAKE_SOURCE_DIR}/tests/lua"
     DEPENDS lua_runner_skeleton
 )
-target_compile_definitions(lua_benchmark PRIVATE LUA_BENCH_SCRIPT="${CMAKE_SOURCE_DIR}/tests/lua/script.lua")
+target_compile_definitions(
+    lua_benchmark PRIVATE LUA_BENCH_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/lua/script.lua"
+)
+install(
+    FILES "${CMAKE_CURRENT_SOURCE_DIR}/lua/script.lua"
+    DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/bpf-capsule/benchmarks"
+    RENAME lua-script.lua
+)
 
 capsule_benchmark(
     overhead_benchmark

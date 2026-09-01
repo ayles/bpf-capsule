@@ -5,6 +5,7 @@ result
 result-*
 
 # Local kernel/performance proof artifacts.
+benchmark-results/
 *.qcow2
 perf.data
 perf.data.old

@@ -50,15 +50,15 @@
           program = "${defaultPackage}/bin/${executable}";
           meta = { inherit description; };
         };
-        llamaFixtures = pkgs.runCommand "bpf-capsule-llama-fixtures" {
-          nativeBuildInputs = [ pkgs.python3 ];
-        } ''
-          ${pkgs.python3}/bin/python3 ${./tests/vm/generate-llama-fixtures.py} "$out"
-        '';
         llamaModel = pkgs.fetchurl {
           url = "https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/stories260K.bin";
           hash = "sha256-sKUH560PYmYk8XESMl5maR+QdtYi4dMnTRA9ACmfJpY=";
         };
+        llamaQ8Model = pkgs.runCommand "stories260K-q8.bin" {
+          nativeBuildInputs = [ pkgs.python3 ];
+        } ''
+          ${pkgs.python3}/bin/python3 ${./tests/vm/quantize-llama.py} ${llamaModel} "$out"
+        '';
         llamaTokenizer = pkgs.fetchurl {
           url = "https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/tok512.bin";
           hash = "sha256-A3yzNauyXR+p6OyuMO0qOorOkwKGLrzcBdUaa7sQwxI=";
@@ -81,6 +81,36 @@
           tests-70 = mkTests "7.0";
           tests-71 = mkTests "7.1";
         };
+        benchmarkRunner = pkgs.writeShellApplication {
+          name = "bpf-capsule-benchmarks";
+          runtimeInputs = with pkgs; [
+            coreutils
+            jq
+            util-linux
+          ];
+          text = ''
+            if (( $# > 1 )); then
+              echo "usage: bpf-capsule-benchmarks [OUTPUT.json]" >&2
+              exit 2
+            fi
+            output="''${1:-benchmark-results/all.json}"
+            scratch=$(mktemp -d)
+            trap 'rm -r "$scratch"' EXIT
+            artifact=${testPackages.tests-69}
+            for name in smoke_benchmark lua_benchmark overhead_benchmark; do
+              sudo taskset -c 0 env \
+                BPF_CAPSULE_LUA_SCRIPT="$artifact/libexec/bpf-capsule/benchmarks/lua-script.lua" \
+                "$artifact/libexec/bpf-capsule/benchmarks/$name" \
+                --benchmark_min_time=0.1s \
+                --benchmark_out="$scratch/$name.json" \
+                --benchmark_out_format=json
+            done
+            mkdir -p "$(dirname "$output")"
+            jq -s '.[0] * {benchmarks: (map(.benchmarks) | add)}' \
+              "$scratch"/*_benchmark.json > "$output"
+            echo "$output"
+          '';
+        };
         vmCheck = targetKernel: kernelPackages: artifacts: arena:
           import ./tests/vm/check.nix {
             inherit pkgs targetKernel kernelPackages artifacts arena;
@@ -93,8 +123,8 @@
               kernelPackages
               examples
               arena
-              llamaFixtures
               llamaModel
+              llamaQ8Model
               llamaTokenizer
               doomWad
               ;
@@ -121,6 +151,11 @@
           quickjs = exampleApp examplePackages.quickjs "quickjs/quickjs" "Run QuickJS inside BPF";
           rust = exampleApp examplePackages.rust "rust/rust" "Run the no_std Rust example";
           doom = exampleApp examplePackages.doom "doom/doom" "Run PureDOOM inside BPF";
+          benchmarks = {
+            type = "app";
+            program = "${benchmarkRunner}/bin/bpf-capsule-benchmarks";
+            meta.description = "Run the in-kernel benchmark suite";
+          };
         };
 
         checks = {
