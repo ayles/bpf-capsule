@@ -158,6 +158,7 @@ capsule_ir_pass_contract(softfloat-unordered-comparisons "bpf-soft-float" softfl
 capsule_ir_pass_contract(softfloat-values "bpf-soft-float" softfloat/values)
 capsule_ir_pass_contract(softfloat-capsule-boundary "bpf-soft-float,bpf-capsule-domains" softfloat/capsule-boundary)
 capsule_ir_pass_contract(softfloat-intrinsics "bpf-soft-float" softfloat/intrinsics)
+capsule_ir_pass_contract(softfloat-fpclass "bpf-soft-float" softfloat/fpclass)
 capsule_ir_pass_contract(softfloat-declaration-debug "bpf-soft-float" softfloat/declaration-debug)
 capsule_ir_pass_contract(lower-capsule-call "bpf-lower-capsule-call" lower-capsule-call/scalar-and-void)
 capsule_ir_pass_contract(lower-capsule-call-sret "bpf-lower-capsule-call" lower-capsule-call/sret-root)

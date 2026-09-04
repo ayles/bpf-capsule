@@ -25,6 +25,7 @@
 #include "common.h"
 #include "runtime_symbols.h"
 
+#include <llvm/ADT/FloatingPointMode.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/StringSet.h>
 #include <llvm/IR/DIBuilder.h>
@@ -38,6 +39,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <cstdint>
 #include <map>
 
 using namespace llvm;
@@ -244,6 +246,113 @@ struct SoftFloat {
     }
     Type* i64() {
         return Type::getInt64Ty(Ctx);
+    }
+
+    Value* lowerFPClass(IntrinsicInst& intrinsic, IRBuilder<>& b, function_ref<Value*(Value*)> get) {
+        auto* maskConstant = dyn_cast<ConstantInt>(intrinsic.getArgOperand(1));
+        if (!maskConstant) {
+            intrinsic.getContext().emitError(&intrinsic, "bpf-soft-float: llvm.is.fpclass requires a constant mask");
+            return nullptr;
+        }
+
+        unsigned mask = maskConstant->getZExtValue();
+        if (mask == fcNone) {
+            return b.getFalse();
+        }
+        if (mask == fcAllFlags) {
+            return b.getTrue();
+        }
+
+        Value* bits = get(intrinsic.getArgOperand(0));
+        bool f32 = intrinsic.getArgOperand(0)->getType()->isFloatTy();
+        Type* type = f32 ? i32() : i64();
+        uint64_t signMask = f32 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
+        uint64_t exponentMask = f32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+        uint64_t quietMask = f32 ? UINT64_C(0x00400000) : UINT64_C(0x0008000000000000);
+
+        Value* magnitude = b.CreateAnd(bits, ConstantInt::get(type, ~signMask));
+        auto isNan = [&] { return b.CreateICmpUGT(magnitude, ConstantInt::get(type, exponentMask)); };
+        auto isInf = [&] { return b.CreateICmpEQ(magnitude, ConstantInt::get(type, exponentMask)); };
+        auto isZero = [&] { return b.CreateICmpEQ(magnitude, ConstantInt::get(type, 0)); };
+        auto isNormal = [&] {
+            Value* exponent = b.CreateAnd(magnitude, ConstantInt::get(type, exponentMask));
+            return b.CreateAnd(b.CreateICmpNE(exponent, ConstantInt::get(type, 0)), b.CreateICmpNE(exponent, ConstantInt::get(type, exponentMask)));
+        };
+        auto isSubnormal = [&] {
+            Value* exponent = b.CreateAnd(magnitude, ConstantInt::get(type, exponentMask));
+            return b.CreateAnd(b.CreateICmpEQ(exponent, ConstantInt::get(type, 0)), b.CreateICmpNE(magnitude, ConstantInt::get(type, 0)));
+        };
+        Value* negative = nullptr;
+        auto isNegative = [&] {
+            if (!negative) {
+                negative = b.CreateICmpSLT(bits, ConstantInt::get(type, 0));
+            }
+            return negative;
+        };
+
+        // These are the masks emitted for ordinary isnan/isinf/isfinite and
+        // sign tests. Keep their integer forms as small as the source checks.
+        switch (mask) {
+            case fcNan:
+                return isNan();
+            case fcInf:
+                return isInf();
+            case fcNormal:
+                return isNormal();
+            case fcSubnormal:
+                return isSubnormal();
+            case fcZero:
+                return isZero();
+            case fcFinite:
+                return b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask));
+            case fcPosFinite:
+                return b.CreateAnd(b.CreateNot(isNegative()), b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask)));
+            case fcNegFinite:
+                return b.CreateAnd(isNegative(), b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask)));
+            case fcPositive:
+                return b.CreateAnd(b.CreateNot(isNegative()), b.CreateICmpULE(magnitude, ConstantInt::get(type, exponentMask)));
+            case fcNegative:
+                return b.CreateAnd(isNegative(), b.CreateICmpULE(magnitude, ConstantInt::get(type, exponentMask)));
+            default:
+                break;
+        }
+
+        Value* result = b.getFalse();
+        auto include = [&](Value* predicate) { result = b.CreateOr(result, predicate); };
+        auto includeSigned = [&](Value* predicate, FPClassTest negativeClass, FPClassTest positiveClass) {
+            bool wantsNegative = mask & negativeClass;
+            bool wantsPositive = mask & positiveClass;
+            if (wantsNegative && wantsPositive) {
+                include(predicate);
+            } else if (wantsNegative) {
+                include(b.CreateAnd(predicate, isNegative()));
+            } else if (wantsPositive) {
+                include(b.CreateAnd(predicate, b.CreateNot(isNegative())));
+            }
+        };
+
+        if (mask & fcNan) {
+            Value* nan = isNan();
+            if ((mask & fcNan) == fcNan) {
+                include(nan);
+            } else {
+                Value* quiet = b.CreateICmpNE(b.CreateAnd(bits, ConstantInt::get(type, quietMask)), ConstantInt::get(type, 0));
+                include(b.CreateAnd(nan, (mask & fcQNan) ? quiet : b.CreateNot(quiet)));
+            }
+        }
+        if (mask & fcInf) {
+            includeSigned(isInf(), fcNegInf, fcPosInf);
+        }
+        if (mask & fcNormal) {
+            includeSigned(isNormal(), fcNegNormal, fcPosNormal);
+        }
+        if (mask & fcSubnormal) {
+            includeSigned(isSubnormal(), fcNegSubnormal, fcPosSubnormal);
+        }
+        if (mask & fcZero) {
+            includeSigned(isZero(), fcNegZero, fcPosZero);
+        }
+        return result;
     }
 
     // Constants become their bit patterns; everything else is remapped by
@@ -641,6 +750,17 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
                         continue;
                     }
                     IRBuilder<> ib(ii);
+                    ib.SetCurrentDebugLocation(ii->getDebugLoc());
+                    if (ii->getIntrinsicID() == Intrinsic::is_fpclass) {
+                        Value* replacement = SF.lowerFPClass(*ii, ib, get);
+                        if (!replacement) {
+                            return PreservedAnalyses::all();
+                        }
+                        repl[ii] = replacement;
+                        dead.push_back(ii);
+                        lowered++;
+                        continue;
+                    }
                     bool f32 = ii->getType()->isFloatTy();
                     // llvm.fmuladd explicitly permits separate multiply and
                     // add rounding. Lower it to the integer primitives
