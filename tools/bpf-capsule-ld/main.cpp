@@ -13,13 +13,16 @@
 // The runtime rule: the Capsule runtime is ordinary LLVM bitcode. The CMake
 // integration supplies its target-specific variant automatically; a direct
 // caller must link the matching runtime input explicitly. The linker verifies
-// that the runtime and libc choices agree with its target options.
+// that the runtime and platform choices agree with its target options.
 #include "common.h"
 #include "registry.h"
+#include "softfloat.h"
 
 #include "runtime_symbols.h"
 
 #include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/ADT/DenseSet.h>
+#include <llvm/ADT/StringSet.h>
 #include <llvm/CodeGen/MIRParser/MIRParser.h>
 #include <llvm/CodeGen/MIRPrinter.h>
 #include <llvm/CodeGen/MachineFunctionPass.h>
@@ -29,6 +32,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
@@ -57,6 +61,7 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetLoweringObjectFile.h>
 #include <llvm/TargetParser/Triple.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 
 #include <string>
@@ -79,7 +84,6 @@ cl::opt<bool> EmitAssembly("emit-asm", cl::desc("Stop after code generation and 
 cl::opt<bool> SaveTemps("save-temps", cl::desc("Keep <output>.linked.bc and <output>.capsule.bc beside the output"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<std::string> PipelineOverride(
     "passes", cl::desc("Replace the capsule pipeline with this opt-style pass string (experiments)"), cl::init(""), cl::cat(LinkerCategory));
-cl::opt<bool> BigEndian("bpfeb", cl::desc("Emit big-endian BPF"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<std::string> CPU("mcpu", cl::desc("BPF ISA version (v3 or v4; default v3)"), cl::init("v3"), cl::cat(LinkerCategory));
 enum class MemoryMode {
     Fixed,
@@ -107,15 +111,15 @@ cl::list<std::string> RunPasses(
     exit(1);
 }
 
-// The whole-program capsule pipeline. This order is the compiler pipeline
-// ABI: domains are computed twice — once when the boundary is lowered and
-// again after default<O2> reshapes the call graph — the suspend-barrier
-// fence spans exactly the O2 stage, and the second i128 pass catches
-// operations O2 introduces. Target capabilities appear as composition; this
-// linker deliberately knows no Linux-version or JIT-architecture policy.
-std::string capsulePipeline() {
+// The whole-program Capsule pipeline. Preparation is retried only if O2
+// introduces a reference that extracts another archive member; the final
+// half runs once. Together their order is the compiler pipeline ABI: domains
+// are computed twice, the suspend-barrier fence spans exactly O2, and the
+// second i128 pass catches operations O2 introduces. Target capabilities
+// appear as composition; this linker deliberately knows no Linux-version or
+// JIT-architecture policy.
+std::string capsulePreparationPipeline() {
     bool v4 = CPU == "v4";
-    bool arena = Memory == MemoryMode::Arena;
     std::string pipeline = "bpf-expand-sret,"
                            "bpf-lower-capsule-call,bpf-capsule-domains,bpf-lower-capsule-exit,bpf-add-suspend-barriers,"
                            "function(bpf-validate-atomics),bpf-expand-i128,bpf-soft-float,";
@@ -127,9 +131,15 @@ std::string capsulePipeline() {
         // explicitly parsed default<O2> may still run target-independent
         // vector combines. BPF has no vector registers; scalarize the complete
         // post-O2 IR before any Capsule lowering or SelectionDAG sees it.
-        "function(bpf-inline-policy),default<O2>,function(scalarizer<load-store>),bpf-expand-i128,"
-        "function(bpf-expand-mem),bpf-internalize,globaldce,function(bpf-validate-no-float),"
-        "function(bpf-normalize-irreducible,fix-irreducible),bpf-capsule-domains,bpf-remove-suspend-barriers,";
+        "function(bpf-inline-policy),default<O2>,function(scalarizer<load-store>),bpf-expand-i128";
+    return pipeline;
+}
+
+std::string capsuleFinalPipeline() {
+    bool v4 = CPU == "v4";
+    bool arena = Memory == MemoryMode::Arena;
+    std::string pipeline = "function(bpf-expand-mem),bpf-internalize,globaldce,function(bpf-validate-no-float),"
+                           "function(bpf-normalize-irreducible,fix-irreducible),bpf-capsule-domains,bpf-remove-suspend-barriers,";
     if (!arena) {
         pipeline += v4 ? "bpf-stackify-fixed," : "bpf-stackify-fixed-v3,";
     } else {
@@ -178,6 +188,22 @@ bool hasOption(int argc, char** argv, StringRef name) {
         }
     }
     return false;
+}
+
+// A native static link resolves an undefined weak symbol to zero without
+// extracting an archive member for it. LLVM IR preserves the external_weak
+// declaration for the object writer, but BPF has no load-time weak-symbol
+// resolution. Materialize the same result before optimization so guarded
+// calls and accesses fold away rather than becoming unusable BTF externs.
+void resolveExternalWeak(Module& module) {
+    for (GlobalValue& value : module.global_values()) {
+        // Sectioned declarations are BPF loader contracts, notably optional
+        // kfuncs in .ksyms. They are not ordinary ELF weak references and
+        // must survive for libbpf and the kernel to resolve.
+        if (value.isDeclarationForLinker() && value.hasExternalWeakLinkage() && !value.hasSection() && !value.use_empty()) {
+            value.replaceAllUsesWith(Constant::getNullValue(value.getType()));
+        }
+    }
 }
 
 void addMachinePass(PassManagerBase& passes, StringRef name, TargetPassConfig& config) {
@@ -278,7 +304,7 @@ int main(int argc, char** argv) {
         },
         nullptr);
     SMDiagnostic diagnostic;
-    Triple triple(BigEndian ? "bpfeb" : "bpfel");
+    Triple triple("bpfel");
     std::string targetError;
     const Target* target = TargetRegistry::lookupTarget(triple, targetError);
     if (!target) {
@@ -291,7 +317,13 @@ int main(int argc, char** argv) {
         fail("cannot create BPF target machine");
     }
 
+    struct ArchiveInput {
+        std::string path;
+        DenseSet<uint64_t> extracted;
+    };
+
     std::unique_ptr<Module> module;
+    std::vector<ArchiveInput> archives;
     auto linkModule = [&](std::unique_ptr<Module> next, const Twine& what) {
         if (!module) {
             module = std::move(next);
@@ -299,32 +331,114 @@ int main(int argc, char** argv) {
             fail("cannot link " + what);
         }
     };
+    auto unresolvedSymbols = [](const Module& reference) {
+        std::vector<std::string> names;
+        StringSet<> seen;
+        for (const GlobalValue& value : reference.global_values()) {
+            // A declaration alone is not an unresolved reference. Frontends
+            // commonly leave unused declarations behind, and extern weak is
+            // explicitly allowed to remain absent.
+            if (!value.isDeclarationForLinker() || value.use_empty() || value.hasExternalWeakLinkage() || !value.hasName()) {
+                continue;
+            }
+            if (seen.insert(value.getName()).second) {
+                names.push_back(value.getName().str());
+            }
+        }
+        // Floating-point intrinsics become libm calls in the preparation
+        // pipeline, so they are implicit archive references.
+        for (std::string& name : RequiredSoftFloatLibcalls(reference)) {
+            if (seen.insert(name).second) {
+                names.push_back(std::move(name));
+            }
+        }
+        // Clang represents builtin memory operations as intrinsics, but the
+        // Capsule pipeline outlines non-trivial managed-memory copies to the
+        // corresponding C library routine. Make that implicit dependency
+        // visible to archive extraction before bpf-expand-mem runs. Unused
+        // routines (for example when every copy is tiny) disappear in DCE.
+        for (const Function& function : reference) {
+            StringRef name;
+            switch (function.getIntrinsicID()) {
+                case Intrinsic::memcpy:
+                    name = "memcpy";
+                    break;
+                case Intrinsic::memmove:
+                    name = "memmove";
+                    break;
+                case Intrinsic::memset:
+                    name = "memset";
+                    break;
+                default:
+                    continue;
+            }
+            const Function* implementation = reference.getFunction(name);
+            if (!function.use_empty() && (!implementation || implementation->isDeclarationForLinker()) && seen.insert(name).second) {
+                names.push_back(name.str());
+            }
+        }
+        return names;
+    };
+    auto extractArchive = [&](ArchiveInput& input, ArrayRef<std::string> roots) {
+        auto buffer = MemoryBuffer::getFile(input.path);
+        if (!buffer) {
+            fail(buffer.getError().message() + ": " + input.path);
+        }
+        Error archiveError = Error::success();
+        object::Archive archive((*buffer)->getMemBufferRef(), archiveError);
+        if (archiveError) {
+            fail("cannot read archive " + input.path + ": " + toString(std::move(archiveError)));
+        }
+
+        auto extract = [&](StringRef name) {
+            if (GlobalValue* existing = module->getNamedValue(name); existing && !existing->isDeclarationForLinker()) {
+                return false;
+            }
+            Expected<std::optional<object::Archive::Child>> found = archive.findSym(name);
+            if (!found) {
+                fail("cannot read the symbol table in " + input.path + ": " + toString(found.takeError()));
+            }
+            if (!*found || input.extracted.contains((*found)->getChildOffset())) {
+                return false;
+            }
+            input.extracted.insert((*found)->getChildOffset());
+            Expected<MemoryBufferRef> member = (*found)->getMemoryBufferRef();
+            if (!member) {
+                fail("cannot read a member of " + input.path + ": " + toString(member.takeError()));
+            }
+            Expected<std::unique_ptr<Module>> parsed = parseBitcodeFile(*member, context);
+            if (!parsed) {
+                fail("archive member in " + input.path + " is not bitcode: " + toString(parsed.takeError()));
+            }
+            linkModule(std::move(*parsed), input.path);
+            return true;
+        };
+
+        bool changed = false;
+        for (const std::string& name : roots) {
+            changed |= extract(name);
+        }
+        // Members can introduce dependencies on later members in the same
+        // archive. Resolve those to a fixed point just like a conventional
+        // static linker.
+        if (changed) {
+            for (;;) {
+                bool extractedDependency = false;
+                for (const std::string& name : unresolvedSymbols(*module)) {
+                    extractedDependency |= extract(name);
+                }
+                if (!extractedDependency) {
+                    break;
+                }
+            }
+        }
+        return changed;
+    };
     auto loadAndLink = [&](const std::string& path) {
-        // Static libraries are ar archives of bitcode members (llvm-ar).
         if (StringRef(path).ends_with(".a")) {
-            auto buffer = MemoryBuffer::getFile(path);
-            if (!buffer) {
-                fail(buffer.getError().message() + ": " + path);
-            }
-            Error archiveError = Error::success();
-            object::Archive archive((*buffer)->getMemBufferRef(), archiveError);
-            if (archiveError) {
-                fail("cannot read archive " + path + ": " + toString(std::move(archiveError)));
-            }
-            Error childError = Error::success();
-            for (const object::Archive::Child& child : archive.children(childError)) {
-                Expected<MemoryBufferRef> member = child.getMemoryBufferRef();
-                if (!member) {
-                    fail("cannot read a member of " + path + ": " + toString(member.takeError()));
-                }
-                Expected<std::unique_ptr<Module>> parsed = parseBitcodeFile(*member, context);
-                if (!parsed) {
-                    fail("archive member in " + path + " is not bitcode: " + toString(parsed.takeError()));
-                }
-                linkModule(std::move(*parsed), path);
-            }
-            if (childError) {
-                fail("cannot iterate " + path + ": " + toString(std::move(childError)));
+            archives.push_back({path, {}});
+            if (module) {
+                extractArchive(archives.back(), unresolvedSymbols(*module));
             }
             return;
         }
@@ -407,7 +521,7 @@ int main(int argc, char** argv) {
         fail("inputs do not define the Capsule runtime; use bpf_capsule_object or link matching runtime bitcode explicitly");
     }
 
-    // Runtime and libc are compiled as SDK-owned inputs, but their
+    // Runtime and platform code are compiled as SDK-owned inputs, but their
     // target-dependent choices are made here. Refuse stale/mismatched inputs
     // instead of silently emitting code for a different memory or atomic
     // model.
@@ -422,9 +536,7 @@ int main(int argc, char** argv) {
         }
     };
     checkBuildMarker(bpf::sym::MemoryBackend, Memory == MemoryMode::Arena ? 1 : 0, "runtime memory backend", hasRuntime);
-    checkBuildMarker(bpf::sym::AllocatorLockMode, AllocatorLock == AllocatorLockMode::Atomic ? 1 : 0, "libc allocator lock", false);
-
-    module->setTargetTriple(triple);
+    checkBuildMarker(bpf::sym::AllocatorLockMode, AllocatorLock == AllocatorLockMode::Atomic ? 1 : 0, "platform allocator lock", false);
 
     // Function target attributes control BPF instruction selection after the
     // modules have been linked. Reject a concrete frontend/linker disagreement
@@ -432,7 +544,12 @@ int main(int argc, char** argv) {
     // leave the attribute absent (and rustc-generated shims marked "generic")
     // are compatible with either supported ISA and inherit the link target.
     const bool enforceTargetCpu = PipelineOverride.empty() || CPU.getNumOccurrences() != 0;
-    if (enforceTargetCpu) {
+    auto prepareLinkedModule = [&] {
+        module->setTargetTriple(triple);
+        module->setDataLayout(machine->createDataLayout());
+        if (!enforceTargetCpu) {
+            return;
+        }
         for (Function& function : *module) {
             if (function.isIntrinsic()) {
                 continue;
@@ -443,29 +560,36 @@ int main(int argc, char** argv) {
             }
             function.addFnAttr("target-cpu", CPU);
         }
-    }
+    };
+    prepareLinkedModule();
 
     // --------------------------------------------------------------- pipeline
-    module->setDataLayout(machine->createDataLayout());
+    auto runPipeline = [&](Module& targetModule, StringRef text) {
+        // BPF has no vector registers; LLVM 23's BPF backend crashes on a
+        // vector setcc from the SLP vectorizer, so never produce one. Loop
+        // unrolling is off so stackify sees loops as loops.
+        PipelineTuningOptions tuning;
+        tuning.LoopUnrolling = false;
+        tuning.LoopVectorization = false;
+        tuning.SLPVectorization = false;
+        PassBuilder builder(machine.get(), tuning);
+        LoopAnalysisManager loopAnalyses;
+        FunctionAnalysisManager functionAnalyses;
+        CGSCCAnalysisManager callGraphAnalyses;
+        ModuleAnalysisManager moduleAnalyses;
+        builder.registerModuleAnalyses(moduleAnalyses);
+        builder.registerCGSCCAnalyses(callGraphAnalyses);
+        builder.registerFunctionAnalyses(functionAnalyses);
+        builder.registerLoopAnalyses(loopAnalyses);
+        builder.crossRegisterProxies(loopAnalyses, functionAnalyses, callGraphAnalyses, moduleAnalyses);
+        RegisterCapsulePipelineCallbacks(builder);
 
-    // BPF has no vector registers; LLVM 23's BPF backend crashes on a vector
-    // setcc from the SLP vectorizer, so never produce one. Loop unrolling is
-    // off so stackify sees loops as loops.
-    PipelineTuningOptions tuning;
-    tuning.LoopUnrolling = false;
-    tuning.LoopVectorization = false;
-    tuning.SLPVectorization = false;
-    PassBuilder builder(machine.get(), tuning);
-    LoopAnalysisManager loopAnalyses;
-    FunctionAnalysisManager functionAnalyses;
-    CGSCCAnalysisManager callGraphAnalyses;
-    ModuleAnalysisManager moduleAnalyses;
-    builder.registerModuleAnalyses(moduleAnalyses);
-    builder.registerCGSCCAnalyses(callGraphAnalyses);
-    builder.registerFunctionAnalyses(functionAnalyses);
-    builder.registerLoopAnalyses(loopAnalyses);
-    builder.crossRegisterProxies(loopAnalyses, functionAnalyses, callGraphAnalyses, moduleAnalyses);
-    RegisterCapsulePipelineCallbacks(builder);
+        ModulePassManager pipeline;
+        if (Error parseError = builder.parsePassPipeline(pipeline, text)) {
+            fail("cannot construct the capsule pipeline: " + toString(std::move(parseError)));
+        }
+        pipeline.run(targetModule, moduleAnalyses);
+    };
 
     auto saveModule = [&](const Twine& suffix) {
         std::string path = OutputFilename + suffix.str();
@@ -476,16 +600,39 @@ int main(int argc, char** argv) {
         }
         WriteBitcodeToFile(*module, out);
     };
-    if (SaveTemps) {
-        saveModule(".linked.bc");
+    if (!PipelineOverride.empty()) {
+        if (SaveTemps) {
+            saveModule(".linked.bc");
+        }
+        resolveExternalWeak(*module);
+        runPipeline(*module, PipelineOverride);
+    } else {
+        // O2 may introduce an ordinary C-library call (for example, replacing
+        // a constant-format fprintf with fwrite). A native LTO link resolves
+        // that call after optimization. Do the same for bitcode archives:
+        // retry only the preparation half from an untouched linked module,
+        // then run stackification and code generation once.
+        for (;;) {
+            std::unique_ptr<Module> prepared = CloneModule(*module);
+            resolveExternalWeak(*prepared);
+            runPipeline(*prepared, capsulePreparationPipeline());
+            std::vector<std::string> introduced = unresolvedSymbols(*prepared);
+            bool extracted = false;
+            for (ArchiveInput& archive : archives) {
+                extracted |= extractArchive(archive, introduced);
+            }
+            if (extracted) {
+                prepareLinkedModule();
+                continue;
+            }
+            if (SaveTemps) {
+                saveModule(".linked.bc");
+            }
+            module = std::move(prepared);
+            break;
+        }
+        runPipeline(*module, capsuleFinalPipeline());
     }
-
-    ModulePassManager pipeline;
-    std::string pipelineText = PipelineOverride.empty() ? capsulePipeline() : std::string(PipelineOverride);
-    if (Error parseError = builder.parsePassPipeline(pipeline, pipelineText)) {
-        fail("cannot construct the capsule pipeline: " + toString(std::move(parseError)));
-    }
-    pipeline.run(*module, moduleAnalyses);
     if (SaveTemps) {
         saveModule(".capsule.bc");
     }

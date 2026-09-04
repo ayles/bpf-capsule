@@ -62,6 +62,15 @@ find_program(
     HINTS "${LLVM_TOOLS_BINARY_DIR}"
     REQUIRED
 )
+find_program(BPF_CAPSULE_LLVM_AS NAMES llvm-as-${LLVM_VERSION_MAJOR} llvm-as HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+find_program(BPF_CAPSULE_LLVM_AR NAMES llvm-ar-${LLVM_VERSION_MAJOR} llvm-ar HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
+find_program(
+    BPF_CAPSULE_LLVM_DIS
+    NAMES llvm-dis-${LLVM_VERSION_MAJOR} llvm-dis
+    HINTS "${LLVM_TOOLS_BINARY_DIR}"
+    REQUIRED
+)
+find_program(BPF_CAPSULE_LLVM_NM NAMES llvm-nm-${LLVM_VERSION_MAJOR} llvm-nm HINTS "${LLVM_TOOLS_BINARY_DIR}" REQUIRED)
 add_test(
     NAME CMakePackage.InstalledConsumer
     COMMAND
@@ -74,6 +83,27 @@ add_test(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake-package/RunConsumer.cmake
 )
 set_tests_properties(CMakePackage.InstalledConsumer PROPERTIES LABELS "package-contract;unprivileged" RUN_SERIAL TRUE)
+
+# Static bitcode libraries follow normal archive extraction rules: pull a
+# referenced member and its transitive dependencies, but never unrelated code.
+add_test(
+    NAME Linker.ArchiveExtraction
+    COMMAND
+        "${CMAKE_COMMAND}" "-DCAPSULE_LD=$<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}>" -DLLVM_AS=${BPF_CAPSULE_LLVM_AS}
+        -DLLVM_AR=${BPF_CAPSULE_LLVM_AR} -DLLVM_DIS=${BPF_CAPSULE_LLVM_DIS} -DLLVM_NM=${BPF_CAPSULE_LLVM_NM}
+        -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/linker-archive -DWORK=${CMAKE_CURRENT_BINARY_DIR}/linker-archive -P
+        ${CMAKE_CURRENT_SOURCE_DIR}/linker-archive/VerifyArchive.cmake
+)
+set_tests_properties(Linker.ArchiveExtraction PROPERTIES LABELS "linker-contract;unprivileged")
+
+add_test(
+    NAME Linker.PlatformMarkers
+    COMMAND
+        "${CMAKE_COMMAND}" "-DCAPSULE_LD=$<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}>"
+        -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/linker-archive/markers.ll -DWORK=${CMAKE_CURRENT_BINARY_DIR}/linker-markers
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/linker-archive/VerifyMarkers.cmake
+)
+set_tests_properties(Linker.PlatformMarkers PROPERTIES LABELS "linker-contract;unprivileged")
 
 set(test_source_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 set(capsule_libc_dir "${BPF_CAPSULE_LIBC_DIR}")

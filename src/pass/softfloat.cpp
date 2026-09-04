@@ -26,6 +26,7 @@
 #include "runtime_symbols.h"
 
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/ADT/StringSet.h>
 #include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/IRBuilder.h>
@@ -44,6 +45,63 @@ using namespace llvm;
 namespace {
 
 enum class UnsupportedFloatType { None, Narrow, Wide, Vector };
+
+StringRef intrinsicLibmBase(Intrinsic::ID intrinsic) {
+    switch (intrinsic) {
+        case Intrinsic::fabs:
+            return "fabs";
+        case Intrinsic::copysign:
+            return "copysign";
+        case Intrinsic::fma:
+            return "fma";
+        case Intrinsic::sqrt:
+            return "sqrt";
+        case Intrinsic::floor:
+            return "floor";
+        case Intrinsic::ceil:
+            return "ceil";
+        case Intrinsic::trunc:
+            return "trunc";
+        case Intrinsic::round:
+            return "round";
+        case Intrinsic::rint:
+            return "rint";
+        case Intrinsic::nearbyint:
+            return "nearbyint";
+        case Intrinsic::sin:
+            return "sin";
+        case Intrinsic::cos:
+            return "cos";
+        case Intrinsic::tan:
+            return "tan";
+        case Intrinsic::asin:
+            return "asin";
+        case Intrinsic::acos:
+            return "acos";
+        case Intrinsic::atan:
+            return "atan";
+        case Intrinsic::atan2:
+            return "atan2";
+        case Intrinsic::exp:
+            return "exp";
+        case Intrinsic::exp2:
+            return "exp2";
+        case Intrinsic::log:
+            return "log";
+        case Intrinsic::log2:
+            return "log2";
+        case Intrinsic::log10:
+            return "log10";
+        case Intrinsic::pow:
+            return "pow";
+        case Intrinsic::minnum:
+            return "fmin";
+        case Intrinsic::maxnum:
+            return "fmax";
+        default:
+            return {};
+    }
+}
 
 UnsupportedFloatType classifyUnsupportedFloatType(Type* type, SmallPtrSetImpl<Type*>& visited) {
     if (!visited.insert(type).second) {
@@ -410,6 +468,32 @@ struct SoftFloat {
 
 } // namespace
 
+std::vector<std::string> RequiredSoftFloatLibcalls(const Module& module) {
+    std::vector<std::string> result;
+    StringSet<> seen;
+    for (const Function& function : module) {
+        if (function.isDeclaration()) {
+            continue;
+        }
+        for (const Instruction& instruction : instructions(function)) {
+            const auto* intrinsic = dyn_cast<IntrinsicInst>(&instruction);
+            if (!intrinsic) {
+                continue;
+            }
+            StringRef base = intrinsicLibmBase(intrinsic->getIntrinsicID());
+            if (base.empty() || (!intrinsic->getType()->isFloatTy() && !intrinsic->getType()->isDoubleTy())) {
+                continue;
+            }
+            std::string name = intrinsic->getType()->isFloatTy() ? (base + "f").str() : base.str();
+            const Function* implementation = module.getFunction(name);
+            if ((!implementation || implementation->isDeclarationForLinker()) && seen.insert(name).second) {
+                result.push_back(std::move(name));
+            }
+        }
+    }
+    return result;
+}
+
 PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
     // Validate the complete input before mapType mutates named aggregate
     // bodies. Both cases are outside the scalar f32/f64 ABI; diagnosing them
@@ -574,86 +658,7 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
                         lowered++;
                         continue;
                     }
-                    StringRef base;
-                    switch (ii->getIntrinsicID()) {
-                        case Intrinsic::fabs:
-                            base = "fabs";
-                            break;
-                        case Intrinsic::copysign:
-                            base = "copysign";
-                            break;
-                        case Intrinsic::fma:
-                            base = "fma";
-                            break;
-                        case Intrinsic::sqrt:
-                            base = "sqrt";
-                            break;
-                        case Intrinsic::floor:
-                            base = "floor";
-                            break;
-                        case Intrinsic::ceil:
-                            base = "ceil";
-                            break;
-                        case Intrinsic::trunc:
-                            base = "trunc";
-                            break;
-                        case Intrinsic::round:
-                            base = "round";
-                            break;
-                        case Intrinsic::rint:
-                            base = "rint";
-                            break;
-                        case Intrinsic::nearbyint:
-                            base = "nearbyint";
-                            break;
-                        case Intrinsic::sin:
-                            base = "sin";
-                            break;
-                        case Intrinsic::cos:
-                            base = "cos";
-                            break;
-                        case Intrinsic::tan:
-                            base = "tan";
-                            break;
-                        case Intrinsic::asin:
-                            base = "asin";
-                            break;
-                        case Intrinsic::acos:
-                            base = "acos";
-                            break;
-                        case Intrinsic::atan:
-                            base = "atan";
-                            break;
-                        case Intrinsic::atan2:
-                            base = "atan2";
-                            break;
-                        case Intrinsic::exp:
-                            base = "exp";
-                            break;
-                        case Intrinsic::exp2:
-                            base = "exp2";
-                            break;
-                        case Intrinsic::log:
-                            base = "log";
-                            break;
-                        case Intrinsic::log2:
-                            base = "log2";
-                            break;
-                        case Intrinsic::log10:
-                            base = "log10";
-                            break;
-                        case Intrinsic::pow:
-                            base = "pow";
-                            break;
-                        case Intrinsic::minnum:
-                            base = "fmin";
-                            break;
-                        case Intrinsic::maxnum:
-                            base = "fmax";
-                            break;
-                        default:
-                            break;
-                    }
+                    StringRef base = intrinsicLibmBase(ii->getIntrinsicID());
                     if (base.empty()) {
                         ii->getContext().emitError(ii, Twine("bpf-soft-float: no integer lowering for ") + ii->getCalledFunction()->getName());
                         return PreservedAnalyses::all();
