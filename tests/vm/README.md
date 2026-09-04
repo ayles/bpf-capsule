@@ -1,13 +1,15 @@
 # Kernel proof matrix
 
 The compiler's unprivileged CTest suite proves exact IR, MIR, ELF, packaging,
-and host-ABI contracts. These NixOS tests provide the missing kernel evidence:
-they boot an isolated kernel and run every installed GTest binary as root.
+and host-ABI contracts. The NixOS tests defined in [`nix/vm`](../../nix/vm)
+provide the missing kernel evidence: they boot an isolated kernel and run every
+installed GTest binary as root.
 Each binary embeds the exact BPF object it loads, so there is no second staging
 protocol or list of hand-maintained object names.
 
-The flake pairs the two fixed-memory code generators with Linux 5.15 and 6.6.
-Arena targets run on the current pinned kernel: on aarch64 the arena feature
-set used by Capsule arrived in pieces after the nominal Linux 6.9 ABI floor.
-The Linux 7.1 `gotox` target is always compiled and joins the runtime matrix
-automatically once the pinned nixpkgs supplies a 7.1-or-newer kernel.
+The flake pairs the fixed-memory code generators with Linux 5.15 and 6.6.
+Newer targets run on the current pinned kernel. Arm64 additionally exercises
+6.9 fixed memory with full atomics and the 6.10 arena path with signed-load
+lowering; x86-64 already reaches that arena path at 6.9. The default-profile
+example VM uses the architecture's arena profile. The Linux 7.1 `gotox` target
+is compiled and runs in the matrix when the pinned kernel is 7.1 or newer.

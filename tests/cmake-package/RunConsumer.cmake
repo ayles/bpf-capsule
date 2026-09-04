@@ -1,15 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Prove the installed package, not source-tree implementation details. The
+# Prove the installed package the test suite itself was built against. The
 # consumer compiles C and C++ through the exported cc/ld targets; a second
 # configure pins the public helper's fail-closed argument parsing.
 
 function(run_checked description)
-    execute_process(
-        COMMAND ${ARGN}
-        RESULT_VARIABLE result
-        OUTPUT_VARIABLE output
-        ERROR_VARIABLE error
-    )
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
     if(NOT result EQUAL 0)
         message(FATAL_ERROR "${description} failed (${result}):\n${output}${error}")
     endif()
@@ -17,21 +12,6 @@ endfunction()
 
 file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
-if(IS_ABSOLUTE "${PROJECT_INSTALL_BINDIR}")
-    # Package managers such as Nix deliberately configure absolute GNUInstallDirs.
-    # CMake exports absolute imported-target locations in that mode, so exercise
-    # the real writable package prefix during checkPhase rather than a false
-    # DESTDIR relocation which those targets do not claim to support.
-    set(prefix "${PROJECT_INSTALL_PREFIX}")
-    run_checked("installing BPF Capsule"
-        "${CMAKE_COMMAND}" --install "${PROJECT_BINARY_DIR}")
-else()
-    set(stage "${WORK}/stage")
-    set(prefix "${stage}${PROJECT_INSTALL_PREFIX}")
-    run_checked("staging BPF Capsule"
-        "${CMAKE_COMMAND}" -E env "DESTDIR=${stage}"
-        "${CMAKE_COMMAND}" --install "${PROJECT_BINARY_DIR}")
-endif()
 
 # A nested project is still part of this configured build. Reuse its generator
 # and compilers so the contract neither guesses at Make versus Ninja nor finds
@@ -56,23 +36,32 @@ if(DEFINED PROJECT_CXX_COMPILER AND NOT PROJECT_CXX_COMPILER STREQUAL "")
     list(APPEND configure_toolchain "-DCMAKE_CXX_COMPILER=${PROJECT_CXX_COMPILER}")
 endif()
 
+# A CMake cache value is one argv element even when the value itself is a
+# semicolon-separated list. Preserve that list through run_checked's ARGN.
+string(REPLACE ";" "\\;" link_options "${LINK_OPTIONS}")
+
 run_checked("configuring installed-package consumer"
     "${CMAKE_COMMAND}" -S "${CONSUMER_SOURCE}" -B "${WORK}/consumer" ${configure_toolchain}
     "-DCMAKE_BUILD_TYPE=Release"
-    "-DCMAKE_PREFIX_PATH=${prefix}"
-    "-DBPF_CAPSULE_TARGET_KERNEL=${TARGET_KERNEL}")
+    "-DBpfCapsule_DIR=${PACKAGE_DIR}"
+    "-DBPF_CAPSULE_LINK_OPTIONS=${link_options}"
+)
 run_checked("building installed-package consumer"
-    "${CMAKE_COMMAND}" --build "${WORK}/consumer" --parallel 2)
+    "${CMAKE_COMMAND}" --build "${WORK}/consumer" --parallel 2
+)
 
 set(object "${WORK}/consumer/smoke.bpf.o")
-if(NOT EXISTS "${object}")
-    message(FATAL_ERROR "installed-package consumer did not produce ${object}")
-endif()
+foreach(product IN ITEMS "${object}" "${WORK}/consumer/host_smoke")
+    if(NOT EXISTS "${product}")
+        message(FATAL_ERROR "installed-package consumer did not produce ${product}")
+    endif()
+endforeach()
 run_checked("reading installed-package object" "${LLVM_READELF}" -h -S "${object}")
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" -S "${CONSUMER_SOURCE}/invalid"
-            -B "${WORK}/invalid" ${configure_toolchain} "-DCMAKE_PREFIX_PATH=${prefix}"
+    COMMAND
+        "${CMAKE_COMMAND}" -S "${CONSUMER_SOURCE}/invalid" -B "${WORK}/invalid" ${configure_toolchain}
+        "-DBpfCapsule_DIR=${PACKAGE_DIR}"
     RESULT_VARIABLE invalid_result
     OUTPUT_VARIABLE invalid_output
     ERROR_VARIABLE invalid_error

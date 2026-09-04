@@ -58,6 +58,7 @@ inline constexpr llvm::StringLiteral VaArg{"__bpf_capsule_va_arg"};
 inline constexpr llvm::StringLiteral HeapStart{"__bpf_capsule_heap_start"};
 inline constexpr llvm::StringLiteral HeapSize{"__bpf_capsule_heap_size"};
 inline constexpr llvm::StringLiteral StackRegion{"__bpf_capsule_stack_region"};
+inline constexpr llvm::StringLiteral StackOffset{"__bpf_capsule_stack_offset"};
 
 // Runtime call glue with pointer arguments; must fold into its entry program
 // because a global subprogram cannot accept the entry's native stack
@@ -70,6 +71,8 @@ inline constexpr llvm::StringLiteral Reset{"__bpf_capsule_reset"};
 inline constexpr llvm::StringLiteral FiberControls{BPF_CAPSULE_SYMBOL_FIBER_CONTROLS};
 inline constexpr llvm::StringLiteral Config{BPF_CAPSULE_SYMBOL_CONFIG};
 inline constexpr llvm::StringLiteral ArenaControl{BPF_CAPSULE_SYMBOL_ARENA_CONTROL};
+inline constexpr llvm::StringLiteral MemoryBackend{"__bpf_capsule_memory_backend"};
+inline constexpr llvm::StringLiteral AllocatorLockMode{"__bpf_capsule_allocator_lock_mode"};
 inline constexpr llvm::StringLiteral CallStack{"bpf_call_stack"};
 inline constexpr llvm::StringLiteral HeapArray{BPF_CAPSULE_MAP_HEAP_ARRAY};
 inline constexpr llvm::StringLiteral ArenaMap{BPF_CAPSULE_MAP_ARENA};

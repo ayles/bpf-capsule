@@ -4,16 +4,14 @@
 //
 // Values travel as their bit patterns in 64-bit integers; bpf-soft-float
 // rewrites every floating-point operation in the program into a call to one
-// of these. Rounding is round-to-nearest-even throughout, so results match a
-// hardware FPU bit for bit — which is what lets a program's output be
-// compared against the same program built natively.
+// of these. Each routine implements round-to-nearest-even and can be tested
+// differentially against the same operation compiled for hardware.
 //
-// Add, subtract and multiply have direct binary32 implementations.  Widening
+// Add, subtract and multiply have direct binary32 implementations. Widening
 // to binary64 first is exact, but needlessly pays for two conversions and the
-// much wider significand arithmetic at every operation.  The less frequent
+// much wider significand arithmetic at every operation. The less frequent
 // single-precision operations still share the binary64 implementation below;
-// divide rounds once at the end rather than twice, which differs from a true
-// float divide only in cases this environment does not reach.
+// divide can therefore double-round and differ from hardware by one ulp.
 
 #include "bpf_capsule.h"
 

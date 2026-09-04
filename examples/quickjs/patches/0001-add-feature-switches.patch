@@ -1,0 +1,8 @@
+--- a/quickjs.c
++++ b/quickjs.c
+@@ -52 +52 @@
+-#if defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__) || defined(CONFIG_NO_DIRECT_DISPATCH)
+@@ -71 +71 @@
+-#if !defined(__EMSCRIPTEN__)
++#if !defined(__EMSCRIPTEN__) && !defined(CONFIG_NO_ATOMICS)

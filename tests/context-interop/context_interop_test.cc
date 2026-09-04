@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // A context call can read packet bytes directly, and the same hidden context
 // is available again when a voluntary yield is resumed through
-// capsule_continue_ctx. Both paths must produce the identical checksum. The
-// non-yielding object additionally proves scalar and context roots dispatch
+// capsule_continue_ctx. Both paths must produce the identical checksum, and
+// so must the void-root forms (capsule_call_void_ctx, resumed through
+// capsule_continue_void_ctx). The void root reads the packet through a callee,
+// so the hidden context is proven available below the root, not only in it.
+// The non-yielding object additionally proves scalar and context roots dispatch
 // through one object.
 #include "capsule_gtest.h"
 
@@ -51,6 +54,15 @@ int run_policy(int fd, const unsigned char* packet, unsigned int* action) {
     return 0;
 }
 
+void expect_context_output(volatile struct context_interop_output* output, unsigned int action, const unsigned char* packet) {
+    EXPECT_EQ(action, (unsigned)XDP_PASS);
+    EXPECT_EQ(output->capsule.status, (unsigned)CAPSULE_OK);
+    EXPECT_EQ(output->capsule.code, 0);
+    EXPECT_EQ(output->protocol_error, 0u);
+    EXPECT_EQ(output->copied, (unsigned)CONTEXT_INTEROP_BYTES);
+    EXPECT_EQ(output->checksum, expected_checksum(packet));
+}
+
 TEST(ContextInterop, BorrowedAndYieldAgree) {
     CAPSULE_REQUIRE_BPF_PRIVILEGE();
     unsigned char packet[CONTEXT_INTEROP_BYTES];
@@ -91,13 +103,12 @@ TEST(ContextInterop, BorrowedAndYieldAgree) {
         volatile struct context_interop_output* output = &skeleton->data_ctxinterop->context_interop_result;
         unsigned int action = 0;
         ASSERT_EQ(run_policy(bpf_program__fd(skeleton->progs.context_interop_run), packet, &action), 0) << strerror(errno);
-        EXPECT_EQ(action, (unsigned)XDP_PASS);
-        EXPECT_EQ(output->capsule.status, (unsigned)CAPSULE_OK);
-        EXPECT_EQ(output->capsule.code, 0);
-        EXPECT_EQ(output->protocol_error, 0u);
-        EXPECT_EQ(output->copied, (unsigned)CONTEXT_INTEROP_BYTES);
-        EXPECT_EQ(output->checksum, expected_checksum(packet));
+        expect_context_output(output, action, packet);
         borrowed_checksum = output->checksum;
+        volatile struct context_interop_output* void_output = &skeleton->data_ctxvoid->context_interop_void_result;
+        ASSERT_EQ(run_policy(bpf_program__fd(skeleton->progs.context_interop_void_run), packet, &action), 0) << strerror(errno);
+        expect_context_output(void_output, action, packet);
+        EXPECT_EQ(void_output->checksum, output->checksum);
         EXPECT_EQ(bpf_capsule_release(&capsule), 0) << strerror(errno);
         ctx_borrowed__destroy(skeleton);
     }
@@ -115,13 +126,12 @@ TEST(ContextInterop, BorrowedAndYieldAgree) {
         volatile struct context_interop_output* output = &skeleton->data_ctxinterop->context_interop_result;
         unsigned int action = 0;
         ASSERT_EQ(run_policy(bpf_program__fd(skeleton->progs.context_interop_run), packet, &action), 0) << strerror(errno);
-        EXPECT_EQ(action, (unsigned)XDP_PASS);
-        EXPECT_EQ(output->capsule.status, (unsigned)CAPSULE_OK);
-        EXPECT_EQ(output->capsule.code, 0);
-        EXPECT_EQ(output->protocol_error, 0u);
-        EXPECT_EQ(output->copied, (unsigned)CONTEXT_INTEROP_BYTES);
-        EXPECT_EQ(output->checksum, expected_checksum(packet));
+        expect_context_output(output, action, packet);
         yield_checksum = output->checksum;
+        volatile struct context_interop_output* void_output = &skeleton->data_ctxvoid->context_interop_void_result;
+        ASSERT_EQ(run_policy(bpf_program__fd(skeleton->progs.context_interop_void_run), packet, &action), 0) << strerror(errno);
+        expect_context_output(void_output, action, packet);
+        EXPECT_EQ(void_output->checksum, output->checksum);
         EXPECT_EQ(bpf_capsule_release(&capsule), 0) << strerror(errno);
         ctx_yield__destroy(skeleton);
     }

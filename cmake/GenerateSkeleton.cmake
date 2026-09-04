@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.24)
 
-foreach(variable IN ITEMS BPF_CAPSULE_BPFTOOL BPF_CAPSULE_SKELETON_INPUT
-                          BPF_CAPSULE_SKELETON_OUTPUT BPF_CAPSULE_SKELETON_NAME
+foreach(
+    variable
+    IN
+    ITEMS BPF_CAPSULE_BPFTOOL BPF_CAPSULE_SKELETON_INPUT BPF_CAPSULE_SKELETON_OUTPUT BPF_CAPSULE_SKELETON_NAME
 )
     if(NOT DEFINED ${variable} OR "${${variable}}" STREQUAL "")
         message(FATAL_ERROR "GenerateSkeleton.cmake: ${variable} is required")
@@ -13,8 +15,7 @@ get_filename_component(output_directory "${BPF_CAPSULE_SKELETON_OUTPUT}" DIRECTO
 file(MAKE_DIRECTORY "${output_directory}")
 set(temporary "${BPF_CAPSULE_SKELETON_OUTPUT}.tmp")
 execute_process(
-    COMMAND "${BPF_CAPSULE_BPFTOOL}" gen skeleton "${BPF_CAPSULE_SKELETON_INPUT}" name
-            "${BPF_CAPSULE_SKELETON_NAME}"
+    COMMAND "${BPF_CAPSULE_BPFTOOL}" gen skeleton "${BPF_CAPSULE_SKELETON_INPUT}" name "${BPF_CAPSULE_SKELETON_NAME}"
     OUTPUT_FILE "${temporary}"
     ERROR_VARIABLE error_output
     RESULT_VARIABLE result

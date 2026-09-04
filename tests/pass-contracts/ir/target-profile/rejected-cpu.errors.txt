@@ -1,0 +1,1 @@
+function compiled_for_v3 was compiled for -mcpu=v3, but the linker selected -mcpu=v4

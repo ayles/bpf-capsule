@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-# Exact post-selection contract. llc owns both MIR parsing and canonical
+# Exact post-selection contract. bpf-capsule-ld owns MIR parsing and canonical
 # printing; -simplify-mir removes fields whose default value carries no
 # semantic information. Only the input-path-derived ModuleID is ignored.
 
-foreach(required LLC PLUGIN PASS BEFORE AFTER WORK)
+foreach(
+    required
+    BPF_CAPSULE_LD
+    PASS
+    BEFORE
+    AFTER
+    WORK
+)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "RunMirPassCase.cmake needs -D${required}=...")
     endif()
@@ -20,7 +27,7 @@ endfunction()
 
 function(print_canonical input output)
     execute_process(
-        COMMAND "${LLC}" "-load=${PLUGIN}" -run-pass=none -simplify-mir "${input}" -o "${output}"
+        COMMAND "${BPF_CAPSULE_LD}" -run-pass=none -simplify-mir "${input}" -o "${output}"
         RESULT_VARIABLE result
         ERROR_VARIABLE error
     )
@@ -45,7 +52,7 @@ if(NOT recorded_after STREQUAL canonical_after)
     message(FATAL_ERROR "${AFTER} is not canonical; canonical form: ${WORK}/after.canonical.mir")
 endif()
 
-set(command "${LLC}" "-load=${PLUGIN}" "-run-pass=${PASS}" -simplify-mir)
+set(command "${BPF_CAPSULE_LD}" "-run-pass=${PASS}" -simplify-mir)
 if(DEFINED EXTRA_ARG AND NOT "${EXTRA_ARG}" STREQUAL "")
     string(REPLACE "|" ";" extra_args "${EXTRA_ARG}")
     list(APPEND command ${extra_args})

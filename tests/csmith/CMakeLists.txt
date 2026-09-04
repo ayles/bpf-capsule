@@ -1,25 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-configure_file("${BPF_CAPSULE_CSMITH_CASE}"
-    "${CMAKE_CURRENT_BINARY_DIR}/csmith_case.c" COPYONLY)
+set(csmith_case "${CMAKE_CURRENT_BINARY_DIR}/csmith_case.c")
+add_custom_command(
+    OUTPUT "${csmith_case}"
+    COMMAND
+        "${CSMITH_EXECUTABLE}" --seed 29 --no-argc --no-float --int128 --uint128 --concise --max-funcs 6
+        --max-block-depth 4 --max-block-size 4 --max-expr-complexity 10 --max-array-len-per-dim 12 --max-pointer-depth 3
+        --max-struct-fields 12 --max-union-fields 8 --output "${csmith_case}"
+    COMMENT "generate: deterministic Csmith program"
+    VERBATIM
+)
+add_custom_target(csmith_case DEPENDS "${csmith_case}")
 
 # Csmith deliberately emits old and alias-heavy C. Keep its compatibility
 # flags local to this optional generated-code test.
-set(CSMITH_LAX_FLAGS -w -Wno-error=incompatible-pointer-types
-    -Wno-error=int-conversion)
-capsule_bpf_object(csmith
+set(csmith_lax_options -w -Wno-error=incompatible-pointer-types -Wno-error=int-conversion)
+capsule_test_object(
+    csmith
     SOURCES csmith_bpf.c
-    FLAGS -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_CURRENT_BINARY_DIR}
-          -I${BPF_CAPSULE_CSMITH_INCLUDE_DIR} ${CSMITH_LAX_FLAGS}
+    DEPENDS csmith_case
+    INCLUDE_DIRECTORIES
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CSMITH_INCLUDE_DIR}
+        ${BPF_CAPSULE_INTERNAL_INCLUDE_DIR}
+    COMPILE_OPTIONS ${csmith_lax_options}
 )
-capsule_gtest_host(csmith_test
+capsule_gtest_host(
+    csmith_test
     SOURCES csmith_test.cc csmith_native.c
-    DEPENDS csmith_skeleton
-    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
-                        ${BPF_CAPSULE_CSMITH_INCLUDE_DIR}
+    SKELETONS csmith_skeleton
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${CSMITH_INCLUDE_DIR}
 )
-target_compile_options(csmith_test PRIVATE ${CSMITH_LAX_FLAGS})
+add_dependencies(csmith_test csmith_case)
+target_compile_options(csmith_test PRIVATE ${csmith_lax_options})
 
-if(BPF_CAPSULE_INSTALL_TEST_ARTIFACTS)
-    install(FILES CSMITH-LICENSE
-        DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule")
-endif()
+install(FILES CSMITH-LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule")

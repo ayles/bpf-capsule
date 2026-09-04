@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.24)
 
-foreach(variable IN ITEMS
-        BPF_CAPSULE_CARGO BPF_CAPSULE_LLVM_AR BPF_CAPSULE_LLVM_LINK
-        BPF_CAPSULE_CARGO_MANIFEST BPF_CAPSULE_CARGO_PACKAGE
-        BPF_CAPSULE_CARGO_TARGET_DIR BPF_CAPSULE_RUST_OUTPUT)
+foreach(
+    variable
+    IN
+    ITEMS
+        BPF_CAPSULE_CARGO
+        BPF_CAPSULE_LLVM_AR
+        BPF_CAPSULE_LLVM_LINK
+        BPF_CAPSULE_RUST_RUNTIME_DIR
+        BPF_CAPSULE_CARGO_MANIFEST
+        BPF_CAPSULE_CARGO_PACKAGE
+        BPF_CAPSULE_CARGO_TARGET_DIR
+        BPF_CAPSULE_RUST_OUTPUT
+)
     if(NOT DEFINED ${variable} OR "${${variable}}" STREQUAL "")
         message(FATAL_ERROR "BuildRustBitcode.cmake needs ${variable}")
     endif()
@@ -24,12 +33,24 @@ if(BPF_CAPSULE_RUSTFLAGS)
 endif()
 list(JOIN rustflags "${rustflag_separator}" encoded_rustflags)
 
+# The runtime crate is a normal dependency of the manifest; point Cargo at
+# the copy shipped with this SDK (a config-based patch, no registry needed).
 set(cargo_arguments
-    rustc --manifest-path "${BPF_CAPSULE_CARGO_MANIFEST}"
-    --package "${BPF_CAPSULE_CARGO_PACKAGE}"
-    --target bpfel-unknown-none
-    --target-dir "${BPF_CAPSULE_CARGO_TARGET_DIR}"
-    --release --lib --message-format=json-render-diagnostics)
+    --config
+    "patch.crates-io.bpf-capsule-rt.path=\"${BPF_CAPSULE_RUST_RUNTIME_DIR}\""
+    rustc
+    --manifest-path
+    "${BPF_CAPSULE_CARGO_MANIFEST}"
+    --package
+    "${BPF_CAPSULE_CARGO_PACKAGE}"
+    --target
+    bpfel-unknown-none
+    --target-dir
+    "${BPF_CAPSULE_CARGO_TARGET_DIR}"
+    --release
+    --lib
+    --message-format=json-render-diagnostics
+)
 if(BPF_CAPSULE_CARGO_FEATURES)
     list(APPEND cargo_arguments --features "${BPF_CAPSULE_CARGO_FEATURES}")
 endif()
@@ -42,16 +63,16 @@ endif()
 list(APPEND cargo_arguments -- --crate-type staticlib)
 
 execute_process(
-    COMMAND "${CMAKE_COMMAND}" -E env
-            "CARGO_ENCODED_RUSTFLAGS=${encoded_rustflags}"
-            "${BPF_CAPSULE_CARGO}" ${cargo_arguments}
+    COMMAND
+        "${CMAKE_COMMAND}" -E env "CARGO_ENCODED_RUSTFLAGS=${encoded_rustflags}" "${BPF_CAPSULE_CARGO}"
+        ${cargo_arguments}
     RESULT_VARIABLE cargo_result
     OUTPUT_VARIABLE cargo_messages
     ERROR_VARIABLE cargo_diagnostics
-    COMMAND_ECHO STDOUT)
+    COMMAND_ECHO STDOUT
+)
 if(NOT cargo_result EQUAL 0)
-    message(FATAL_ERROR
-        "Cargo failed for ${BPF_CAPSULE_CARGO_PACKAGE}:\n${cargo_diagnostics}")
+    message(FATAL_ERROR "Cargo failed for ${BPF_CAPSULE_CARGO_PACKAGE}:\n${cargo_diagnostics}")
 endif()
 if(cargo_diagnostics)
     message(STATUS "${cargo_diagnostics}")
@@ -98,8 +119,7 @@ foreach(message IN LISTS messages)
     endif()
 endforeach()
 if(NOT archive OR NOT EXISTS "${archive}")
-    message(FATAL_ERROR
-        "Cargo produced no staticlib for ${BPF_CAPSULE_CARGO_PACKAGE}")
+    message(FATAL_ERROR "Cargo produced no staticlib for ${BPF_CAPSULE_CARGO_PACKAGE}")
 endif()
 
 get_filename_component(output_directory "${BPF_CAPSULE_RUST_OUTPUT}" DIRECTORY)
@@ -112,7 +132,8 @@ execute_process(
     COMMAND "${BPF_CAPSULE_LLVM_AR}" x "${archive}"
     WORKING_DIRECTORY "${extract_directory}"
     RESULT_VARIABLE archive_result
-    ERROR_VARIABLE archive_error)
+    ERROR_VARIABLE archive_error
+)
 if(NOT archive_result EQUAL 0)
     message(FATAL_ERROR "cannot extract ${archive}: ${archive_error}")
 endif()
@@ -136,15 +157,15 @@ foreach(object IN LISTS archive_objects)
     endif()
 endforeach()
 if(NOT root_objects)
-    message(FATAL_ERROR
-        "cannot identify ${crate_name} codegen units in ${archive}")
+    message(FATAL_ERROR "cannot identify ${crate_name} codegen units in ${archive}")
 endif()
 
 set(current "${work_directory}/rust-stage-0.bc")
 execute_process(
     COMMAND "${BPF_CAPSULE_LLVM_LINK}" ${root_objects} -o "${current}"
     RESULT_VARIABLE link_result
-    ERROR_VARIABLE link_error)
+    ERROR_VARIABLE link_error
+)
 if(NOT link_result EQUAL 0)
     message(FATAL_ERROR "cannot link root Rust crate: ${link_error}")
 endif()
@@ -157,13 +178,12 @@ if(dependency_objects)
     foreach(pass RANGE 1 8)
         set(next "${work_directory}/rust-stage-${pass}.bc")
         execute_process(
-            COMMAND "${BPF_CAPSULE_LLVM_LINK}" --only-needed
-                    "${current}" ${dependency_objects} -o "${next}"
+            COMMAND "${BPF_CAPSULE_LLVM_LINK}" --only-needed "${current}" ${dependency_objects} -o "${next}"
             RESULT_VARIABLE link_result
-            ERROR_VARIABLE link_error)
+            ERROR_VARIABLE link_error
+        )
         if(NOT link_result EQUAL 0)
-            message(FATAL_ERROR
-                "cannot resolve Rust archive on pass ${pass}: ${link_error}")
+            message(FATAL_ERROR "cannot resolve Rust archive on pass ${pass}: ${link_error}")
         endif()
         file(SHA256 "${current}" current_hash)
         file(SHA256 "${next}" next_hash)
@@ -174,8 +194,7 @@ if(dependency_objects)
         endif()
     endforeach()
     if(NOT converged)
-        message(FATAL_ERROR
-            "Rust archive did not reach a fixed point after eight link passes")
+        message(FATAL_ERROR "Rust archive did not reach a fixed point after eight link passes")
     endif()
 endif()
 

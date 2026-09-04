@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // The Lua interpreter as the reference workload benchmark: script execution
 // wall time per full drive (entry + drains), with drains, static instruction
-// count, and verifier budget as counters. Red until the passes exist, like
-// its test.
+// count, and verifier budget as counters.
 #include "capsule_benchmark.h"
 
 #include "bpf_capsule_host.h"
@@ -17,6 +16,8 @@
 
 namespace {
 
+constexpr uint64_t kMaxDrainsPerDrive = 2'000'000;
+
 void destroy_lua(struct lua_runner* skeleton, struct bpf_capsule* capsule) {
     (void)bpf_capsule_release(capsule);
     lua_runner__destroy(skeleton);
@@ -29,14 +30,16 @@ int drive(struct lua_runner* skeleton, volatile struct lua_runner_ctrl* control,
         return -1;
     }
     int drain_fd = bpf_program__fd(skeleton->progs.lua_drain);
+    uint64_t drive_drains = 0;
     while (control->capsule.status == CAPSULE_PENDING) {
-        if (*drains > 2000000) {
+        if (drive_drains == kMaxDrainsPerDrive) {
             errno = ETIMEDOUT;
             return -1;
         }
         if (bpf_prog_test_run_opts(drain_fd, &options)) {
             return -1;
         }
+        ++drive_drains;
         ++*drains;
     }
     return 0;
@@ -74,8 +77,8 @@ void BM_LuaScript(benchmark::State& state) {
         return;
     }
     volatile struct lua_runner_ctrl* control = &skeleton->data_lua_runner->lua_runner_control;
-    uint64_t drains = 0;
-    if (drive(skeleton, control, bpf_program__fd(skeleton->progs.lua_prepare), &drains) || control->capsule.status != CAPSULE_OK ||
+    uint64_t preparation_drains = 0;
+    if (drive(skeleton, control, bpf_program__fd(skeleton->progs.lua_prepare), &preparation_drains) || control->capsule.status != CAPSULE_OK ||
         script.size() > control->script.capacity || bpf_capsule_memcpy(&capsule, control->script.address, script.data(), script.size())) {
         state.SkipWithError("cannot stage the script");
         destroy_lua(skeleton, &capsule);

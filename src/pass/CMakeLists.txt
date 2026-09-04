@@ -4,7 +4,8 @@
 # themselves purely through static initializers (the machine pass, cl::opts),
 # and an archive would drop their unreferenced members.
 add_library(
-    bpf_capsule_passes OBJECT
+    bpf_capsule_passes
+    OBJECT
     # shared support
     common.cpp
     target.cpp
@@ -39,11 +40,12 @@ add_library(
     registry.cpp
 )
 target_include_directories(
-    bpf_capsule_passes PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}"
-                              "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/internal"
-                              "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/guest"
+    bpf_capsule_passes
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/internal"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/guest"
 )
 target_include_directories(bpf_capsule_passes SYSTEM PUBLIC ${BPF_CAPSULE_LLVM_INCLUDE_DIRS})
 target_compile_definitions(bpf_capsule_passes PUBLIC ${BPF_CAPSULE_LLVM_DEFINITIONS})
 target_compile_options(bpf_capsule_passes PRIVATE -fno-rtti -fno-exceptions)
-set_target_properties(bpf_capsule_passes PROPERTIES POSITION_INDEPENDENT_CODE ON)

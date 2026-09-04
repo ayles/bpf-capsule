@@ -27,7 +27,7 @@
 
 #ifdef LLAMA2_QUANTIZED
 #include "llama2q.skel.h"
-#define LLAMA_NAME "llama2q"
+#define LLAMA_NAME "llama2-q8"
 #define LLAMA_SKELETON struct llama2q
 #define LLAMA_OPEN llama2q__open
 #define LLAMA_DESTROY llama2q__destroy

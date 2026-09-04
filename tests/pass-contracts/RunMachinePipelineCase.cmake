@@ -3,7 +3,15 @@
 # blocks retain BasicBlock provenance from their allocation-unit functions
 # until final placement restores each dispatch leaf beside its body.
 
-foreach(required LLC PLUGIN LLVM_AS LLVM_DIS BEFORE AFTER WORK)
+foreach(
+    required
+    BPF_CAPSULE_LD
+    LLVM_AS
+    LLVM_DIS
+    BEFORE
+    AFTER
+    WORK
+)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "RunMachinePipelineCase.cmake needs -D${required}=...")
     endif()
@@ -13,12 +21,7 @@ file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
 
 function(run_checked description)
-    execute_process(
-        COMMAND ${ARGN}
-        RESULT_VARIABLE result
-        OUTPUT_VARIABLE output
-        ERROR_VARIABLE error
-    )
+    execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
     if(NOT result EQUAL 0)
         message(FATAL_ERROR "${description} failed (${result})\nstdout:\n${output}\nstderr:\n${error}")
     endif()
@@ -44,7 +47,7 @@ endif()
 # The expected final MIR must also be a stable LLVM parser/printer image.
 run_checked(
     "canonicalizing ${AFTER}"
-    "${LLC}" -mcpu=v4 -run-pass=none -simplify-mir "${AFTER}" -o "${WORK}/after.printed.mir"
+    "${BPF_CAPSULE_LD}" -mcpu=v4 -run-pass=none -simplify-mir "${AFTER}" -o "${WORK}/after.printed.mir"
 )
 read_normalized("${AFTER}" recorded_after)
 read_normalized("${WORK}/after.printed.mir" canonical_after)
@@ -57,12 +60,12 @@ endif()
 # cross-function BasicBlock provenance is the input to dispatch-locality repair.
 run_checked(
     "running the uninterrupted machine-flatten pipeline"
-    "${LLC}" "-load=${PLUGIN}" -mcpu=v4 -bpf-unified-spill-pipeline
+    "${BPF_CAPSULE_LD}" --passes=no-op-module -mcpu=v4 -bpf-unified-spill-pipeline
     -stop-after=bpf-machine-flatten-finalize -simplify-mir "${BEFORE}" -o "${WORK}/actual.raw.mir"
 )
 run_checked(
     "canonicalizing actual machine output"
-    "${LLC}" -mcpu=v4 -run-pass=none -simplify-mir "${WORK}/actual.raw.mir" -o "${WORK}/actual.printed.mir"
+    "${BPF_CAPSULE_LD}" -mcpu=v4 -run-pass=none -simplify-mir "${WORK}/actual.raw.mir" -o "${WORK}/actual.printed.mir"
 )
 read_normalized("${WORK}/actual.printed.mir" actual)
 file(WRITE "${WORK}/actual.mir" "${actual}")
@@ -73,7 +76,10 @@ if(NOT actual STREQUAL canonical_after)
         OUTPUT_VARIABLE difference
         ERROR_VARIABLE diff_error
     )
-    message(FATAL_ERROR "machine pipeline output differs from ${AFTER}\n${difference}${diff_error}\nactual: ${WORK}/actual.mir")
+    message(
+        FATAL_ERROR
+        "machine pipeline output differs from ${AFTER}\n${difference}${diff_error}\nactual: ${WORK}/actual.mir"
+    )
 endif()
 
 # The MIR printer does not serialize MachineBasicBlock's force-label bit.
@@ -81,6 +87,6 @@ endif()
 # a post-placement v4 jump-table target must still acquire an emitted label.
 run_checked(
     "emitting an object from the uninterrupted machine-flatten pipeline"
-    "${LLC}" "-load=${PLUGIN}" -mcpu=v4 -bpf-unified-spill-pipeline
-    -filetype=obj "${BEFORE}" -o "${WORK}/output.o"
+    "${BPF_CAPSULE_LD}" --passes=no-op-module -mcpu=v4 -bpf-unified-spill-pipeline
+    "${BEFORE}" -o "${WORK}/output.o"
 )

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Attach the Lua packet observer to one interface and print its audit events.
+// Attach the Lua packet observer to one interface and print its audit events;
+// an optional event count detaches after that many instead of on Ctrl-C.
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -137,6 +138,8 @@ static int initialize_states(struct bpf_object* object, volatile struct lua_xdp_
 }
 
 static volatile sig_atomic_t stop_requested;
+static unsigned long event_limit;
+static unsigned long events_seen;
 
 static void request_stop(int signal_number) {
     (void)signal_number;
@@ -147,13 +150,25 @@ static int print_event(void* context, void* data, size_t size) {
     (void)context;
     fwrite(data, 1, size, stdout);
     fflush(stdout);
+    if (event_limit && ++events_seen >= event_limit) {
+        stop_requested = 1;
+    }
     return 0;
 }
 
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        fprintf(stderr, "usage: lua-xdp OBSERVER INTERFACE\n");
+    if (argc != 3 && argc != 4) {
+        fprintf(stderr, "usage: lua-xdp OBSERVER INTERFACE [EVENTS]\n");
         return 2;
+    }
+    if (argc == 4) {
+        char* end = NULL;
+        errno = 0;
+        event_limit = strtoul(argv[3], &end, 10);
+        if (errno || *end || !event_limit) {
+            fprintf(stderr, "EVENTS must be a positive integer\n");
+            return 2;
+        }
     }
 
     const char* interface = argv[2];
@@ -243,7 +258,7 @@ int main(int argc, char** argv) {
     sigemptyset(&action.sa_mask);
     sigaction(SIGINT, &action, NULL);
     sigaction(SIGTERM, &action, NULL);
-    fprintf(stderr, "observing live traffic on %s; Ctrl-C detaches\n", interface);
+    fprintf(stderr, "observing live traffic on %s; %s detaches\n", interface, event_limit ? "the event count" : "Ctrl-C");
 
     while (!stop_requested) {
         poll_error = ring_buffer__poll(ring, 250);

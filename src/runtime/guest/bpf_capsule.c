@@ -14,9 +14,8 @@
 // these from application code.
 //
 //   BPF_CAPSULE_FEATURE_*
-//                       target capabilities, defined by bpf-capsule-cc from
-//                       its --kernel flag. This source gates on features,
-//                       never on kernel versions.
+//                       target capabilities selected by the build. This
+//                       source gates on features, never on kernel versions.
 //   __arena             qualifier for objects the memory model relocates.
 //
 // A program supplies its own sectioned native entry points and crosses into a
@@ -39,13 +38,10 @@
 #define BPF_CAPSULE_FEATURE_ARENA 0
 #endif
 
-// Bytes of software stack per fiber. Must be a power of two, at most 2 MiB,
-// and must equal the -bpf-fiber-stack-size the passes were given — the
-// compiler rejects a mismatch at build time. The CMake pipeline keeps the
-// two in sync from the BPF_CAPSULE_FIBER_STACK_BYTES cache variable.
-#ifndef BPF_CAPSULE_FIBER_STACK_BYTES
-#define BPF_CAPSULE_FIBER_STACK_BYTES (256u * 1024u)
-#endif
+// bpf-capsule-ld checks this private build marker against --memory. CMake
+// compiles the runtime before invoking the linker, so a direct caller must
+// not be able to combine one backend's runtime with the other backend's pass.
+const unsigned int __bpf_capsule_memory_backend = BPF_CAPSULE_FEATURE_ARENA;
 
 // Heap capacity used when the host does not call bpf_capsule_configure()
 // before load. The host-selected value replaces it; this default only sizes
@@ -107,9 +103,6 @@ struct __bpf_capsule_arena_control BPF_CAPSULE_ARENA_CONTROL_GLOBAL SEC(BPF_CAPS
 struct bpf_heap_array_value {
     uint8_t bytes[BPF_CAPSULE_MEMORY_REGION_SIZE + BPF_CAPSULE_MEMORY_REGION_PAD];
 };
-struct bpf_capsule_stack_value {
-    uint8_t bytes[BPF_CAPSULE_FIBER_STACK_BYTES];
-};
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __uint(map_flags, BPF_F_MMAPABLE);
@@ -141,7 +134,9 @@ const volatile struct __bpf_capsule_object_config BPF_CAPSULE_CONFIG_GLOBAL SEC(
     .stack_base = 0,
     .memory_end = 0,
     .fiber_count = 1,
-    .stack_bytes_per_fiber = BPF_CAPSULE_FIBER_STACK_BYTES,
+    // The linker owns the software-stack geometry and replaces this
+    // placeholder before emitting the object.
+    .stack_bytes_per_fiber = 0,
     .max_fibers = BPF_CAPSULE_MAX_FIBERS,
     .arena_image_pages = 0,
     .memory_backend = BPF_CAPSULE_FEATURE_ARENA ? BPF_CAPSULE_MEMORY_ARENA : BPF_CAPSULE_MEMORY_FIXED,
@@ -209,7 +204,8 @@ struct {
 extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control);
 #else
 extern struct bpf_heap_array_value* __bpf_capsule_stack_region(uint32_t fiber);
-extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, struct bpf_capsule_stack_value* stack_base);
+extern uint32_t __bpf_capsule_stack_offset(uint32_t fiber);
+extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, void* stack_base);
 #endif
 
 // Borrowed verifier pointers cannot be stored in maps or arena memory. Context
@@ -220,8 +216,7 @@ extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fi
 #if BPF_CAPSULE_FEATURE_ARENA
 extern int __bpf_capsule_trampoline_ctx_step(struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control);
 #else
-extern int __bpf_capsule_trampoline_ctx_step(
-    struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, struct bpf_capsule_stack_value* stack_base);
+extern int __bpf_capsule_trampoline_ctx_step(struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, void* stack_base);
 #endif
 
 // Iteration out of nothing but a bounded loop and a global function.
@@ -273,21 +268,20 @@ extern int __bpf_capsule_trampoline_ctx_step(
 #define __BPF_CAPSULE_STACK_PARAMETER
 #define __BPF_CAPSULE_STACK_ARGUMENT
 #else
-#define __BPF_CAPSULE_STACK_PARAMETER , struct bpf_capsule_stack_value* stack_base
+#define __BPF_CAPSULE_STACK_PARAMETER , void* stack_base
 #define __BPF_CAPSULE_STACK_ARGUMENT , stack_base
 #endif
 #define __BPF_CAPSULE_CONTROL_PARAMETER , struct __bpf_capsule_fiber_control* fiber_control
 #define __BPF_CAPSULE_CONTROL_ARGUMENT , fiber_control
 
 #if !BPF_CAPSULE_FEATURE_ARENA
-static __attribute__((always_inline)) struct bpf_capsule_stack_value* __bpf_capsule_stack_base(uint32_t fiber, struct __bpf_capsule_fiber_control* control) {
+static __attribute__((always_inline)) void* __bpf_capsule_stack_base(uint32_t fiber, struct __bpf_capsule_fiber_control* control) {
     struct bpf_heap_array_value* region = __bpf_capsule_stack_region(fiber);
     if (!region) {
         __bpf_capsule_stop(control, CAPSULE_ERROR_MEMORY_FAULT);
         return 0;
     }
-    uint32_t offset = (fiber * BPF_CAPSULE_FIBER_STACK_BYTES) & (BPF_CAPSULE_MEMORY_REGION_SIZE - 1u);
-    return (struct bpf_capsule_stack_value*)(region->bytes + offset);
+    return region->bytes + __bpf_capsule_stack_offset(fiber);
 }
 #endif
 
@@ -305,7 +299,7 @@ __attribute__((noinline)) int __bpf_capsule_trampoline_l1(uint32_t fiber __BPF_C
 __BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((always_inline)) int __bpf_capsule_trampoline(uint32_t fiber) {
     struct __bpf_capsule_fiber_control* fiber_control = __bpf_capsule_fiber_control(fiber);
 #if !BPF_CAPSULE_FEATURE_ARENA
-    struct bpf_capsule_stack_value* stack_base = __bpf_capsule_stack_base(fiber, fiber_control);
+    void* stack_base = __bpf_capsule_stack_base(fiber, fiber_control);
     if (!stack_base) {
         return 1;
     }
@@ -341,7 +335,7 @@ __attribute__((used, noinline)) int __bpf_capsule_trampoline_ctx_l1(
 __BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((used, always_inline)) int __bpf_capsule_trampoline_ctx(struct xdp_md* ctx, uint32_t fiber) {
     struct __bpf_capsule_fiber_control* fiber_control = __bpf_capsule_fiber_control(fiber);
 #if !BPF_CAPSULE_FEATURE_ARENA
-    struct bpf_capsule_stack_value* stack_base = __bpf_capsule_stack_base(fiber, fiber_control);
+    void* stack_base = __bpf_capsule_stack_base(fiber, fiber_control);
     if (!stack_base) {
         return 1;
     }

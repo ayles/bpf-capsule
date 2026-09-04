@@ -220,9 +220,12 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         const uint64_t addressLimit = 1ull << 32;
         uint64_t abiMagic = ConfigInteger(initial, ConfigAbiMagic, "ABI magic");
         uint64_t abiVersion = ConfigInteger(initial, ConfigAbiVersion, "ABI version");
-        if (declaredStackBytes != stackBytesPerFiber || declaredMaxFibers != maxFibers || abiMagic != BPF_CAPSULE_ABI_MAGIC ||
+        // A source runtime leaves the stack size as zero; the linker is its
+        // only owner. Synthetic/custom runtimes may provide a nonzero value as
+        // an assertion, but it must agree with the generated stack metadata.
+        if ((declaredStackBytes && declaredStackBytes != stackBytesPerFiber) || declaredMaxFibers != maxFibers || abiMagic != BPF_CAPSULE_ABI_MAGIC ||
             abiVersion != BPF_CAPSULE_ABI_VERSION) {
-            report_fatal_error("bpf-memory: linked runtime fiber ABI disagrees with the compiler stack size or fiber ceiling");
+            report_fatal_error("bpf-memory: linked runtime fiber ABI disagrees with the compiler stack geometry");
         }
         if (declaredHeapBase || declaredStackBase || declaredMemoryEnd || declaredArenaImagePages || declaredHeapReserved) {
             report_fatal_error("bpf-memory: linked runtime object layout is not in its pre-compiler state");
@@ -739,19 +742,22 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     // ordinary offsets in the unified address domain.
     void ResolveFixedStackBacking(Module& module) {
         Function* intrinsic = module.getFunction(bpf::sym::StackRegion);
-        if (!intrinsic) {
+        Function* offsetIntrinsic = module.getFunction(bpf::sym::StackOffset);
+        if (!intrinsic && !offsetIntrinsic) {
             return;
         }
         SmallVector<CallInst*> calls;
-        for (User* user : intrinsic->users()) {
-            auto* call = dyn_cast<CallInst>(user);
-            if (!call || call->getCalledFunction() != intrinsic) {
-                report_fatal_error("bpf-memory: malformed stack-region intrinsic use");
+        if (intrinsic) {
+            for (User* user : intrinsic->users()) {
+                auto* call = dyn_cast<CallInst>(user);
+                if (!call || call->getCalledFunction() != intrinsic) {
+                    report_fatal_error("bpf-memory: malformed stack-region intrinsic use");
+                }
+                calls.push_back(call);
             }
-            calls.push_back(call);
         }
         if (!SoftwareStackGlobal_ || !SoftwareStackBytes_ || !FiberStackSize_) {
-            report_fatal_error("bpf-memory: stack-region intrinsic exists without a unified software stack");
+            report_fatal_error("bpf-memory: stack-backing intrinsic exists without a unified software stack");
         }
 
         LLVMContext& ctx = module.getContext();
@@ -767,6 +773,13 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
         GlobalVariable* config = ObjectConfig(module);
         DenseMap<Function*, AllocaInst*> keys;
+
+        auto normalizeFiber = [&](IRBuilder<>& b, Value* fiber) {
+            if (isPowerOf2_64(fiberCount)) {
+                return b.CreateAnd(fiber, ConstantInt::get(i32, fiberCount - 1), "stack.fiber");
+            }
+            return b.CreateURem(fiber, ConstantInt::get(i32, fiberCount), "stack.fiber");
+        };
 
         auto keyFor = [&](Function& function) {
             AllocaInst*& key = keys[&function];
@@ -793,11 +806,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // trampoline (50 -> 215) and 28% of the measured capsule call.
             // The compile-time ceiling is what bounds the index, and the
             // stack bank starts above the direct maps, so neither is needed.
-            if (isPowerOf2_64(fiberCount)) {
-                fiber = b.CreateAnd(fiber, ConstantInt::get(i32, fiberCount - 1), "stack.fiber");
-            } else {
-                fiber = b.CreateURem(fiber, ConstantInt::get(i32, fiberCount), "stack.fiber");
-            }
+            fiber = normalizeFiber(b, fiber);
             Value* stackBaseSlot = b.CreateStructGEP(config->getValueType(), config, ConfigStackBase);
             auto* stackBase32 = b.CreateLoad(i32, stackBaseSlot, "stack.base32");
             stackBase32->setVolatile(true);
@@ -809,7 +818,32 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             call->replaceAllUsesWith(base);
             call->eraseFromParent();
         }
-        intrinsic->eraseFromParent();
+        if (intrinsic) {
+            intrinsic->eraseFromParent();
+        }
+
+        if (offsetIntrinsic) {
+            SmallVector<CallInst*> offsetCalls;
+            for (User* user : offsetIntrinsic->users()) {
+                auto* call = dyn_cast<CallInst>(user);
+                if (!call || call->getCalledFunction() != offsetIntrinsic) {
+                    report_fatal_error("bpf-memory: malformed stack-offset intrinsic use");
+                }
+                offsetCalls.push_back(call);
+            }
+            for (CallInst* call : offsetCalls) {
+                if (call->arg_size() != 1 || !call->getArgOperand(0)->getType()->isIntegerTy(32) || !call->getType()->isIntegerTy(32)) {
+                    report_fatal_error("bpf-memory: malformed stack-offset intrinsic call");
+                }
+                IRBuilder<> b(call);
+                Value* fiber = normalizeFiber(b, call->getArgOperand(0));
+                Value* offset = b.CreateMul(fiber, ConstantInt::get(i32, FiberStackSize_), "stack.byte.offset");
+                offset = b.CreateAnd(offset, ConstantInt::get(i32, span - 1), "stack.region.offset");
+                call->replaceAllUsesWith(offset);
+                call->eraseFromParent();
+            }
+            offsetIntrinsic->eraseFromParent();
+        }
     }
 
     // Complex compiler-stack addresses are uncommon, but large generated

@@ -1,10 +1,19 @@
 diff --git a/PureDOOM.h b/PureDOOM.h
 --- a/PureDOOM.h
 +++ b/PureDOOM.h
-@@ -46324,1 +46324,2 @@ void* W_CacheLumpNum(int lump, int tag)
-     byte* ptr;
+@@ -14,0 +15,6 @@
++/*
++ * Modified by the BPF Capsule contributors in 2026. The build applies this
++ * patch to PureDOOM revision 355cfbd16fac119718879239336ee2ea408886bd. The
++ * original header, this patch, and the build sources are distributed together
++ * under the GPL-2.0 terms supplied with that PureDOOM revision.
++ */
+@@ -16479,0 +16486,2 @@ void I_InitGraphics(void)
++    // malloc storage is not zero-initialized; zero it for determinism.
++    doom_memset(screens[0], 0, SCREENWIDTH * SCREENHEIGHT);
+@@ -46323,0 +46332 @@ void* W_CacheLumpNum(int lump, int tag)
 +    int length;
-@@ -46340,1 +46341,8 @@ void* W_CacheLumpNum(int lump, int tag)
+@@ -46339 +46348,8 @@ void* W_CacheLumpNum(int lump, int tag)
 -        ptr = Z_Malloc(W_LumpLength(lump), tag, &lumpcache[lump]);
 +        // The vanilla column drawer indexes up to 127 bytes from a post's
 +        // pixel start. Sparse single-patch textures can end sooner, making

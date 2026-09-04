@@ -3,16 +3,9 @@
 #include <bpf/bpf_helpers.h>
 
 #include "bpf_capsule.h"
+#include "smoke.h"
 
 char _license[] SEC("license") = "GPL";
-
-struct smoke_result {
-    int recursion;
-    int many_args;
-    int depth;
-    int cpp;
-    struct capsule_result capsule;
-};
 
 volatile struct smoke_result result SEC(".data.smoke");
 volatile int input SEC(".data.smoke") = 18;

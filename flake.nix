@@ -11,194 +11,46 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        lib = pkgs.lib;
-        llvmPkgs = pkgs.llvmPackages_23;
-        latestKernel = pkgs.linuxPackages_latest.kernel.version;
-        mkPackage = arguments: pkgs.callPackage ./package.nix ({ llvmPackages = llvmPkgs; } // arguments);
-        defaultPackage = mkPackage { };
-        mkTests = targetKernel: mkPackage {
-          inherit targetKernel;
-          buildTests = true;
+        llvmPackages = pkgs.llvmPackages_23;
+        bpfCapsule = pkgs.callPackage ./nix/bpf-capsule.nix { inherit llvmPackages; };
+        matrix = pkgs.callPackage ./nix/matrix.nix {
+          inherit llvmPackages bpfCapsule;
         };
-        mkExamples = targetKernel: mkPackage {
-          inherit targetKernel;
-          buildExamples = true;
-        };
-        exampleNames = [
-          "fib"
-          "zlib"
-          "sqlite"
-          "lua"
-          "lua-xdp"
-          "wasm3"
-          "llama2"
-          "quickjs"
-          "rust"
-          "doom"
-        ];
-        examplePackages = lib.genAttrs exampleNames (example: mkPackage {
-          inherit example;
-          targetKernel = "6.9";
-        });
-        exampleApp = package: executable: description: {
-          type = "app";
-          program = "${package}/libexec/bpf-capsule/examples/${executable}";
-          meta = { inherit description; };
-        };
-        toolApp = executable: description: {
-          type = "app";
-          program = "${defaultPackage}/bin/${executable}";
-          meta = { inherit description; };
-        };
-        llamaModel = pkgs.fetchurl {
-          url = "https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/stories260K.bin";
-          hash = "sha256-sKUH560PYmYk8XESMl5maR+QdtYi4dMnTRA9ACmfJpY=";
-        };
-        llamaQ8Model = pkgs.runCommand "stories260K-q8.bin" {
-          nativeBuildInputs = [ pkgs.python3 ];
-        } ''
-          ${pkgs.python3}/bin/python3 ${./tests/vm/quantize-llama.py} ${llamaModel} "$out"
-        '';
-        llamaTokenizer = pkgs.fetchurl {
-          url = "https://huggingface.co/karpathy/tinyllamas/resolve/0bd21da7698eaf29a0d7de3992de8a46ef624add/stories260K/tok512.bin";
-          hash = "sha256-A3yzNauyXR+p6OyuMO0qOorOkwKGLrzcBdUaa7sQwxI=";
-        };
-        freedoomArchive = pkgs.fetchurl {
-          url = "https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip";
-          hash = "sha256-P5smTz485QO0+39r3LH0Gdk8e1RvTfPodN2Hjbloj1k=";
-        };
-        doomWad = pkgs.runCommand "bpf-capsule-freedoom1-wad" {
-          nativeBuildInputs = [ pkgs.unzip ];
-        } ''
-          mkdir -p "$out"
-          unzip -p ${freedoomArchive} 'freedoom-0.13.0/freedoom1.wad' > "$out/freedoom1.wad"
-          echo '7323bcc168c5a45ff10749b339960e98314740a734c30d4b9f3337001f9e703d  '"$out/freedoom1.wad" | sha256sum --check --status
-        '';
-        testPackages = {
-          tests-515 = mkTests "5.15";
-          tests-66 = mkTests "6.6";
-          tests-69 = mkTests "6.9";
-          tests-70 = mkTests "7.0";
-          tests-71 = mkTests "7.1";
-        };
-        benchmarkRunner = pkgs.writeShellApplication {
-          name = "bpf-capsule-benchmarks";
-          runtimeInputs = with pkgs; [
-            coreutils
-            jq
-            util-linux
-          ];
-          text = ''
-            if (( $# > 1 )); then
-              echo "usage: bpf-capsule-benchmarks [OUTPUT.json]" >&2
-              exit 2
-            fi
-            output="''${1:-benchmark-results/all.json}"
-            scratch=$(mktemp -d)
-            trap 'rm -r "$scratch"' EXIT
-            artifact=${testPackages.tests-69}
-            for name in smoke_benchmark lua_benchmark overhead_benchmark; do
-              sudo taskset -c 0 env \
-                BPF_CAPSULE_LUA_SCRIPT="$artifact/libexec/bpf-capsule/benchmarks/lua-script.lua" \
-                "$artifact/libexec/bpf-capsule/benchmarks/$name" \
-                --benchmark_min_time=0.1s \
-                --benchmark_out="$scratch/$name.json" \
-                --benchmark_out_format=json
-            done
-            mkdir -p "$(dirname "$output")"
-            jq -s '.[0] * {benchmarks: (map(.benchmarks) | add)}' \
-              "$scratch"/*_benchmark.json > "$output"
-            echo "$output"
-          '';
-        };
-        vmCheck = targetKernel: kernelPackages: artifacts: arena:
-          import ./tests/vm/check.nix {
-            inherit pkgs targetKernel kernelPackages artifacts arena;
-          };
-        exampleVmCheck = targetKernel: kernelPackages: examples: arena:
-          import ./tests/vm/examples.nix {
-            inherit
-              pkgs
-              targetKernel
-              kernelPackages
-              examples
-              arena
-              llamaModel
-              llamaQ8Model
-              llamaTokenizer
-              doomWad
-              ;
-          };
+        benchmarks = pkgs.callPackage ./nix/benchmarks.nix { suite = matrix.benchmarkSuite; };
       in
       {
         packages = {
-          default = defaultPackage;
-          examples-515 = mkExamples "5.15";
-          examples-69 = mkExamples "6.9";
-        } // testPackages // examplePackages;
-
-        apps = {
-          bpf-capsule-cc = toolApp "bpf-capsule-cc" "Compile C or C++ to Capsule bitcode";
-          bpf-capsule-ld = toolApp "bpf-capsule-ld" "Link Capsule bitcode into a BPF object";
-          fib = exampleApp examplePackages.fib "fib/fib" "Run the recursive Fibonacci example";
-          zlib = exampleApp examplePackages.zlib "zlib/zlib" "Run zlib inside BPF";
-          sqlite = exampleApp examplePackages.sqlite "sqlite/sqlite" "Run SQLite inside BPF";
-          lua = exampleApp examplePackages.lua "lua/lua" "Run Lua inside BPF";
-          lua-xdp = exampleApp examplePackages.lua-xdp "lua-xdp/lua-xdp" "Attach the Lua XDP observer";
-          wasm3 = exampleApp examplePackages.wasm3 "wasm3/wasm3" "Run wasm3 inside BPF";
-          llama2 = exampleApp examplePackages.llama2 "llama2/llama2" "Run llama2.c inside BPF";
-          llama2-q8 = exampleApp examplePackages.llama2 "llama2/llama2q" "Run quantized llama2.c inside BPF";
-          quickjs = exampleApp examplePackages.quickjs "quickjs/quickjs" "Run QuickJS inside BPF";
-          rust = exampleApp examplePackages.rust "rust/rust" "Run the no_std Rust example";
-          doom = exampleApp examplePackages.doom "doom/doom" "Run PureDOOM inside BPF";
-          benchmarks = {
-            type = "app";
-            program = "${benchmarkRunner}/bin/bpf-capsule-benchmarks";
-            meta.description = "Run the in-kernel benchmark suite";
+          default = bpfCapsule;
+          bpf-capsule = bpfCapsule;
+          bpf-capsule-cc = bpfCapsule // {
+            pname = "bpf-capsule-cc";
+            name = "bpf-capsule-cc-${bpfCapsule.version}";
           };
-        };
+          bpf-capsule-ld = bpfCapsule // {
+            pname = "bpf-capsule-ld";
+            name = "bpf-capsule-ld-${bpfCapsule.version}";
+          };
+          llama2-q8 = matrix.examples.llama2 // {
+            pname = "llama2-q8";
+            name = "llama2-q8-${matrix.examples.llama2.version}";
+          };
+          inherit benchmarks;
+        }
+        // matrix.examples;
 
-        checks = {
-          build-515 = testPackages.tests-515;
-          build-66 = testPackages.tests-66;
-          build-69 = testPackages.tests-69;
-          build-70 = testPackages.tests-70;
-          build-71 = testPackages.tests-71;
-          examples-515 = mkExamples "5.15";
-          examples-69 = mkExamples "6.9";
-          examples-vm-515 = exampleVmCheck "5.15" pkgs.linuxPackages_5_15 (mkExamples "5.15") false;
-          examples-vm-69 = exampleVmCheck "6.9" pkgs.linuxPackages_latest (mkExamples "6.9") true;
-          vm-515 = vmCheck "5.15" pkgs.linuxPackages_5_15 testPackages.tests-515 false;
-          vm-66 = vmCheck "6.6" pkgs.linuxPackages_6_6 testPackages.tests-66 false;
-          # The 6.9 and 7.0 compiler profiles exercise different arena
-          # legalization pipelines. Both run on the pinned current kernel;
-          # see tests/vm/README.md for the aarch64 compatibility reason.
-          vm-69 = vmCheck "6.9" pkgs.linuxPackages_latest testPackages.tests-69 true;
-          vm-70 = vmCheck "7.0" pkgs.linuxPackages_latest testPackages.tests-70 true;
-        } // lib.optionalAttrs (lib.versionAtLeast latestKernel "7.1") {
-          vm-71 = vmCheck "7.1" pkgs.linuxPackages_latest testPackages.tests-71 true;
+        checks = matrix.checks // {
+          format = pkgs.callPackage ./nix/format.nix { inherit llvmPackages; };
         };
 
         devShells.default = pkgs.mkShell {
-          nativeBuildInputs = with pkgs; [
-            cmake
-            ninja
-            pkg-config
-            bpftools
-            llvmPkgs.libllvm
-            llvmPkgs.clang-unwrapped
-            llvmPkgs.lld
-            cargo
-            rustc
-            csmith
-            python3
+          inputsFrom = [
+            bpfCapsule
+            matrix.checks.suite-default
+            matrix.benchmarkSuite
+            matrix.examples.wasm3
+            matrix.examples.rust
           ];
-          buildInputs = with pkgs; [
-            libbpf
-            gtest
-            gbenchmark
-            zlib
-          ];
+          packages = [ pkgs.gersemi ];
         };
       }
     );

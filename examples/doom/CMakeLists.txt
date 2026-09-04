@@ -1,112 +1,62 @@
 # SPDX-License-Identifier: GPL-2.0-only
-set(PUREDOOM_SOURCE_DIR
-    ""
-    CACHE PATH "use an existing PureDOOM source tree"
-)
-if(NOT PUREDOOM_SOURCE_DIR OR NOT EXISTS "${PUREDOOM_SOURCE_DIR}/PureDOOM.h")
-    fetch_example_source(
-        fetched_puredoom
-        bpf_capsule_puredoom
-        GIT_REPOSITORY
-        https://github.com/Daivuk/PureDOOM.git
-        GIT_TAG
-        355cfbd16fac119718879239336ee2ea408886bd
-        MARKER
-        PureDOOM.h
-    )
-    if(NOT fetched_puredoom)
-        message(STATUS "Doom example: PureDOOM source unavailable, skipping")
-        return()
-    endif()
-    set(PUREDOOM_SOURCE_DIR "${fetched_puredoom}")
-endif()
-set(PUREDOOM_UPSTREAM_SOURCE_DIR "${PUREDOOM_SOURCE_DIR}")
+cmake_minimum_required(VERSION 3.24)
+project(BpfCapsuleDoom LANGUAGES C)
 
-# PureDOOM leaves its framebuffer uninitialized, can over-read sparse cached
-# lumps in the vanilla column drawer, and confuses game mode with mission when
-# choosing TNT and Plutonia skies. Patch a private build-tree copy so a
+include(FetchContent)
+include(GNUInstallDirs)
+
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+find_package(BpfCapsule CONFIG REQUIRED)
+find_package(Patch REQUIRED)
+
+FetchContent_Declare(
+    puredoom
+    GIT_REPOSITORY https://github.com/Daivuk/PureDOOM.git
+    GIT_TAG 355cfbd16fac119718879239336ee2ea408886bd
+    GIT_SHALLOW FALSE
+)
+FetchContent_MakeAvailable(puredoom)
+
+# PureDOOM leaves its framebuffer uninitialized and can over-read sparse cached
+# lumps in the vanilla column drawer. Patch a private build-tree copy so a
 # supplied checkout is never modified, the distributed changes are identified,
 # and identical inputs render byte-identical frames.
-set(PUREDOOM_PATCHES
-    "${CMAKE_CURRENT_SOURCE_DIR}/patches/0000-license-and-modification-notice.patch"
-    "${CMAKE_CURRENT_SOURCE_DIR}/patches/0001-initialize-framebuffer.patch"
-    "${CMAKE_CURRENT_SOURCE_DIR}/patches/0002-pad-cached-lumps.patch"
-    "${CMAKE_CURRENT_SOURCE_DIR}/patches/0003-select-mission-sky.patch"
+set(patch_dir "${CMAKE_CURRENT_SOURCE_DIR}/patches")
+# gersemi: off
+FetchContent_Populate(
+    puredoom_patched
+    URL "${puredoom_SOURCE_DIR}"
+    PATCH_COMMAND
+        "${Patch_EXECUTABLE}" --quiet --batch --read-only=ignore -p1 -i "${patch_dir}/puredoom.patch"
 )
-set_property(
-    DIRECTORY
-    APPEND
-    PROPERTY CMAKE_CONFIGURE_DEPENDS ${PUREDOOM_PATCHES}
-)
-set(PUREDOOM_BUILD_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/puredoom-source")
-file(MAKE_DIRECTORY "${PUREDOOM_BUILD_SOURCE_DIR}")
-configure_file(
-    "${PUREDOOM_SOURCE_DIR}/PureDOOM.h" "${PUREDOOM_BUILD_SOURCE_DIR}/PureDOOM.h" COPYONLY
-)
-file(
-    CHMOD "${PUREDOOM_BUILD_SOURCE_DIR}/PureDOOM.h"
-    PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ
-)
-find_program(PATCH_EXECUTABLE patch REQUIRED)
-foreach(PUREDOOM_PATCH IN LISTS PUREDOOM_PATCHES)
-    execute_process(
-        COMMAND "${PATCH_EXECUTABLE}" --quiet --batch -p1 -i "${PUREDOOM_PATCH}"
-        WORKING_DIRECTORY "${PUREDOOM_BUILD_SOURCE_DIR}"
-        RESULT_VARIABLE PUREDOOM_PATCH_RESULT
-    )
-    if(NOT PUREDOOM_PATCH_RESULT EQUAL 0)
-        message(FATAL_ERROR "Doom example: cannot apply ${PUREDOOM_PATCH}")
-    endif()
-endforeach()
-set(PUREDOOM_SOURCE_DIR "${PUREDOOM_BUILD_SOURCE_DIR}")
-
-bpf_capsule_bitcode(
-    DOOM_BITCODE
-    SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/doom_bpf.c ${BPF_CAPSULE_LIBC_DIR}/freestanding.c
-            ${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c ${BPF_CAPSULE_LIBC_DIR}/softfloat.c
-    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} ${PUREDOOM_SOURCE_DIR} ${BPF_CAPSULE_LIBC_DIR}
-                        ${BPF_CAPSULE_LIBC_DIR}/include
+# gersemi: on
+bpf_capsule_object(
+    doom_bpf
+    OUTPUT doom.bpf.o
+    SOURCES doom_bpf.c
+    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} ${puredoom_patched_SOURCE_DIR}
     # Upstream intentionally uses assignment in its WAD-probing conditions.
     COMPILE_OPTIONS -Wno-parentheses -g
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
 )
+bpf_capsule_skeleton(doom_skeleton OUTPUT doom.skel.h OBJECT "${doom_bpf}" NAME doom)
 
-bpf_capsule_object(
-    doom_bpf_output
-    OUTPUT doom_bpf_lib.o
-    BITCODE ${DOOM_BITCODE}
-)
-bpf_capsule_skeleton(
-    doom_skeleton
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/doom.skel.h"
-    OBJECT "${CMAKE_CURRENT_BINARY_DIR}/doom_bpf_lib.o"
-    NAME doom
-    DEPENDS doom_bpf_output
-)
-
-add_executable(doom doom.c bpf_ctrl.h "${CMAKE_CURRENT_BINARY_DIR}/doom.skel.h")
-target_include_directories(
-    doom PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS}
-                 "${CMAKE_CURRENT_SOURCE_DIR}"
-)
+add_executable(doom doom.c)
 target_compile_options(doom PRIVATE -Wall -Wextra)
-target_link_libraries(doom ${BPF_CAPSULE_HOST_TARGET})
-add_dependencies(doom doom_skeleton)
+target_link_libraries(doom PRIVATE BpfCapsule::host doom_skeleton)
 
-install(TARGETS doom RUNTIME DESTINATION libexec/bpf-capsule/examples/doom)
-if(BPF_CAPSULE_INSTALL_TEST_ARTIFACTS)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/doom_bpf_lib.o"
-            DESTINATION libexec/bpf-capsule/examples/doom
-    )
-endif()
-install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION share/licenses/bpf-capsule-doom)
+install(TARGETS doom RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES "${doom_bpf}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule-doom")
 install(
-    FILES "${PUREDOOM_UPSTREAM_SOURCE_DIR}/PureDOOM.h"
-          doom.c
-          doom_bpf.c
-          bpf_ctrl.h
-          CMakeLists.txt
-          LICENSE
-    DESTINATION share/bpf-capsule/examples/doom/source
+    FILES "${puredoom_SOURCE_DIR}/PureDOOM.h" doom.c doom_bpf.c bpf_ctrl.h CMakeLists.txt LICENSE
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/bpf-capsule/examples/doom/source"
 )
-install(DIRECTORY patches/ DESTINATION share/bpf-capsule/examples/doom/source/patches
-        FILES_MATCHING PATTERN "*.patch")
+install(
+    DIRECTORY patches/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/bpf-capsule/examples/doom/source/patches"
+    FILES_MATCHING
+    PATTERN "*.patch"
+)

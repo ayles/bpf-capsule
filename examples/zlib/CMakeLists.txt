@@ -1,67 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # In-kernel zlib: stock zlib sources (inflate side) through the standard
-# pipeline. A caller can override the pinned fetch with ZLIB_BPF_SOURCE_DIR.
-set(ZLIB_BPF_SOURCE_DIR
-    ""
-    CACHE PATH "use an existing zlib source tree"
+# pipeline. The same source tree supplies the native compressor in the host.
+cmake_minimum_required(VERSION 3.24)
+project(BpfCapsuleZlib LANGUAGES C)
+
+include(FetchContent)
+include(GNUInstallDirs)
+
+set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+find_package(BpfCapsule CONFIG REQUIRED)
+
+set(ZLIB_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZLIB_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ZLIB_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    zlib
+    GIT_REPOSITORY https://github.com/madler/zlib.git
+    GIT_TAG da607da739fa6047df13e66a2af6b8bec7c2a498
+    GIT_SHALLOW FALSE
 )
-if(NOT ZLIB_BPF_SOURCE_DIR OR NOT EXISTS "${ZLIB_BPF_SOURCE_DIR}/inflate.c")
-    fetch_example_source(
-        fetched_zlib
-        bpf_capsule_zlib
-        GIT_REPOSITORY
-        https://github.com/madler/zlib.git
-        GIT_TAG
-        da607da739fa6047df13e66a2af6b8bec7c2a498
-        MARKER
-        inflate.c
-    )
-    set(ZLIB_BPF_SOURCE_DIR "${fetched_zlib}")
-endif()
+FetchContent_MakeAvailable(zlib)
 
 set(ZLIB_SRC
-    ${ZLIB_BPF_SOURCE_DIR}/inflate.c ${ZLIB_BPF_SOURCE_DIR}/inftrees.c
-    ${ZLIB_BPF_SOURCE_DIR}/inffast.c ${ZLIB_BPF_SOURCE_DIR}/adler32.c
-    ${ZLIB_BPF_SOURCE_DIR}/crc32.c ${ZLIB_BPF_SOURCE_DIR}/zutil.c
-)
-
-bpf_capsule_bitcode(
-    ZLIB_BC
-    SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/zlib_bpf.c ${ZLIB_SRC}
-    INCLUDE_DIRECTORIES ${BPF_CAPSULE_LIBC_DIR}/include ${ZLIB_BPF_SOURCE_DIR}
-    COMPILE_DEFINITIONS Z_SOLO
-    COMPILE_OPTIONS -g
+    ${zlib_SOURCE_DIR}/inflate.c
+    ${zlib_SOURCE_DIR}/inftrees.c
+    ${zlib_SOURCE_DIR}/inffast.c
+    ${zlib_SOURCE_DIR}/adler32.c
+    ${zlib_SOURCE_DIR}/crc32.c
+    ${zlib_SOURCE_DIR}/zutil.c
 )
 
 bpf_capsule_object(
-    zlib_bpf_lib_output
-    OUTPUT zlib_bpf_lib.o
-    BITCODE ${ZLIB_BC}
+    zlib_bpf
+    OUTPUT zlib.bpf.o
+    SOURCES zlib_bpf.c ${ZLIB_SRC}
+    INCLUDE_DIRECTORIES ${zlib_SOURCE_DIR}
+    COMPILE_DEFINITIONS Z_SOLO
+    COMPILE_OPTIONS -g
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
 )
-bpf_capsule_skeleton(
-    zlib_skeleton
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/zlib.skel.h"
-    OBJECT "${CMAKE_CURRENT_BINARY_DIR}/zlib_bpf_lib.o"
-    NAME zlib
-    DEPENDS zlib_bpf_lib_output
-)
+bpf_capsule_skeleton(zlib_skeleton OUTPUT zlib.skel.h OBJECT "${zlib_bpf}" NAME zlib)
 
-find_package(ZLIB REQUIRED)
-
-add_executable(zlib zlib_host.c "${CMAKE_CURRENT_BINARY_DIR}/zlib.skel.h")
-target_include_directories(zlib PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" ${BPF_CAPSULE_INCLUDE_DIRS})
+add_executable(zlib zlib_host.c)
 target_compile_options(zlib PRIVATE -Wall -Wextra)
-target_link_libraries(zlib PRIVATE ${BPF_CAPSULE_HOST_TARGET} ZLIB::ZLIB)
-add_dependencies(zlib zlib_skeleton)
+target_link_libraries(zlib PRIVATE BpfCapsule::host zlib_skeleton ZLIB::ZLIBSTATIC)
 
-install(TARGETS zlib RUNTIME DESTINATION libexec/bpf-capsule/examples/zlib)
-if(BPF_CAPSULE_INSTALL_TEST_ARTIFACTS)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/zlib_bpf_lib.o"
-            DESTINATION libexec/bpf-capsule/examples/zlib
-    )
-endif()
+install(TARGETS zlib RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES "${zlib_bpf}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(
-    FILES "${ZLIB_BPF_SOURCE_DIR}/LICENSE"
-    DESTINATION share/licenses/bpf-capsule-examples
+    FILES "${zlib_SOURCE_DIR}/LICENSE"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule-examples"
     RENAME zlib-LICENSE
 )

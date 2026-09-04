@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   test:
-    name: Nix test matrix
+    name: Nix checks (x86-64)
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -44,7 +44,7 @@ jobs:
       - name: Publish benchmark summary
         uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba
         with:
-          name: BPF Capsule
+          name: BPF Capsule (${{ runner.arch }})
           tool: googlecpp
           output-file-path: benchmark-results/all.json
           external-data-json-path: benchmark-cache/data.json

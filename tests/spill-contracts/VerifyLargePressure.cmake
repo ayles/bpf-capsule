@@ -5,23 +5,33 @@ foreach(required LLVM_READELF LLVM_OBJDUMP OBJECT)
     endif()
 endforeach()
 
-execute_process(COMMAND "${LLVM_READELF}" --relocations "${OBJECT}"
-    RESULT_VARIABLE result OUTPUT_VARIABLE relocations ERROR_VARIABLE error)
+execute_process(
+    COMMAND "${LLVM_READELF}" --relocations "${OBJECT}"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE relocations
+    ERROR_VARIABLE error
+)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "cannot inspect ${OBJECT}: ${error}")
 endif()
 if(relocations MATCHES "bpf_spill_scratch")
     message(FATAL_ERROR "large-pressure object revived the removed spill-scratch map")
 endif()
-if(NOT relocations MATCHES "bpf_call_stack"
-   AND NOT relocations MATCHES "bpf_capsule_arena_control"
-   AND NOT relocations MATCHES "heap[0-9]"
-   AND NOT relocations MATCHES "bpf_heap_array")
+if(
+    NOT relocations MATCHES "bpf_call_stack"
+    AND NOT relocations MATCHES "bpf_capsule_arena_control"
+    AND NOT relocations MATCHES "heap[0-9]"
+    AND NOT relocations MATCHES "bpf_heap_array"
+)
     message(FATAL_ERROR "large-pressure object has no unified-memory backing")
 endif()
 
-execute_process(COMMAND "${LLVM_OBJDUMP}" --disassemble "${OBJECT}"
-    RESULT_VARIABLE result OUTPUT_VARIABLE disassembly ERROR_VARIABLE error)
+execute_process(
+    COMMAND "${LLVM_OBJDUMP}" --disassemble "${OBJECT}"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE disassembly
+    ERROR_VARIABLE error
+)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "cannot disassemble ${OBJECT}: ${error}")
 endif()

@@ -46,8 +46,8 @@ int main(void) {
     if (!ok) {
         // Name the failure instead of only failing. A larger input than the
         // single in-kernel drive span would report "pending" here: this
-        // example has no drain entry on purpose — see expr_drain in
-        // examples/standalone for the continuation loop.
+        // example has no drain entry on purpose. See run_to_completion in
+        // examples/zlib/zlib_host.c for the continuation loop.
         if (error) {
             perror("run");
         } else if (state->result.status == CAPSULE_EXITED && state->result.code < 0) {

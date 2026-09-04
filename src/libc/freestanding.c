@@ -288,11 +288,19 @@ char* strerror(int e) {
 
 // ------------------------------------------------------------------ allocator
 //
-// Allocation is TLSF (see thirdparty/tlsf/): two-level segregated
+// Allocation uses the upstream TLSF two-level segregated
 // fit and O(1) malloc/free over the load-time-sized Capsule heap.
 #include "tlsf.h"
 
 static tlsf_t fs_tlsf;
+
+#ifndef BPF_CAPSULE_FEATURE_FULL_ATOMICS
+#define BPF_CAPSULE_FEATURE_FULL_ATOMICS 0
+#endif
+
+// bpf-capsule-ld checks this private build marker against --allocator-lock.
+// It disappears with the rest of unused libc state during whole-program DCE.
+const unsigned int __bpf_capsule_allocator_lock_mode = BPF_CAPSULE_FEATURE_FULL_ATOMICS;
 
 // Modern BPF JITs implement compare-exchange. Keep the mutex in native map
 // storage so taking it is one BPF atomic rather than a HASH update followed

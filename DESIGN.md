@@ -17,9 +17,9 @@ repeat it. The compiler transforms the whole program into bounded regions
 plus persistent state that records "where was I". Execution runs one region,
 stores the resume point, and returns; a driver re-enters for the next region.
 The verifier sees only bounded paths through this machinery. Unboundedness
-lives in repetition — inside one
-BPF invocation through constant-bound driver loops, and across invocations
-through host-resumable continuations. In compiler terms it is a
+lives in repetition — inside one BPF invocation through constant-bound driver
+loops, and across invocations through host-resumable continuations. In compiler
+terms it is a
 whole-program continuation-passing/coroutine transform with the
 continuation stored in memory instead of on a call stack.
 
@@ -85,16 +85,33 @@ process:
   entire unbacked remainder are PROT_NONE, so a stray dereference of any
   capsule-shaped pointer faults instead of aliasing unrelated memory.
 
-The two tiers differ only in what backs the window:
+The two tiers differ only in what backs the window. Availability is a property
+of both the kernel and its JIT: x86-64 gained arena support in Linux 6.9 and
+arm64 in 6.10.
 
-- **Arena tier (kernel >= 6.9)**: the window becomes the arena's
+| Kernel floor | x86-64 memory | arm64 memory | BPF CPU | Region dispatch |
+| --- | --- | --- | --- | --- |
+| 5.15 | fixed maps | fixed maps | v3 | compare tree |
+| 6.6 | fixed maps | fixed maps | v4 | compare tree |
+| 6.9 | `bpf_arena`, signed-load lowering | fixed maps | v4 | compare tree |
+| 6.10 | `bpf_arena`, signed-load lowering | `bpf_arena`, signed-load lowering | v4 | compare tree |
+| 7.0 | `bpf_arena` | `bpf_arena` | v4 | compare tree |
+| 7.1 | `bpf_arena` | `bpf_arena` | v4 | instruction-array `gotox` |
+
+Nix maps these kernel/JIT profiles to explicit linker capabilities in
+[`nix/target-profile.nix`](nix/target-profile.nix); the compiler drivers contain
+no kernel-version table.
+
+- **Arena tier**: the window becomes the arena's
   kernel-pinned `user_vm_start` (libbpf maps the arena into it with
   MAP_FIXED at load). Guest accesses are single instructions; host access
   is plain memcpy through the same addresses.
-- **Fixed tier (5.15–6.8)**: memory is stitched from 2MiB map-value
-  regions (direct `.data` maps plus one ARRAY map, each with an 8-byte
-  shadow suffix so unaligned loads may cross a region boundary), accessed
-  through generated accessor subprograms that recover the offset by
+- **Fixed tier**: on targets without arena support, memory is stitched from
+  2MiB map-value regions: direct `.data` maps carry an 8-byte shadow suffix,
+  while each overflow ARRAY entry carries a 64KiB pad whose first 8 bytes are
+  the shadow. Unaligned loads may therefore cross a region boundary, and the
+  ARRAY stride stays page-aligned on 4KiB, 16KiB, and 64KiB hosts. Regions are
+  accessed through generated accessor subprograms that recover the offset by
   truncation and switch on `offset >> 21`. `bpf_capsule_initialize()`
   assembles a PROT_READ view of the regions inside the window, so
   guest-published pointers dereference on the host as-is (writes go
@@ -133,8 +150,7 @@ compiler-assigned resume-point index, never an address, and doubles as the
 lifecycle word. `pc == 0` means that a fiber is idle, so a fresh zero-filled
 map is already a valid pool, while `BPF_CAPSULE_PC_DONE` marks a computation
 complete but not yet reaped. `sp` and `fp` hold full based pointers — the same
-representation
-everything else uses; the frame anchor on the arena tier is one
+representation everything else uses; the frame anchor on the arena tier is one
 `inttoptr` of the loaded `fp`. `{status, code}` is the terminal event:
 exits and yields publish both fields with one 64-bit store, and every
 legal reader is ordered behind that store by program order or by the
@@ -204,10 +220,11 @@ resolved calls, bounded body and native frame — or fail the build naming
 the reason. Proven functions compile as ordinary global BPF subprograms:
 plain call cost, and the whole call completes inside a single BPF
 invocation, which makes holding a lock across one legal. The runtime's
-allocator is the canonical user: a native compare-exchange lease, an O(1)
-TLSF metadata operation, release — atomic with respect to suspension —
-while the managed `malloc()` wrapper retries (and may suspend) around
-`BUSY`, so waiting happens without the lock.
+allocator is the canonical user: a native compare-exchange lease on capable
+JITs (a map lease below the 6.9 profile), an O(1) TLSF metadata operation,
+release — atomic with respect to suspension — while the managed `malloc()`
+wrapper retries (and may suspend) around `BUSY`, so waiting happens without
+the lock.
 
 Function classes are declared by explicit attribute, never inferred from
 names; symbol names are link-time contracts only.
@@ -247,16 +264,18 @@ logical phases:
    arena backend, materializes based pointers and function tokens, records
    initializer fixups, and emits fixed-tier accessors where required. Late
    target passes handle signed loads, atomic markers, shifts, jump tables, and
-   BTF according to the selected profile.
+   BTF according to the selected capabilities.
 6. **Generate BPF machine code.** A machine-level budget pass proves every
    native BPF call chain, post-register-allocation spill relocation moves
    eligible scalar overflow into the fiber stack, and MachineFlatten joins
    temporary allocation units into their output roots before final assembly
    and BTF.
 
-The exact pass spelling and target composition live in
-[`tools/bpf-capsule-ld/main.cpp`](tools/bpf-capsule-ld/main.cpp); executable
-behavioral contracts live under [`tests/pass-contracts`](tests/pass-contracts/).
+The exact pass spelling lives in
+[`tools/bpf-capsule-ld/main.cpp`](tools/bpf-capsule-ld/main.cpp); Nix maps a
+kernel floor and JIT architecture to explicit capabilities in
+[`nix/target-profile.nix`](nix/target-profile.nix). Executable behavioral
+contracts live under [`tests/pass-contracts`](tests/pass-contracts/).
 
 ## Stackify: regions, loops, dispatch
 
@@ -289,19 +308,20 @@ The final owners are **merge roots**, which are real BPF subprograms. A small
 verifier-ABI class merges directly into its public step. For a large class, the
 compiler derives a balanced power-of-two root count from total lowered size,
 capped by the units and remaining kernel function slots. This is necessary
-because the kernel's stack-liveness fixed point
-revisits the whole containing subprogram as new stack marks appear; one huge
+because the kernel's stack-liveness fixed point revisits the whole containing
+subprogram as new stack marks appear; one huge
 root can therefore load far more slowly without reducing exploration work.
 Applications do not select allocation-unit or root counts.
 
-On profiles before Linux 7.1, the bounded driver enters a public step and a
-balanced compare tree selects the region. Objects with multiple allocation
-units first map the PC to its owning unit; a large verifier-ABI class also adds
-one real root call between the public step and the region tree. The 5.15
-profile shards very large compare trees to stay within its branch range. The
-7.1 profile instead dispatches the PC through an instruction array and
-`gotox`, without the ownership table. An explicit `*_ctx` boundary uses a
-separate typed step. Managed code reads its hidden argument through
+Without the indirect-jump capability, the bounded driver enters a public step
+and a balanced compare tree selects the region. Objects with multiple
+allocation units first map the PC to its owning unit; a large verifier-ABI
+class also adds one real root call between the public step and the region
+tree. CPU v3 targets shard very large compare trees to stay within the BPF
+branch range. A target with indirect jumps instead dispatches the PC through
+an instruction array and `gotox`, without the ownership table. An explicit
+`*_ctx` boundary uses a separate typed step. Managed code reads its hidden
+argument through
 `capsule_borrowed_ctx()`; the compiler rematerializes that accessor in each
 region that uses it, so the context remains in BPF registers or native spills
 and is never serialized into Capsule memory. Pointers derived from the context
@@ -324,7 +344,7 @@ proof.
 | 8 call frames | source call depth becomes software frames; native runtime and root calls receive a separate machine-level budget proof |
 | 256 subprograms | only roots, runtime and proven natives are real subprograms; region functions dissolve in machine-flatten |
 | Typed pointers only | managed pointers are integers to the verifier, gaining access only through accessors (fixed) or licensed arena casts; code and data are disjoint 64-bit spans of one window |
-| No FP, no i128 | bit-exact soft-float; expand-i128 |
+| No FP, no i128 | software floating-point lowering; expand-i128 |
 | Termination | every invocation provably ends; unboundedness is repetition via continuations |
 
 ## Cost

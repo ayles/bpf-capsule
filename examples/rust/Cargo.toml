@@ -10,7 +10,8 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
-bpf-capsule-rt = { path = "../../src/rust/bpf-capsule-rt", features = ["alloc"] }
+# Resolved to the SDK's copy by bpf_capsule_rust_bitcode (a Cargo config patch).
+bpf-capsule-rt = { version = "0.1.0", features = ["alloc"] }
 
 [profile.release]
 panic = "abort"

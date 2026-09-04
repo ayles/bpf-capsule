@@ -1,9 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # A rejected post-selection state is still a readable contract: first prove
-# the checked-in MIR is llc's canonical spelling, then require a clean pass
-# diagnostic rather than an LLVM abort/backtrace.
+# the checked-in MIR is canonical, then require a clean pass diagnostic rather
+# than an LLVM abort/backtrace.
 
-foreach(required LLC PLUGIN PASS BEFORE ERRORS WORK)
+foreach(
+    required
+    BPF_CAPSULE_LD
+    PASS
+    BEFORE
+    ERRORS
+    WORK
+)
     if(NOT DEFINED ${required} OR "${${required}}" STREQUAL "")
         message(FATAL_ERROR "RunMirDiagnosticCase.cmake needs -D${required}=...")
     endif()
@@ -11,9 +18,11 @@ endforeach()
 
 file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
-execute_process(COMMAND "${LLC}" "-load=${PLUGIN}" -run-pass=none -simplify-mir
-    "${BEFORE}" -o "${WORK}/before.printed.mir"
-    RESULT_VARIABLE result ERROR_VARIABLE error)
+execute_process(
+    COMMAND "${BPF_CAPSULE_LD}" -run-pass=none -simplify-mir "${BEFORE}" -o "${WORK}/before.printed.mir"
+    RESULT_VARIABLE result
+    ERROR_VARIABLE error
+)
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "cannot canonicalize MIR ${BEFORE}: ${error}")
 endif()
@@ -26,7 +35,7 @@ if(NOT recorded STREQUAL canonical)
     message(FATAL_ERROR "${BEFORE} is not canonical; canonical form: ${WORK}/before.canonical.mir")
 endif()
 
-set(command "${LLC}" "-load=${PLUGIN}" "-run-pass=${PASS}" -simplify-mir)
+set(command "${BPF_CAPSULE_LD}" "-run-pass=${PASS}" -simplify-mir)
 if(DEFINED EXTRA_ARG AND NOT "${EXTRA_ARG}" STREQUAL "")
     string(REPLACE "|" ";" extra_args "${EXTRA_ARG}")
     list(APPEND command ${extra_args})

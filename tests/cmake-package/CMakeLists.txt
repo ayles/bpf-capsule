@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-cmake_minimum_required(VERSION 3.21)
+# A complete consumer of an installed BPF Capsule package: C and C++ guest
+# sources through cc and ld, a libbpf skeleton, and a host executable that
+# embeds it. The README points here as the complete example, and the test suite
+# configures and builds it against the installed SDK for every target profile.
+# Nothing here loads BPF, so it needs no privilege.
+cmake_minimum_required(VERSION 3.24)
 project(BpfCapsulePackageSmoke C CXX)
 
 find_package(BpfCapsule CONFIG REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LibBpf libbpf>=1.4.0 REQUIRED IMPORTED_TARGET)
-set(BPF_CAPSULE_LIBBPF_TARGET PkgConfig::LibBpf)
 
-bpf_capsule_bitcode(smoke_bc
-    SOURCES smoke.c smoke_cpp.cpp
-    COMPILE_OPTIONS -g)
-bpf_capsule_object(smoke_bpf
+bpf_capsule_object(
+    smoke_bpf
     OUTPUT smoke.bpf.o
-    BITCODE ${smoke_bc})
-add_custom_target(package_smoke ALL DEPENDS smoke_bpf)
+    SOURCES smoke.c smoke_cpp.cpp
+    COMPILE_OPTIONS -g
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
+)
+bpf_capsule_skeleton(smoke_skeleton OUTPUT smoke.skel.h OBJECT "${smoke_bpf}" NAME smoke)
 
 add_executable(host_smoke host.c)
-target_link_libraries(host_smoke PRIVATE BpfCapsule::host)
+target_link_libraries(host_smoke PRIVATE BpfCapsule::host smoke_skeleton)

@@ -18,7 +18,9 @@ struct wasm3_bpf_ctrl w3ctrl SEC(".data.w3ctrl");
 // out of the configured Capsule heap.
 enum { W3_STACK_BYTES = 256u << 10 };
 
-#include "zlib_wasm_module.h"
+static const unsigned char zlib_wasm_module[] = {
+#embed "zlib_guest.wasm"
+};
 
 static int wasm_global_offset(IM3Module module, const char* name, uint32_t* offset) {
     IM3Global global = m3_FindGlobal(module, name);
@@ -58,7 +60,7 @@ static void wasm3_zlib_body(void) {
         goto cleanup;
     }
 
-    M3Result result = m3_ParseModule(env, &module, zlib_wasm_module, zlib_wasm_module_len);
+    M3Result result = m3_ParseModule(env, &module, zlib_wasm_module, (uint32_t)sizeof(zlib_wasm_module));
     if (result) {
         goto cleanup;
     }

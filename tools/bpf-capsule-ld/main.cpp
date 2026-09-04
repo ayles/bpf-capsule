@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // bpf-capsule-ld: the BPF Capsule linker, and the core of the toolchain.
 //
-//   bpf-capsule-ld --kernel 6.9 -o program.o guest.bc [more.bc ...]
+//   bpf-capsule-ld -mcpu=v4 --memory=arena -o program.o guest.bc [more.bc ...]
 //
 // Takes LLVM bitcode/IR produced by bpf-capsule-cc, rustc, or a compatible
 // frontend, links it into one module together with the Capsule
@@ -10,21 +10,29 @@
 // llvm-objcopy from the reference pipeline; the passes are linked statically,
 // so there is no plugin, no tool-version matching, and no PIC relocation trap.
 //
-// The runtime rule: the Capsule runtime (src/runtime/guest/bpf_capsule.c) is
-// ordinary user code — compile it with bpf-capsule-cc like any other source
-// and link its bitcode here. The linker only verifies it is present and
-// says exactly that when it is not.
+// The runtime rule: the Capsule runtime is ordinary LLVM bitcode. The CMake
+// integration supplies its target-specific variant automatically; a direct
+// caller must link the matching runtime input explicitly. The linker verifies
+// that the runtime and libc choices agree with its target options.
 #include "common.h"
 #include "registry.h"
 
 #include "runtime_symbols.h"
 
 #include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/CodeGen/MIRParser/MIRParser.h>
+#include <llvm/CodeGen/MIRPrinter.h>
+#include <llvm/CodeGen/MachineFunctionPass.h>
+#include <llvm/CodeGen/MachineModuleInfo.h>
+#include <llvm/CodeGen/Passes.h>
+#include <llvm/CodeGen/TargetPassConfig.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/LegacyPassManagers.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Linker/Linker.h>
@@ -36,6 +44,8 @@
 #include <llvm/ObjCopy/ConfigManager.h>
 #include <llvm/ObjCopy/ObjCopy.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Pass.h>
+#include <llvm/PassRegistry.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/InitLLVM.h>
@@ -45,7 +55,9 @@
 #include <llvm/Support/WithColor.h>
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
+#include <llvm/Target/TargetLoweringObjectFile.h>
 #include <llvm/TargetParser/Triple.h>
+#include <llvm/Analysis/TargetLibraryInfo.h>
 
 #include <string>
 #include <vector>
@@ -56,13 +68,10 @@ namespace {
 
 cl::OptionCategory LinkerCategory("bpf-capsule-ld options");
 
-cl::list<std::string> InputFilenames(cl::Positional, cl::desc("<input .bc/.ll files>"), cl::OneOrMore, cl::cat(LinkerCategory));
+cl::list<std::string> InputFilenames(cl::Positional, cl::desc("<input .bc/.ll/.mir files>"), cl::OneOrMore, cl::cat(LinkerCategory));
 cl::opt<std::string> OutputFilename("o", cl::desc("Output BPF object"), cl::value_desc("file"), cl::Required, cl::cat(LinkerCategory));
-// Kernel and FiberStack register and validate the public options. Their parsed
-// values are intentionally read by the pre-scan below, before LLVM parses the
-// full command line, because they determine flags injected into that parse.
-cl::opt<std::string> Kernel(
-    "kernel", cl::desc("Oldest Linux kernel the object must load on (major.minor, default 6.9)"), cl::init("6.9"), cl::cat(LinkerCategory));
+// FiberStack registers and validates the public option. Its value is read by
+// the pre-scan below because it determines flags injected into LLVM's parse.
 cl::opt<unsigned> FiberStack(
     "fiber-stack", cl::desc("Bytes in each Capsule fiber stack (power of two, default 262144)"), cl::init(262144), cl::cat(LinkerCategory));
 cl::opt<bool> EmitLlvm("emit-llvm", cl::desc("Stop after the capsule pipeline and emit bitcode (debugging)"), cl::init(false), cl::cat(LinkerCategory));
@@ -71,44 +80,46 @@ cl::opt<bool> SaveTemps("save-temps", cl::desc("Keep <output>.linked.bc and <out
 cl::opt<std::string> PipelineOverride(
     "passes", cl::desc("Replace the capsule pipeline with this opt-style pass string (experiments)"), cl::init(""), cl::cat(LinkerCategory));
 cl::opt<bool> BigEndian("bpfeb", cl::desc("Emit big-endian BPF"), cl::init(false), cl::cat(LinkerCategory));
+cl::opt<std::string> CPU("mcpu", cl::desc("BPF ISA version (v3 or v4; default v3)"), cl::init("v3"), cl::cat(LinkerCategory));
+enum class MemoryMode {
+    Fixed,
+    Arena,
+};
+cl::opt<MemoryMode> Memory("memory", cl::desc("Capsule memory backend"),
+    cl::values(clEnumValN(MemoryMode::Fixed, "fixed", "map-backed memory"), clEnumValN(MemoryMode::Arena, "arena", "BPF arena memory")),
+    cl::init(MemoryMode::Fixed), cl::cat(LinkerCategory));
+enum class AllocatorLockMode {
+    Map,
+    Atomic,
+};
+cl::opt<AllocatorLockMode> AllocatorLock("allocator-lock", cl::desc("Allocator locking implementation"),
+    cl::values(clEnumValN(AllocatorLockMode::Map, "map", "portable map lease"), clEnumValN(AllocatorLockMode::Atomic, "atomic", "native BPF compare-exchange")),
+    cl::init(AllocatorLockMode::Map), cl::cat(LinkerCategory));
+cl::opt<bool> NativeArenaSignedLoads(
+    "native-arena-signed-loads", cl::desc("Target JIT accepts sign-extending arena loads"), cl::init(false), cl::cat(LinkerCategory));
+cl::opt<bool> IndirectJumps("indirect-jumps", cl::desc("Target supports instruction-array dispatch through gotox"), cl::init(false), cl::cat(LinkerCategory));
+cl::opt<bool> NativeShift63("native-shift63", cl::desc("Target JIT accepts native 64-bit shifts by 63"), cl::init(false), cl::cat(LinkerCategory));
+cl::list<std::string> RunPasses(
+    "run-pass", cl::desc("Run only these machine passes on one MIR input"), cl::value_desc("pass-name"), cl::CommaSeparated, cl::cat(LinkerCategory));
 
 [[noreturn]] void fail(const Twine& message) {
     WithColor::error(errs(), "bpf-capsule-ld") << message << "\n";
     exit(1);
 }
 
-// This tool is the ONLY place a kernel version exists. It is converted, right
-// here, into the two statements the rest of the toolchain understands: which
-// passes the pipeline contains, and which preprocessor features
-// bpf-capsule-cc defines for the C sources. The pass library itself carries
-// no version and no feature flags.
-struct KernelVersion {
-    unsigned Major = 0;
-    unsigned Minor = 0;
-    friend auto operator<=>(const KernelVersion&, const KernelVersion&) = default;
-};
-
-KernelVersion parseKernel(StringRef text) {
-    KernelVersion version;
-    auto [majorText, minorText] = text.split('.');
-    if (majorText.getAsInteger(10, version.Major) || minorText.getAsInteger(10, version.Minor) || version.Minor >= 1000 || version < KernelVersion{5, 15}) {
-        fail("--kernel must be a Linux version of 5.15 or newer, got '" + text + "'");
-    }
-    return version;
-}
-
 // The whole-program capsule pipeline. This order is the compiler pipeline
 // ABI: domains are computed twice — once when the boundary is lowered and
 // again after default<O2> reshapes the call graph — the suspend-barrier
 // fence spans exactly the O2 stage, and the second i128 pass catches
-// operations O2 introduces. Target capabilities appear as composition: a
-// kernel whose verifier accepts sign-extending arena loads simply does not
-// get bpf-lower-arena-sext.
-std::string capsulePipeline(KernelVersion kernel) {
+// operations O2 introduces. Target capabilities appear as composition; this
+// linker deliberately knows no Linux-version or JIT-architecture policy.
+std::string capsulePipeline() {
+    bool v4 = CPU == "v4";
+    bool arena = Memory == MemoryMode::Arena;
     std::string pipeline = "bpf-expand-sret,"
                            "bpf-lower-capsule-call,bpf-capsule-domains,bpf-lower-capsule-exit,bpf-add-suspend-barriers,"
                            "function(bpf-validate-atomics),bpf-expand-i128,bpf-soft-float,";
-    if (kernel < KernelVersion{6, 6}) {
+    if (!v4) {
         pipeline += "bpf-lower-sdiv,";
     }
     pipeline +=
@@ -119,10 +130,10 @@ std::string capsulePipeline(KernelVersion kernel) {
         "function(bpf-inline-policy),default<O2>,function(scalarizer<load-store>),bpf-expand-i128,"
         "function(bpf-expand-mem),bpf-internalize,globaldce,function(bpf-validate-no-float),"
         "function(bpf-normalize-irreducible,fix-irreducible),bpf-capsule-domains,bpf-remove-suspend-barriers,";
-    if (kernel < KernelVersion{6, 9}) {
-        pipeline += kernel < KernelVersion{6, 6} ? "bpf-stackify-fixed-v3," : "bpf-stackify-fixed,";
+    if (!arena) {
+        pipeline += v4 ? "bpf-stackify-fixed," : "bpf-stackify-fixed-v3,";
     } else {
-        pipeline += kernel >= KernelVersion{7, 1} ? "bpf-stackify-direct," : "bpf-stackify,";
+        pipeline += IndirectJumps ? "bpf-stackify-direct," : "bpf-stackify,";
     }
     pipeline +=
         // Stackify introduces the entry-to-driver call after whole-program O2.
@@ -132,22 +143,20 @@ std::string capsulePipeline(KernelVersion kernel) {
         // run; this stage does not revisit application functions.
         "always-inline,globaldce,function(early-cse,gvn,adce),function(bpf-normalize-irreducible,fix-irreducible),"
         "function(bpf-define-undef),";
-    if (kernel < KernelVersion{6, 9}) {
+    if (!arena) {
         pipeline += "function(bpf-scalarize-agg),bpf-memory-fixed,";
     } else {
         pipeline += "bpf-memory-arena,";
     }
     pipeline += "function(bpf-infer-as),";
-    // Before Linux 7.0 the verifier rejects BPF_MEMSX from PTR_TO_ARENA on
-    // every architecture; 7.0 made this conditional on the target JIT.
-    if (kernel >= KernelVersion{6, 9} && kernel < KernelVersion{7, 0}) {
+    if (arena && !NativeArenaSignedLoads) {
         pipeline += "function(bpf-lower-arena-sext),";
     }
-    pipeline += "function(bpf-finalize-atomic-load-store),function(bpf-split-shift63),";
-    // Instruction-array dispatch needs the kernel verifier, libbpf
-    // relocation and target JIT landing-pad support as one capability. The
-    // conservative portable floor is 7.1; older targets keep compare trees.
-    if (kernel < KernelVersion{7, 1}) {
+    pipeline += "function(bpf-finalize-atomic-load-store),";
+    if (!NativeShift63) {
+        pipeline += "function(bpf-split-shift63),";
+    }
+    if (!IndirectJumps) {
         pipeline += "function(bpf-no-jump-tables),";
     }
     pipeline += "bpf-sanitize-btf";
@@ -159,6 +168,34 @@ bool definesRuntime(const Module& module) {
     // names are extern markers the compiler resolves, not definitions).
     const Function* function = module.getFunction(bpf::sym::RuntimeProbe);
     return function && !function->isDeclaration();
+}
+
+bool hasOption(int argc, char** argv, StringRef name) {
+    for (int i = 1; i < argc; ++i) {
+        StringRef argument(argv[i]);
+        if (argument == name || (argument.starts_with(name) && argument.drop_front(name.size()).starts_with("="))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void addMachinePass(PassManagerBase& passes, StringRef name, TargetPassConfig& config) {
+    if (name == "none") {
+        return;
+    }
+    const PassInfo* info = PassRegistry::getPassRegistry()->getPassInfo(name);
+    if (!info) {
+        fail("run-pass " + name + " is not registered");
+    }
+    if (!info->getNormalCtor()) {
+        fail("cannot create pass " + name);
+    }
+    Pass* pass = info->getNormalCtor()();
+    std::string banner = "After " + std::string(pass->getPassName());
+    config.addMachinePrePasses();
+    passes.add(pass);
+    config.addMachinePostPasses(banner);
 }
 
 } // namespace
@@ -175,42 +212,47 @@ int main(int argc, char** argv) {
     // static initializers together with all of upstream LLVM's, so opt/llc
     // experiment flags work here unchanged. Policy flags the reference
     // pipeline always set are injected, then everything parses in one pass.
-    // --kernel and --fiber-stack are pre-scanned because injected flag values
-    // depend on them.
-    KernelVersion version{6, 9};
+    // --fiber-stack is pre-scanned because injected flag values depend on it.
     unsigned fiberStack = 262144;
     for (int i = 1; i < argc; ++i) {
         StringRef arg(argv[i]);
-        if (arg.consume_front("--kernel=") || arg.consume_front("-kernel=")) {
-            version = parseKernel(arg);
-        } else if ((arg == "--kernel" || arg == "-kernel") && i + 1 < argc) {
-            version = parseKernel(argv[i + 1]);
-        } else if (arg.consume_front("--fiber-stack=") || arg.consume_front("-fiber-stack=")) {
+        if (arg.consume_front("--fiber-stack=") || arg.consume_front("-fiber-stack=")) {
             (void)arg.getAsInteger(10, fiberStack);
         } else if ((arg == "--fiber-stack" || arg == "-fiber-stack") && i + 1 < argc) {
             (void)StringRef(argv[i + 1]).getAsInteger(10, fiberStack);
         }
     }
-    // CPU v4 is available from Linux 6.6. Native stack capacity is deliberately
-    // absent here: a post-RA machine pass derives it from the actual complete
-    // call graph and selected frame sizes.
-    const char* cpu = version >= KernelVersion{6, 6} ? "v4" : "v3";
-
     std::string fiberStackFlag = "-bpf-fiber-stack-size=" + std::to_string(fiberStack);
     std::string bpfStackFlag = "-bpf-stack-size=" + std::to_string(fiberStack);
     std::vector<const char*> args(argv, argv + argc);
-    bool customPipeline = false;
-    for (int i = 1; i < argc; i++) {
-        if (StringRef(argv[i]).starts_with("-passes")) {
-            customPipeline = true;
-        }
-    }
-    if (!customPipeline) {
+    const bool runPassMode = hasOption(argc, argv, "-run-pass") || hasOption(argc, argv, "--run-pass");
+    const bool customPipeline = hasOption(argc, argv, "-passes") || hasOption(argc, argv, "--passes");
+    const bool stopCodegen = hasOption(argc, argv, "-stop-after") || hasOption(argc, argv, "--stop-after") || hasOption(argc, argv, "-stop-before") ||
+        hasOption(argc, argv, "--stop-before");
+    if (!customPipeline && !runPassMode) {
         args.push_back("-bpf-unified-spill-pipeline");
     }
     args.push_back(fiberStackFlag.c_str());
     args.push_back(bpfStackFlag.c_str());
     cl::ParseCommandLineOptions(args.size(), args.data(), "BPF Capsule linker\n");
+
+    if (stopCodegen && (EmitLlvm || EmitAssembly)) {
+        fail("-stop-before/-stop-after cannot be combined with --emit-llvm or --emit-asm");
+    }
+    if (PipelineOverride.empty()) {
+        if (CPU != "v3" && CPU != "v4") {
+            fail("the Capsule pipeline supports only -mcpu=v3 or -mcpu=v4");
+        }
+        if (Memory == MemoryMode::Fixed && NativeArenaSignedLoads) {
+            fail("--native-arena-signed-loads requires --memory=arena");
+        }
+        if (Memory == MemoryMode::Fixed && IndirectJumps) {
+            fail("--indirect-jumps requires --memory=arena");
+        }
+        if (Memory == MemoryMode::Arena && CPU != "v4") {
+            fail("--memory=arena requires -mcpu=v4");
+        }
+    }
 
     // ------------------------------------------------------------------ link
     LLVMContext context;
@@ -236,6 +278,19 @@ int main(int argc, char** argv) {
         },
         nullptr);
     SMDiagnostic diagnostic;
+    Triple triple(BigEndian ? "bpfeb" : "bpfel");
+    std::string targetError;
+    const Target* target = TargetRegistry::lookupTarget(triple, targetError);
+    if (!target) {
+        fail(targetError);
+    }
+    const std::string cpu = CPU;
+    TargetOptions options;
+    std::unique_ptr<TargetMachine> machine(target->createTargetMachine(triple, cpu, "", options, Reloc::Static, std::nullopt, CodeGenOptLevel::Aggressive));
+    if (!machine) {
+        fail("cannot create BPF target machine");
+    }
+
     std::unique_ptr<Module> module;
     auto linkModule = [&](std::unique_ptr<Module> next, const Twine& what) {
         if (!module) {
@@ -282,28 +337,115 @@ int main(int argc, char** argv) {
         }
         linkModule(std::move(next), path);
     };
+    bool hasMirInput = false;
+    for (const std::string& input : InputFilenames) {
+        hasMirInput |= StringRef(input).ends_with(".mir");
+    }
+    if (hasMirInput) {
+        if (InputFilenames.size() != 1 || !StringRef(InputFilenames.front()).ends_with(".mir")) {
+            fail("a MIR input cannot be linked with other inputs");
+        }
+        if (!runPassMode) {
+            fail("a MIR input requires -run-pass");
+        }
+        if (!PipelineOverride.empty() || EmitLlvm || EmitAssembly || SaveTemps || stopCodegen) {
+            fail("-run-pass cannot be combined with the Capsule pipeline or another output stage");
+        }
+
+        std::unique_ptr<MIRParser> mir = createMIRParserFromFile(InputFilenames.front(), diagnostic, context);
+        if (mir) {
+            module =
+                mir->parseIRModule([&](StringRef, StringRef) { return std::optional<std::string>(machine->createDataLayout().getStringRepresentation()); });
+        }
+        if (!module) {
+            diagnostic.print("bpf-capsule-ld", WithColor::error(errs(), "bpf-capsule-ld"));
+            return 1;
+        }
+        module->setTargetTriple(triple);
+        module->setDataLayout(machine->createDataLayout());
+
+        std::error_code errorCode;
+        raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_Text);
+        if (errorCode) {
+            fail(errorCode.message() + ": " + OutputFilename);
+        }
+        legacy::PassManager passes;
+        passes.add(new TargetLibraryInfoWrapperPass(TargetLibraryInfoImpl(triple)));
+        auto* machineInfo = new MachineModuleInfoWrapperPass(machine.get());
+        TargetPassConfig* config = machine->createPassConfig(passes);
+        if (config->hasLimitedCodeGenPipeline()) {
+            fail("-run-pass cannot be combined with " + config->getLimitedCodeGenPipelineReason());
+        }
+        passes.add(config);
+        passes.add(machineInfo);
+        config->printAndVerify("");
+        for (const std::string& name : RunPasses) {
+            addMachinePass(passes, name, *config);
+        }
+        config->setInitialized();
+        passes.add(createPrintMIRPass(out));
+        passes.add(createFreeMachineFunctionPass());
+        machine->getObjFileLowering()->Initialize(machineInfo->getMMI().getContext(), *machine);
+        if (mir->parseMachineFunctions(*module, machineInfo->getMMI())) {
+            return 1;
+        }
+        passes.run(*module);
+        return 0;
+    }
+    if (runPassMode) {
+        fail("-run-pass is for .mir input only");
+    }
+
     for (const std::string& input : InputFilenames) {
         loadAndLink(input);
     }
-    if (!definesRuntime(*module) && PipelineOverride.empty()) {
-        fail("inputs do not define the Capsule runtime; compile src/runtime/guest/bpf_capsule.c with "
-             "bpf-capsule-cc (matching --kernel) and link its bitcode like any other input");
+    if (!module) {
+        fail("inputs contain no LLVM bitcode modules");
+    }
+    const bool hasRuntime = definesRuntime(*module);
+    if (!hasRuntime && PipelineOverride.empty()) {
+        fail("inputs do not define the Capsule runtime; use bpf_capsule_object or link matching runtime bitcode explicitly");
     }
 
-    Triple triple(BigEndian ? "bpfeb" : "bpfel");
+    // Runtime and libc are compiled as SDK-owned inputs, but their
+    // target-dependent choices are made here. Refuse stale/mismatched inputs
+    // instead of silently emitting code for a different memory or atomic
+    // model.
+    auto checkBuildMarker = [&](StringRef name, unsigned selected, const Twine& description, bool required) {
+        if (GlobalVariable* marker = module->getNamedGlobal(name)) {
+            auto* declared = dyn_cast_or_null<ConstantInt>(marker->getInitializer());
+            if (!declared || declared->getZExtValue() != selected) {
+                fail("linked Capsule " + description + " disagrees with its linker option");
+            }
+        } else if (required) {
+            fail("linked Capsule " + description + " is not declared by its build inputs");
+        }
+    };
+    checkBuildMarker(bpf::sym::MemoryBackend, Memory == MemoryMode::Arena ? 1 : 0, "runtime memory backend", hasRuntime);
+    checkBuildMarker(bpf::sym::AllocatorLockMode, AllocatorLock == AllocatorLockMode::Atomic ? 1 : 0, "libc allocator lock", false);
+
     module->setTargetTriple(triple);
 
+    // Function target attributes control BPF instruction selection after the
+    // modules have been linked. Reject a concrete frontend/linker disagreement
+    // instead of silently generating a mixture of ISA versions. Frontends that
+    // leave the attribute absent (and rustc-generated shims marked "generic")
+    // are compatible with either supported ISA and inherit the link target.
+    const bool enforceTargetCpu = PipelineOverride.empty() || CPU.getNumOccurrences() != 0;
+    if (enforceTargetCpu) {
+        for (Function& function : *module) {
+            if (function.isIntrinsic()) {
+                continue;
+            }
+            Attribute attribute = function.getFnAttribute("target-cpu");
+            if (attribute.isValid() && attribute.isStringAttribute() && attribute.getValueAsString() != "generic" && attribute.getValueAsString() != CPU) {
+                fail("function " + function.getName() + " was compiled for -mcpu=" + attribute.getValueAsString() + ", but the linker selected -mcpu=" + CPU);
+            }
+            function.addFnAttr("target-cpu", CPU);
+        }
+    }
+
     // --------------------------------------------------------------- pipeline
-    std::string error;
-    const Target* target = TargetRegistry::lookupTarget(triple, error);
-    if (!target) {
-        fail(error);
-    }
-    TargetOptions options;
-    std::unique_ptr<TargetMachine> machine(target->createTargetMachine(triple, cpu, "", options, Reloc::Static, std::nullopt, CodeGenOptLevel::Aggressive));
-    if (!machine) {
-        fail("cannot create BPF target machine");
-    }
     module->setDataLayout(machine->createDataLayout());
 
     // BPF has no vector registers; LLVM 23's BPF backend crashes on a vector
@@ -325,19 +467,21 @@ int main(int argc, char** argv) {
     builder.crossRegisterProxies(loopAnalyses, functionAnalyses, callGraphAnalyses, moduleAnalyses);
     RegisterCapsulePipelineCallbacks(builder);
 
-    std::error_code errorCode;
     auto saveModule = [&](const Twine& suffix) {
-        raw_fd_ostream out(OutputFilename + suffix.str(), errorCode, sys::fs::OF_None);
-        if (!errorCode) {
-            WriteBitcodeToFile(*module, out);
+        std::string path = OutputFilename + suffix.str();
+        std::error_code errorCode;
+        raw_fd_ostream out(path, errorCode, sys::fs::OF_None);
+        if (errorCode) {
+            fail(errorCode.message() + ": " + path);
         }
+        WriteBitcodeToFile(*module, out);
     };
     if (SaveTemps) {
         saveModule(".linked.bc");
     }
 
     ModulePassManager pipeline;
-    std::string pipelineText = PipelineOverride.empty() ? capsulePipeline(version) : std::string(PipelineOverride);
+    std::string pipelineText = PipelineOverride.empty() ? capsulePipeline() : std::string(PipelineOverride);
     if (Error parseError = builder.parsePassPipeline(pipeline, pipelineText)) {
         fail("cannot construct the capsule pipeline: " + toString(std::move(parseError)));
     }
@@ -347,6 +491,7 @@ int main(int argc, char** argv) {
     }
 
     if (EmitLlvm) {
+        std::error_code errorCode;
         raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_None);
         if (errorCode) {
             fail(errorCode.message() + ": " + OutputFilename);
@@ -356,6 +501,7 @@ int main(int argc, char** argv) {
     }
 
     if (EmitAssembly) {
+        std::error_code errorCode;
         raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_Text);
         if (errorCode) {
             fail(errorCode.message() + ": " + OutputFilename);
@@ -363,6 +509,23 @@ int main(int argc, char** argv) {
         legacy::PassManager codegen;
         if (machine->addPassesToEmitFile(codegen, out, nullptr, CodeGenFileType::AssemblyFile)) {
             fail("the BPF target cannot emit assembly files");
+        }
+        codegen.run(*module);
+        return 0;
+    }
+
+    // LLVM's -stop-before/-stop-after contract is to serialize MIR instead of
+    // producing the requested final file type. Keep that boundary visible so
+    // the result can be inspected and fed back through -run-pass.
+    if (stopCodegen) {
+        std::error_code errorCode;
+        raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_Text);
+        if (errorCode) {
+            fail(errorCode.message() + ": " + OutputFilename);
+        }
+        legacy::PassManager codegen;
+        if (machine->addPassesToEmitFile(codegen, out, nullptr, CodeGenFileType::ObjectFile)) {
+            fail("the BPF target cannot emit MIR at the requested pipeline boundary");
         }
         codegen.run(*module);
         return 0;
@@ -399,6 +562,7 @@ int main(int argc, char** argv) {
         if (Error addError = config.Common.ToRemove.addMatcher(std::move(*pattern))) {
             fail("objcopy matcher: " + toString(std::move(addError)));
         }
+        std::error_code errorCode;
         raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_None);
         if (errorCode) {
             fail(errorCode.message() + ": " + OutputFilename);

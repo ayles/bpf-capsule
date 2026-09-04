@@ -23,8 +23,7 @@ int csmith_run(void) {
 
 SEC("syscall")
 int csmith_continue(void) {
-    csmith_result.capsule =
-        capsule_continue(&csmith_result.checksum, csmith_result.capsule.continuation);
+    csmith_result.capsule = capsule_continue(&csmith_result.checksum, csmith_result.capsule.continuation);
     return 0;
 }
 

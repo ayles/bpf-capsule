@@ -78,7 +78,7 @@ using namespace llvm;
 static cl::opt<int> UnifiedSpillLimit(
     "bpf-unified-spill-limit", cl::init(512), cl::desc("Optional cap on the post-RA call-graph-derived Capsule frame budget"));
 static cl::opt<bool> UnifiedSpillPipeline(
-    "bpf-unified-spill-pipeline", cl::init(false), cl::desc("Run post-RA spill relocation and machine flattening in normal llc"));
+    "bpf-unified-spill-pipeline", cl::init(false), cl::desc("Run post-RA spill relocation and machine flattening during code generation"));
 
 namespace {
 
@@ -2332,7 +2332,7 @@ static RegisterPass<BPFUnifiedSpillsMIR> RegisterUnifiedSpills("bpf-unified-spil
 
 // `-run-pass` accepts MIR only, which used to force every large program
 // through a stop/serialize/reparse/start sandwich. Registering directly in
-// the normal llc pipeline keeps all MachineFunctions in memory and preserves
+// the normal code-generation pipeline keeps all MachineFunctions in memory and preserves
 // stock instruction selection, register allocation, block placement, branch
 // relaxation, relocation and BTF emission.
 static RegisterTargetPassConfigCallback RegisterUnifiedSpillPipeline([](TargetMachine& TM, PassManagerBase&, TargetPassConfig* config) {

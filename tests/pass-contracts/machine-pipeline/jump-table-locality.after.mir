@@ -177,11 +177,9 @@ body:             |
     $r1 = MOV_32_64 killed $w1
     $r1 = SLL_ri killed $r1, 3
     $r3 = LD_imm64 %jump-table.0
-    $r4 = LD_imm64 %jump-table.0
-    $r4 = ADD_rr killed $r4, killed $r1
-    $r1 = LDD killed $r4, 0 :: (load (s64) from jump-table)
     $r3 = ADD_rr killed $r3, killed $r1
-    JX killed $r3
+    $r1 = LDD killed $r3, 0 :: (load (s64) from jump-table)
+    JX killed $r1
   
   bb.2.call.unit0:
     liveins: $w2

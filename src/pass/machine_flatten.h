@@ -11,8 +11,6 @@ namespace bpf {
 
 // Join independently allocated and placed machine functions, then repair
 // old-ISA branches in the final flattened layout.
-void AddMachineFlattenPasses(
-    llvm::TargetPassConfig& config, llvm::AnalysisID mergeAfter, llvm::AnalysisID finalizeAfter
-);
+void AddMachineFlattenPasses(llvm::TargetPassConfig& config, llvm::AnalysisID mergeAfter, llvm::AnalysisID finalizeAfter);
 
 } // namespace bpf

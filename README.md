@@ -75,18 +75,9 @@ framebuffer.
 Rust. `bpf-capsule-ld` links and optimizes the whole program, performs the
 Capsule transformation, and emits the final BPF object.
 
-Memory and dispatch are selected by the target profile:
-
-| Target | Program memory | BPF CPU | Region dispatch |
-| --- | --- | --- | --- |
-| 5.15 | fixed map-backed regions | v3 | compare tree |
-| 6.6 | fixed map-backed regions | v4 | compare tree |
-| 6.9 | `bpf_arena`, compatibility lowering for signed loads | v4 | compare tree |
-| 7.0 | `bpf_arena` | v4 | compare tree |
-| 7.1 | `bpf_arena` | v4 | instruction-array `gotox` |
-
-`BPF_CAPSULE_TARGET_KERNEL` selects the compatibility profile at compile time.
-Guest pointers and the continuation ABI remain identical across profiles.
+Generated objects load through ordinary libbpf on unmodified x86-64 and arm64
+kernels. The test matrix starts at Linux 5.15; newer profiles use `bpf_arena`
+and indirect region dispatch where the kernel and JIT support them.
 
 [DESIGN.md](DESIGN.md) is the technical description of the current system: the
 execution model, fibers, software calling convention, memory backends,
@@ -94,100 +85,66 @@ compiler pipeline, and verifier constraints.
 
 ## Build
 
-Build the compiler with the pinned Nix environment:
+Tests and examples are separate CMake projects built against the installed
+SDK. With Nix:
 
 ```sh
-nix build
+nix build                                # the SDK: bpf-capsule-cc, bpf-capsule-ld, host library
+sudo nix run .#doom -- /path/to/doom.wad tty
+nix flake check                          # the complete test matrix
+nix run .#benchmarks                     # local in-kernel measurements
 ```
 
-The example bundles fetch and build their third-party sources separately:
+The Nix example packages target Linux 6.9 or newer on x86-64 and 6.10 or
+newer on arm64. Compatibility profiles back to 5.15 are covered by the test
+matrix.
+
+Without Nix, building the SDK requires CMake 3.24 or newer, C17 and C++20
+compilers, LLVM and Clang 23 from the same installation, pkg-config, and
+libbpf 1.4 or newer. Generating a libbpf skeleton also requires `bpftool`.
+Install the SDK to a prefix, then point a consumer project at it:
 
 ```sh
-nix build .#examples-515
-nix build .#examples-69
+cmake -S . -B build/sdk -DCMAKE_BUILD_TYPE=Release
+cmake --build build/sdk
+cmake --install build/sdk --prefix "$PWD/build/prefix"
+cmake -S examples/fib -B build/fib -DCMAKE_PREFIX_PATH="$PWD/build/prefix"
+cmake --build build/fib
 ```
 
-Each example is also directly runnable. For example:
-
-```sh
-sudo nix run .#lua-xdp -- "$PWD/examples/lua-xdp/packet_observer.lua" eth0
-```
-
-Examples that can span multiple BPF entries reject pending work by default.
-Set `BPF_CAPSULE_MAX_DRAINS` to the maximum number of continuations a modified
-workload may use; the example reports the actual count.
-
-The compiler drivers are exposed explicitly as `.#bpf-capsule-cc` and
-`.#bpf-capsule-ld`; there is no default app because the flake has no single
-main executable.
-
-Without Nix, provide CMake 3.21 or newer, LLVM and Clang 23 from the same
-installation, libbpf 1.4 or newer, bpftool, pkg-config, libelf, zlib, and zstd.
-
-The complete build and compiler-contract matrix, plus unit and example tests
-in real kernel VMs, is a single command. The benchmarks are a second direct
-Nix app because they must run against the host kernel rather than in the Nix
-build sandbox:
-
-```sh
-nix flake check
-nix run .#benchmarks
-```
-
-Useful configuration variables are:
-
-```text
-BPF_CAPSULE_TARGET_KERNEL       5.15, 6.6, 6.9, 7.0, or 7.1
-BPF_CAPSULE_FIBER_STACK_BYTES   power-of-two software stack size
-BPF_CAPSULE_MAX_FIBERS          compiled concurrency ceiling
-BPF_CAPSULE_BUILD_EXAMPLES      build selected third-party examples
-BPF_CAPSULE_EXAMPLES            semicolon-separated names, or all
-```
-
-CMake defaults to the 6.9 profile. The default Nix package explicitly builds
-the 5.15 compatibility floor; named packages select the profile in their
-suffix.
+The tools also work directly. `bpf-capsule-cc` compiles the application, the
+installed `runtime/bpf_capsule.c`, and each installed libc source into ordinary
+bitcode in exactly the same way; pass all resulting `.bc` files to
+`bpf-capsule-ld`. The libc compilation additionally needs its `include` and
+TLSF directories on the include path. The default output targets conservative
+v3 BPF with fixed-map memory. For an arena build, compile the runtime with
+`BPF_CAPSULE_FEATURE_ARENA=1` and pass `--memory=arena` to the linker; an atomic
+allocator similarly pairs `BPF_CAPSULE_FEATURE_FULL_ATOMICS=1` on libc with
+`--allocator-lock=atomic`. The linker rejects mismatched inputs and options.
 
 ## Use from CMake
 
-A minimal CMake consumer looks like this:
+A minimal consumer is:
 
 ```cmake
 find_package(BpfCapsule CONFIG REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(LibBpf libbpf>=1.4.0 REQUIRED IMPORTED_TARGET)
 
-set(BPF_CAPSULE_LIBBPF_TARGET PkgConfig::LibBpf)
-set(BPF_CAPSULE_TARGET_KERNEL 6.9)
+bpf_capsule_object(guest_bpf OUTPUT guest.bpf.o SOURCES guest_bpf.c)
+bpf_capsule_skeleton(guest_skeleton OUTPUT guest.skel.h OBJECT "${guest_bpf}" NAME guest)
 
-bpf_capsule_bitcode(guest_bc
-    SOURCES guest.c library.cpp
-    INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}/include)
-
-bpf_capsule_object(guest_object
-    OUTPUT guest.bpf.o
-    BITCODE ${guest_bc})
-
-bpf_capsule_skeleton(guest_skeleton
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/guest.skel.h
-    OBJECT ${CMAKE_CURRENT_BINARY_DIR}/guest.bpf.o
-    NAME guest
-    DEPENDS guest_object)
+add_executable(guest guest_host.c)
+target_link_libraries(guest PRIVATE BpfCapsule::host guest_skeleton)
 ```
 
-`bpf_capsule_object` adds the Capsule runtime automatically. The generated
-libbpf skeleton embeds the completed object in the host executable. See the
-[standalone expression evaluator](examples/standalone) for a complete consumer
-of the installed package.
+`bpf_capsule_object` compiles the guest sources, adds the Capsule runtime and
+freestanding C library, and returns the completed object's path. Pass that path
+to `bpf_capsule_skeleton`; its linkable target carries the generated header and
+embeds the object in the host executable.
 
-The host lifecycle brackets libbpf's own load:
-`bpf_capsule_configure()` runs before it (capacities plus the reserved memory
-window whose base is baked into the frozen config), and
-`bpf_capsule_initialize()` runs after it (arena allocation and baked-pointer
-fixups; entries fail closed until it has run). Drive each entry through the
-Capsule result protocol. Call `bpf_capsule_release()` before libbpf destroys
-the object; it releases the host mapping and reserved address-space window and
-is safe after partial setup.
+The host lifecycle brackets libbpf's own load: call
+`bpf_capsule_configure()` before loading the object,
+`bpf_capsule_initialize()` afterward, and `bpf_capsule_release()` before
+destroying it. Drive each entry through the Capsule result protocol.
 
 The API is defined by the
 [host header](src/runtime/host/bpf_capsule_host.h),
@@ -203,9 +160,6 @@ The Capsule environment is freestanding:
   TLS;
 - C `setjmp`/`longjmp` works within a live Capsule invocation, but C++
   exceptions, RTTI, and general cleanup unwinding are disabled;
-- Capsule atomic loads and stores support the checked, naturally aligned
-  forms, while read-modify-write operations and compare-exchange on Capsule
-  memory, fences, and unsupported orderings are rejected;
 - an entry context may be lent explicitly with `capsule_call_ctx()` and read in
   managed code with `capsule_borrowed_ctx()`; verifier-owned pointers derived
   from it may not be stored in Capsule state across a region boundary;
@@ -224,4 +178,4 @@ floating point can cost considerably more. The [benchmarks](benchmarks) provide
 exact local measurements.
 
 The project is licensed under Apache-2.0 with the LLVM exception. Fetched and
-vendored components retain their own license files.
+vendored components retain their upstream licensing notices.

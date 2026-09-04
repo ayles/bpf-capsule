@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Freestanding build of the vanilla upstream allocator vendored in
-// thirdparty/tlsf/, whose sources are byte-identical to mattconte/tlsf at commit
-// deff9ab509341f264addbd3c8ada533678591905; every Capsule adaptation lives
-// here instead of patching them:
+// Freestanding build of mattconte/tlsf at commit
+// deff9ab509341f264addbd3c8ada533678591905. The SDK fetches and installs the
+// unmodified upstream sources; every Capsule adaptation lives here:
 //
 //   - assert is a no-op: the runtime supplies and validates the pool, and
 //     a failed allocator invariant must not become a verifier-visible

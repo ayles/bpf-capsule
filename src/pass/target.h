@@ -6,9 +6,8 @@
 #include <cstdint>
 
 // No target capability reaches the pass library: a capability is expressed
-// as which passes bpf-capsule-ld composes into the pipeline, and only that
-// tool converts a --kernel floor into the composition. What remains here is
-// fixed compiler policy every pass agrees on.
+// as which passes bpf-capsule-ld composes into the pipeline. What remains here
+// is fixed compiler policy every pass agrees on.
 
 namespace bpf {
 

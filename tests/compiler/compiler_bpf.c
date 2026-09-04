@@ -498,7 +498,7 @@ int compiler_native_atomic_run(void) {
         failures |= 2;
     }
 
-#if BPF_CAPSULE_FEATURE_FULL_ATOMICS
+#if BPF_CAPSULE_TEST_FULL_ATOMICS
     unsigned int old32 = __atomic_fetch_xor(&compiler_native_atomic32, 0x30, __ATOMIC_SEQ_CST);
     uint64_t old64 = __atomic_exchange_n(&compiler_native_atomic64, 0x123456789abcdef0ull, __ATOMIC_SEQ_CST);
     unsigned int expected = 0x20;

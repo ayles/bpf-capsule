@@ -15,5 +15,4 @@ add_executable(bpf-capsule-cc bpf-capsule-cc/main.cpp)
 target_include_directories(bpf-capsule-cc PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 set_target_properties(bpf-capsule-cc PROPERTIES EXPORT_NAME cc)
 
-install(TARGETS bpf-capsule-cc bpf-capsule-ld EXPORT BpfCapsuleTargets
-        RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(TARGETS bpf-capsule-cc bpf-capsule-ld EXPORT BpfCapsuleTargets RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

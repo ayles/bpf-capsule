@@ -5028,6 +5028,29 @@ private:
         return step;
     }
 
+    void RebuildTrampolineDebugInfo(Function& function, bool borrowed) {
+        if (Module_.debug_compile_units().empty()) {
+            return;
+        }
+        DIBuilder db(Module_, false, *Module_.debug_compile_units_begin());
+        SmallVector<Metadata*> signature{BtfGetInt(db, 32, true)};
+        if (borrowed) {
+            signature.push_back(BorrowedDebugType_);
+        }
+        signature.push_back(BtfGetInt(db, 32, false));
+        uint64_t controlBytes = Module_.getDataLayout().getTypeAllocSize(FiberControlType_);
+        signature.push_back(BtfGetByteArrayPointer(db, controlBytes));
+        if (FixedMemory_) {
+            signature.push_back(BtfGetByteArrayPointer(db, FiberStackSize_));
+        }
+        BtfFunctionAddDebugInfo(db, function, signature);
+        for (Instruction& instruction : instructions(function)) {
+            instruction.dropDbgRecords();
+            instruction.setMetadata(LLVMContext::MD_loop, nullptr);
+        }
+        db.finalize();
+    }
+
     // The runtime supplies a two-level bounded driver. Runtime iterations
     // multiply while each global loop is verified only once.
     Function* BuildStepDriver(bool borrowed) {
@@ -5039,6 +5062,11 @@ private:
         if (!driver0 || driver0->isDeclaration() || !level0 || level0->isDeclaration()) {
             report_fatal_error(Twine("stackify: program-supplied driver requires ") + driverName + " and " + levelName);
         }
+        // The source-level fixed-tier stack parameter is necessarily void*:
+        // its size is selected by the linker, after C compilation. Give the
+        // global L1 driver the precise byte-array BTF type now that the final
+        // stack geometry is known, or the verifier rejects calls into it.
+        RebuildTrampolineDebugInfo(*level0, borrowed);
         // The program declares this extern; take over the declaration rather
         // than creating a second, differently-named function beside it.
         Function* decl = Module_.getFunction(stepName);

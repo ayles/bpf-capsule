@@ -1,13 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# One NixOS VM booting the given kernel and running a Bash script as root.
 {
   pkgs,
-  artifacts,
   kernelPackages,
-  targetKernel,
-  arena ? false,
+  name,
+  script,
+  runtimeInputs ? [ ],
+  disableDeviceTree ? false,
 }:
+let
+  runner = pkgs.writeShellApplication {
+    inherit name runtimeInputs;
+    text = script;
+  };
+in
 pkgs.testers.runNixOSTest {
-  name = "bpf-capsule-${builtins.replaceStrings [ "." ] [ "" ] targetKernel}";
+  inherit name;
 
   nodes.machine =
     { lib, pkgs, ... }:
@@ -18,13 +26,9 @@ pkgs.testers.runNixOSTest {
         cores = 6;
         graphics = false;
       };
-      environment.systemPackages = with pkgs; [
-        bpftools
-        libbpf
-      ];
       system.stateVersion = "23.11";
     }
-    // lib.optionalAttrs arena {
+    // lib.optionalAttrs disableDeviceTree {
       # QEMU's generated device tree is enough. Enabling NixOS device-tree
       # synthesis on aarch64 has historically dropped the arena kfunc set.
       hardware.deviceTree.enable = false;
@@ -33,16 +37,7 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     machine.start()
     machine.wait_for_unit("multi-user.target")
-    print(machine.succeed("uname -a"))
-    print(machine.succeed(
-      "set -eu; ulimit -l unlimited; "
-      "test_dir=${artifacts}/libexec/bpf-capsule/tests; "
-      "test -x $test_dir/smoke_test; "
-      "for test_program in $test_dir/*_test; do "
-      "  echo RUN:$test_program; "
-      "  $test_program --gtest_color=no; "
-      "done"
-    ))
+    print(machine.succeed("${runner}/bin/${name}"))
     machine.shutdown()
   '';
 }

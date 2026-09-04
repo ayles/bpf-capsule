@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // The minimal-program benchmarks: load/verify cost of the smallest complete
 // capsule object, and the per-entry cost of a real capsule_call running
-// recursive fib(20) through the software stack. The fib time is the
-// dispatch+frame machinery number every optimization in the old tree was
-// measured against.
+// recursive fib(20) through the software stack.
 #include "capsule_benchmark.h"
 
 #include "bpf_capsule_host.h"
@@ -11,6 +9,8 @@
 #include "smoke.skel.h"
 
 namespace {
+
+constexpr uint64_t kMaxDrainsPerRun = 100'000;
 
 void destroy_smoke(struct smoke* skeleton, struct bpf_capsule* capsule) {
     (void)bpf_capsule_release(capsule);
@@ -79,12 +79,14 @@ void BM_SmokeFib20(benchmark::State& state) {
             state.SkipWithError("test_run failed");
             break;
         }
-        while (st->capsule.status == CAPSULE_PENDING) {
+        uint64_t run_drains = 0;
+        while (st->capsule.status == CAPSULE_PENDING && run_drains < kMaxDrainsPerRun) {
             if (bpf_prog_test_run_opts(drain_fd, &options)) {
                 state.SkipWithError("drain failed");
                 break;
             }
-            drains++;
+            ++run_drains;
+            ++drains;
         }
         if (st->capsule.status != CAPSULE_OK || st->output != 6765u) {
             state.SkipWithError("wrong result");

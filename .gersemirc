@@ -1,0 +1,7 @@
+definitions:
+  - cmake/BpfCapsule.cmake
+  - tests/CapsuleTests.cmake
+  - benchmarks/CMakeLists.txt
+  - tests/pass-contracts/CMakeLists.txt
+line_length: 120
+warn_about_unknown_commands: false

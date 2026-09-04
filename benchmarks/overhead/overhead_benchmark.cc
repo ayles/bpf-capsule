@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// A small cost model for the transformed ABI.  Each BPF row is paired with a
-// direct-BPF floor; the scalar rows also have a native AArch64 compiler floor.
+// A small cost model for the transformed ABI. Each BPF row is paired with a
+// direct-BPF floor; the scalar rows also have a native compiler floor.
 #include <benchmark/benchmark.h>
 
 #include <bpf/libbpf.h>

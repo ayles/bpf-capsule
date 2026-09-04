@@ -140,6 +140,7 @@ static uint64_t managed_invariant_values_call_loop(void) {
     for (uint32_t index = 0; index < overhead_state.trips; ++index) {
         uint64_t next = managed_dynamic_leaf(value, index);
         switch (index & 7u) {
+                // clang-format off
         case 0: value = next ^ a; break;
         case 1: value = next ^ b; break;
         case 2: value = next ^ c; break;
@@ -148,21 +149,17 @@ static uint64_t managed_invariant_values_call_loop(void) {
         case 5: value = next ^ f; break;
         case 6: value = next ^ g; break;
         default: value = next ^ h; break;
+                // clang-format on
         }
     }
     return value;
 }
 
-static __always_inline uint64_t schedulable_mix(
-    uint64_t next, uint64_t a, uint64_t b, uint64_t c, uint64_t d,
-    uint64_t e, uint64_t f, uint64_t g, uint64_t h) {
+static __always_inline uint64_t schedulable_mix(uint64_t next, uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g, uint64_t h) {
     uint32_t shift = next & 63u;
     uint32_t inverse = (-shift) & 63u;
-    return next ^ ((a << shift) | (a >> inverse)) ^
-           ((b >> shift) | (b << inverse)) ^
-           (c * (next | 1u)) ^ (d + (next >> 7)) ^
-           (e * (next | 3u)) ^ (f + (next >> 17)) ^
-           (g * (next | 5u)) ^ (h + (next >> 29));
+    return next ^ ((a << shift) | (a >> inverse)) ^ ((b >> shift) | (b << inverse)) ^ (c * (next | 1u)) ^ (d + (next >> 7)) ^ (e * (next | 3u)) ^
+        (f + (next >> 17)) ^ (g * (next | 5u)) ^ (h + (next >> 29));
 }
 
 // The two loops are source-equivalent.  The first deliberately computes
@@ -234,32 +231,32 @@ struct flat_pressure_context {
 
 static __always_inline long flat_pressure_step(struct flat_pressure_context* context) {
     switch (context->pc) {
-    case FLAT_PRESSURE_CALL:
-        context->argument = context->a + context->h;
-        context->pc = FLAT_PRESSURE_CALLEE;
-        return 0;
-    case FLAT_PRESSURE_CALLEE: {
-        context->result = ARITHMETIC_STEP(context->argument, context->index);
-        context->pc = FLAT_PRESSURE_RESUME;
-        return 0;
-    }
-    case FLAT_PRESSURE_RESUME: {
-        uint64_t next = context->result;
-        uint64_t a = next + context->b;
-        context->b ^= next + context->c;
-        context->c += next ^ context->d;
-        context->d = (context->d + context->e) ^ next;
-        context->e += context->f ^ next;
-        context->f = (context->f ^ context->g) + next;
-        context->g += context->h + next;
-        context->h ^= a + next;
-        context->a = a;
-        context->index++;
-        context->pc = context->index < context->trips ? FLAT_PRESSURE_CALL : FLAT_PRESSURE_DONE;
-        return 0;
-    }
-    default:
-        return 1;
+        case FLAT_PRESSURE_CALL:
+            context->argument = context->a + context->h;
+            context->pc = FLAT_PRESSURE_CALLEE;
+            return 0;
+        case FLAT_PRESSURE_CALLEE: {
+            context->result = ARITHMETIC_STEP(context->argument, context->index);
+            context->pc = FLAT_PRESSURE_RESUME;
+            return 0;
+        }
+        case FLAT_PRESSURE_RESUME: {
+            uint64_t next = context->result;
+            uint64_t a = next + context->b;
+            context->b ^= next + context->c;
+            context->c += next ^ context->d;
+            context->d = (context->d + context->e) ^ next;
+            context->e += context->f ^ next;
+            context->f = (context->f ^ context->g) + next;
+            context->g += context->h + next;
+            context->h ^= a + next;
+            context->a = a;
+            context->index++;
+            context->pc = context->index < context->trips ? FLAT_PRESSURE_CALL : FLAT_PRESSURE_DONE;
+            return 0;
+        }
+        default:
+            return 1;
     }
 }
 
@@ -294,36 +291,35 @@ struct pressure_chunk_context {
 // outer bound, while each callback runs several ordinary BPF iterations and
 // calls. State crosses the callback boundary once per chunk, not once per
 // managed call. Keep the body looped, rather than duplicating it N times.
-#define DEFINE_PRESSURE_CHUNK_CALLBACK(N)                                                        \
-    static long pressure_chunk_callback_##N(uint32_t chunk, void* opaque) {                      \
-        struct pressure_chunk_context* context = opaque;                                         \
-        uint64_t a = context->a, b = context->b, c = context->c, d = context->d;                 \
-        uint64_t e = context->e, f = context->f, g = context->g, h = context->h;                 \
-        uint32_t first = chunk * (N);                                                             \
-        _Pragma("clang loop unroll(disable)")                                                    \
-        for (uint32_t offset = 0; offset < (N); ++offset) {                                      \
-            uint32_t index = first + offset;                                                      \
-            if (index >= context->trips)                                                          \
-                break;                                                                            \
-            uint64_t next = direct_dynamic_leaf(a + h, index);                                   \
-            a = next + b;                                                                          \
-            b ^= next + c;                                                                         \
-            c += next ^ d;                                                                         \
-            d = (d + e) ^ next;                                                                    \
-            e += f ^ next;                                                                         \
-            f = (f ^ g) + next;                                                                    \
-            g += h + next;                                                                         \
-            h ^= a + next;                                                                          \
-        }                                                                                          \
-        context->a = a;                                                                            \
-        context->b = b;                                                                            \
-        context->c = c;                                                                            \
-        context->d = d;                                                                            \
-        context->e = e;                                                                            \
-        context->f = f;                                                                            \
-        context->g = g;                                                                            \
-        context->h = h;                                                                            \
-        return 0;                                                                                  \
+#define DEFINE_PRESSURE_CHUNK_CALLBACK(N) \
+    static long pressure_chunk_callback_##N(uint32_t chunk, void* opaque) { \
+        struct pressure_chunk_context* context = opaque; \
+        uint64_t a = context->a, b = context->b, c = context->c, d = context->d; \
+        uint64_t e = context->e, f = context->f, g = context->g, h = context->h; \
+        uint32_t first = chunk * (N); \
+        _Pragma("clang loop unroll(disable)") for (uint32_t offset = 0; offset < (N); ++offset) { \
+            uint32_t index = first + offset; \
+            if (index >= context->trips) \
+                break; \
+            uint64_t next = direct_dynamic_leaf(a + h, index); \
+            a = next + b; \
+            b ^= next + c; \
+            c += next ^ d; \
+            d = (d + e) ^ next; \
+            e += f ^ next; \
+            f = (f ^ g) + next; \
+            g += h + next; \
+            h ^= a + next; \
+        } \
+        context->a = a; \
+        context->b = b; \
+        context->c = c; \
+        context->d = d; \
+        context->e = e; \
+        context->f = f; \
+        context->g = g; \
+        context->h = h; \
+        return 0; \
     }
 
 DEFINE_PRESSURE_CHUNK_CALLBACK(1)
@@ -517,37 +513,51 @@ int overhead_direct_pressure_call_loop(void) {
 SEC("syscall")
 int overhead_flat_stack_pressure_call_loop(void) {
     uint32_t trips = overhead_state.trips;
-    if (trips > OVERHEAD_ARITHMETIC_TRIPS)
+    if (trips > OVERHEAD_ARITHMETIC_TRIPS) {
         trips = OVERHEAD_ARITHMETIC_TRIPS;
+    }
     struct flat_pressure_context context = {
-        .a = 1, .b = 2, .c = 3, .d = 4, .e = 5, .f = 6, .g = 7, .h = 8,
+        .a = 1,
+        .b = 2,
+        .c = 3,
+        .d = 4,
+        .e = 5,
+        .f = 6,
+        .g = 7,
+        .h = 8,
         .trips = trips,
         .pc = FLAT_PRESSURE_CALL,
     };
     bpf_loop(3u * trips + 1u, flat_stack_pressure_step_callback, &context, 0);
-    overhead_state.result = context.a ^ context.b ^ context.c ^ context.d ^
-                            context.e ^ context.f ^ context.g ^ context.h;
+    overhead_state.result = context.a ^ context.b ^ context.c ^ context.d ^ context.e ^ context.f ^ context.g ^ context.h;
     return 0;
 }
 
 SEC("syscall")
 int overhead_flat_map_pressure_call_loop(void) {
     uint32_t trips = overhead_state.trips;
-    if (trips > OVERHEAD_ARITHMETIC_TRIPS)
+    if (trips > OVERHEAD_ARITHMETIC_TRIPS) {
         trips = OVERHEAD_ARITHMETIC_TRIPS;
+    }
     uint32_t key = 0;
     struct flat_pressure_context* context = bpf_map_lookup_elem(&flat_pressure_contexts, &key);
-    if (!context)
+    if (!context) {
         return 0;
-    context->a = 1; context->b = 2; context->c = 3; context->d = 4;
-    context->e = 5; context->f = 6; context->g = 7; context->h = 8;
+    }
+    context->a = 1;
+    context->b = 2;
+    context->c = 3;
+    context->d = 4;
+    context->e = 5;
+    context->f = 6;
+    context->g = 7;
+    context->h = 8;
     context->index = 0;
     context->trips = trips;
     context->pc = FLAT_PRESSURE_CALL;
-    struct flat_map_pressure_callback_context callback_context = { .frame = context };
+    struct flat_map_pressure_callback_context callback_context = {.frame = context};
     bpf_loop(3u * trips + 1u, flat_map_pressure_step_callback, &callback_context, 0);
-    overhead_state.result = context->a ^ context->b ^ context->c ^ context->d ^
-                            context->e ^ context->f ^ context->g ^ context->h;
+    overhead_state.result = context->a ^ context->b ^ context->c ^ context->d ^ context->e ^ context->f ^ context->g ^ context->h;
     return 0;
 }
 
@@ -559,7 +569,7 @@ int overhead_maygoto_pressure_call_loop(void) {
     while (index < trips) {
         // The verifier may take this edge; at runtime it is only the safety
         // budget. The ordinary source exit normally wins first.
-        asm volatile goto("may_goto %l[budget]" :::: budget);
+        asm volatile goto("may_goto %l[budget]" :: ::budget);
         uint64_t next = direct_dynamic_leaf(a + h, index);
         a = next + b;
         b ^= next + c;
@@ -602,20 +612,27 @@ int overhead_iterator_pressure_call_loop(void) {
     return 0;
 }
 
-#define DEFINE_PRESSURE_CHUNK_PROGRAM(N)                                                         \
-    SEC("syscall")                                                                                \
-    int overhead_chunked_pressure_call_loop_##N(void) {                                          \
-        uint32_t trips = overhead_state.trips;                                                     \
-        if (trips > OVERHEAD_ARITHMETIC_TRIPS)                                                     \
-            trips = OVERHEAD_ARITHMETIC_TRIPS;                                                     \
-        struct pressure_chunk_context context = {                                                 \
-            .a = 1, .b = 2, .c = 3, .d = 4, .e = 5, .f = 6, .g = 7, .h = 8, .trips = trips,       \
-        };                                                                                         \
-        uint32_t chunks = (trips + (N)-1u) / (N);                                                 \
-        bpf_loop(chunks, pressure_chunk_callback_##N, &context, 0);                               \
-        overhead_state.result = context.a ^ context.b ^ context.c ^ context.d ^                   \
-                                context.e ^ context.f ^ context.g ^ context.h;                     \
-        return 0;                                                                                  \
+#define DEFINE_PRESSURE_CHUNK_PROGRAM(N) \
+    SEC("syscall") \
+    int overhead_chunked_pressure_call_loop_##N(void) { \
+        uint32_t trips = overhead_state.trips; \
+        if (trips > OVERHEAD_ARITHMETIC_TRIPS) \
+            trips = OVERHEAD_ARITHMETIC_TRIPS; \
+        struct pressure_chunk_context context = { \
+            .a = 1, \
+            .b = 2, \
+            .c = 3, \
+            .d = 4, \
+            .e = 5, \
+            .f = 6, \
+            .g = 7, \
+            .h = 8, \
+            .trips = trips, \
+        }; \
+        uint32_t chunks = (trips + (N) - 1u) / (N); \
+        bpf_loop(chunks, pressure_chunk_callback_##N, &context, 0); \
+        overhead_state.result = context.a ^ context.b ^ context.c ^ context.d ^ context.e ^ context.f ^ context.g ^ context.h; \
+        return 0; \
     }
 
 DEFINE_PRESSURE_CHUNK_PROGRAM(1)
@@ -658,8 +675,7 @@ int overhead_capsule_postcomputed_values_call_loop(void) {
 
 SEC("syscall")
 int overhead_capsule_recursive_chain(void) {
-    overhead_state.capsule = capsule_call(
-        (uint64_t*)&overhead_state.result, managed_recursive_chain, OVERHEAD_RECURSION_DEPTH);
+    overhead_state.capsule = capsule_call((uint64_t*)&overhead_state.result, managed_recursive_chain, OVERHEAD_RECURSION_DEPTH);
     return 0;
 }
 

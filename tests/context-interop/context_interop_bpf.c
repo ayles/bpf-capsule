@@ -77,6 +77,39 @@ int context_interop_run(struct xdp_md* context) {
     return context_interop_result.capsule.status == CAPSULE_OK ? XDP_PASS : XDP_ABORTED;
 }
 
+// The same work through a void root: the checksum travels through the data
+// section instead of an output slot, and the yield build resumes through
+// capsule_continue_void_ctx.
+volatile struct context_interop_output context_interop_void_result SEC(".data.ctxvoid");
+
+static void context_interop_void_body(void) {
+    context_interop_void_result.checksum = context_interop_body();
+}
+
+SEC("xdp")
+int context_interop_void_run(struct xdp_md* context) {
+    context_interop_void_result.protocol_error = 0;
+    context_interop_void_result.copied = 0;
+    context_interop_void_result.checksum = 0;
+    context_interop_void_result.capsule = capsule_call_void_ctx(context, context_interop_void_body);
+#if CONTEXT_INTEROP_YIELD
+    if (context_interop_void_result.capsule.status == CAPSULE_YIELD) {
+        context_interop_void_result.capsule = capsule_continue_void_ctx(context, context_interop_void_result.capsule.continuation);
+    }
+#endif
+    if (context_interop_void_result.capsule.status == CAPSULE_PENDING) {
+        struct capsule_result reset = capsule_reset(context_interop_void_result.capsule.continuation);
+        if (reset.status != CAPSULE_OK) {
+            context_interop_void_result.capsule = reset;
+        }
+        return XDP_ABORTED;
+    }
+    if (context_interop_void_result.capsule.status == CAPSULE_OK) {
+        context_interop_void_result.copied = CONTEXT_INTEROP_BYTES;
+    }
+    return context_interop_void_result.capsule.status == CAPSULE_OK ? XDP_PASS : XDP_ABORTED;
+}
+
 SEC("xdp")
 int context_interop_baseline(struct xdp_md* context) {
     return (unsigned char*)(long)context->data < (unsigned char*)(long)context->data_end ? XDP_PASS : XDP_ABORTED;
