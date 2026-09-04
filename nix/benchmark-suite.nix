@@ -63,7 +63,9 @@ stdenv.mkDerivation {
       asl20
       llvm-exception
       mit
+      bsd2
       bsd3
+      isc
     ];
     platforms = lib.platforms.linux;
   };

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Pass-facing constants for symbol names shared with the runtime and host.
 // Loader-visible spellings come from bpf_capsule_names.h; callable helper
-// names below remain centralized here and resolve against runtime/libc
+// names below remain centralized here and resolve against Capsule-owned C
 // definitions during the whole-program link.
 //
 // Metadata kind names (the passes' internal wire format) live in common.h as
@@ -116,8 +116,8 @@ inline constexpr llvm::StringLiteral StackAnchor{"bpf_capsule_stack_anchor"};
 
 // ------------------------------------------------ name prefixes
 
-// Every runtime/libc-internal symbol. The passes use this only to separate
-// runtime code from application code in diagnostics/BTF policy.
+// Every Capsule-owned internal symbol. The passes use this only to separate
+// toolchain code from application code in diagnostics/BTF policy.
 inline constexpr llvm::StringLiteral RuntimePrefix{"__bpf_"};
 
 // The runtime's heap accessors: each one is a memory access and must stay
@@ -127,14 +127,14 @@ inline constexpr llvm::StringLiteral HeapPrefix{"bpf_heap_"};
 inline constexpr llvm::StringLiteral HeapCommitPrefix{"bpf_heap_commit_"};
 inline constexpr llvm::StringLiteral StackAccessorPrefix{"bpf_stack_"};
 
-// ------------------------------------------------ arithmetic (runtime/libc)
+// ----------------------------------------------- arithmetic (compiler runtime)
 
 // Wide multiplication, defined in the runtime (bpf-expand-i128).
 inline constexpr llvm::StringLiteral Mul64Wide{"__bpf_mul64_wide"};
 inline constexpr llvm::StringLiteral UMul64Overflow{"__bpf_umul64_overflow"};
 inline constexpr llvm::StringLiteral SMul64Overflow{"__bpf_smul64_overflow"};
 
-// i128 arithmetic, defined in freestanding int128.c (bpf-expand-i128).
+// i128 arithmetic, defined in compiler-runtime int128.c (bpf-expand-i128).
 inline constexpr llvm::StringLiteral Mul128{"__bpf_mul128"};
 inline constexpr llvm::StringLiteral UDiv128{"__bpf_udiv128"};
 inline constexpr llvm::StringLiteral URem128{"__bpf_urem128"};
@@ -143,7 +143,7 @@ inline constexpr llvm::StringLiteral SRem128{"__bpf_srem128"};
 
 // ------------------------------------------------ soft-float (softfloat.c)
 
-// bpf-soft-float lowers f32/f64 operations to these libc routines.
+// bpf-soft-float lowers f32/f64 operations to these compiler-runtime routines.
 inline constexpr llvm::StringLiteral FAdd{"__bpf_fadd"};
 inline constexpr llvm::StringLiteral FSub{"__bpf_fsub"};
 inline constexpr llvm::StringLiteral FMul{"__bpf_fmul"};

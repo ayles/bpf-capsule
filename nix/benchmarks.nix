@@ -23,9 +23,9 @@ writeShellApplication {
     fi
     output="''${1:-benchmark-results/all.json}"
     scratch=$(mktemp -d)
-    trap 'rm -r "$scratch"' EXIT
+    trap 'rm -rf "$scratch"' EXIT
     artifact=${suite}
-    for name in smoke_benchmark lua_benchmark overhead_benchmark; do
+    for name in smoke_benchmark lua_benchmark overhead_benchmark memcpy_benchmark; do
       sudo taskset -c 0 env \
         BPF_CAPSULE_LUA_SCRIPT="$artifact/libexec/bpf-capsule/benchmarks/lua-script.lua" \
         "$artifact/libexec/bpf-capsule/benchmarks/$name" \

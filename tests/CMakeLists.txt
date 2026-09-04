@@ -105,8 +105,19 @@ add_test(
 )
 set_tests_properties(Linker.PlatformMarkers PROPERTIES LABELS "linker-contract;unprivileged")
 
+# A guest must never inherit headers from the host libc merely because the
+# host-side CMake project was configured with a native compiler.
+add_test(
+    NAME Compiler.NoHostLibcHeaders
+    COMMAND
+        "${CMAKE_COMMAND}" "-DCAPSULE_CC=$<TARGET_FILE:${BPF_CAPSULE_CC_TARGET}>"
+        -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/compiler/no_host_headers.c
+        -DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/no-host-headers.i -P
+        ${CMAKE_CURRENT_SOURCE_DIR}/compiler/VerifyIncludeIsolation.cmake
+)
+set_tests_properties(Compiler.NoHostLibcHeaders PROPERTIES LABELS "compiler-contract;unprivileged")
+
 set(test_source_dir "${CMAKE_CURRENT_SOURCE_DIR}")
-set(capsule_libc_dir "${BPF_CAPSULE_LIBC_DIR}")
 
 # ============================================================================
 # Pipeline: the smallest complete capsule program (recursive fib through the
@@ -187,20 +198,11 @@ set_tests_properties(SpillContract.HelperVisibleBuffer PROPERTIES LABELS "spill-
 
 capsule_gtest_host(errors_test UNPRIVILEGED SOURCES errors/errors_test.cc)
 
-# The compact libm algorithms also have native, kernel-free edge contracts.
-# Their guest equivalents below prove the same behavior after soft-float
-# lowering; this executable makes algorithm mistakes fail early and directly.
-add_executable(math_contract_test libc/math_contract.c ${capsule_libc_dir}/mathfns.c ${capsule_libc_dir}/strtod.c)
-target_include_directories(math_contract_test PRIVATE "${BPF_CAPSULE_INCLUDE_DIR}")
-target_compile_options(math_contract_test PRIVATE -fno-builtin)
-add_test(NAME Libc.MathContracts COMMAND math_contract_test)
-set_tests_properties(Libc.MathContracts PROPERTIES LABELS unprivileged)
-
-add_executable(int128_contract_test libc/int128_contract.c ${capsule_libc_dir}/int128.c)
+add_executable(int128_contract_test compiler-runtime/int128_contract.c ${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/int128.c)
 target_include_directories(int128_contract_test PRIVATE "${BPF_CAPSULE_INTERNAL_INCLUDE_DIR}")
 target_compile_options(int128_contract_test PRIVATE -fno-builtin)
-add_test(NAME Libc.Int128Contracts COMMAND int128_contract_test)
-set_tests_properties(Libc.Int128Contracts PROPERTIES LABELS unprivileged)
+add_test(NAME CompilerRuntime.Int128Contracts COMMAND int128_contract_test)
+set_tests_properties(CompilerRuntime.Int128Contracts PROPERTIES LABELS unprivileged)
 
 # ============================================================================
 # Runtime semantics: fibers, suspension, memory.
@@ -348,8 +350,8 @@ capsule_gtest_host(
     LIBRARIES pthread
 )
 
-# Freestanding libc under the transform: printf, strtoull edges, soft-float
-# specials, strtod, and allocator failure without a configured heap.
+# Picolibc under the transform: stdio and platform overrides, numeric parsing,
+# libm after soft-float lowering, and allocator failure without a heap.
 capsule_test_object(libc SOURCES libc/libc_bpf.c INCLUDE_DIRECTORIES ${test_source_dir}/libc)
 capsule_gtest_host(
     libc_test

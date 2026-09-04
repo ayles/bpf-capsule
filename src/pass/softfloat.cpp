@@ -10,7 +10,7 @@
 // Two halves, and the second is the reason this is a whole pass rather than
 // a peephole:
 //   - every floating-point *operation* becomes a call to an integer routine
-//     from src/libc/softfloat.c;
+//     from the compiler runtime;
 //   - every floating-point *value* becomes an integer of the same width,
 //     because a surviving f64 is an illegal type for instruction selection
 //     no matter what is done to the arithmetic. That means retyping
@@ -790,8 +790,7 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
                     // called with the mapped operands.
                     if (!impl || impl->isDeclaration()) {
                         ii->getContext().emitError(ii,
-                            Twine("bpf-soft-float: ") + ii->getCalledFunction()->getName() + " needs " + name +
-                                ", which is not defined in the linked program (src/libc/mathfns.c provides it)");
+                            Twine("bpf-soft-float: ") + ii->getCalledFunction()->getName() + " needs " + name + ", which is not defined in the linked image");
                         return PreservedAnalyses::all();
                     }
                     SmallVector<Value*> callArgs;

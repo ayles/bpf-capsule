@@ -1,8 +1,23 @@
 --- a/quickjs.c
 +++ b/quickjs.c
+@@ -34,7 +34,7 @@
+ #include <math.h>
+ #if defined(__APPLE__)
+ #include <malloc/malloc.h>
+-#elif defined(__linux__) || defined(__GLIBC__)
++#elif defined(__linux__) || defined(__GLIBC__) || defined(__PICOLIBC__)
+ #include <malloc.h>
+ #elif defined(__FreeBSD__)
+ #include <malloc_np.h>
 @@ -52 +52 @@
 -#if defined(__EMSCRIPTEN__)
 +#if defined(__EMSCRIPTEN__) || defined(CONFIG_NO_DIRECT_DISPATCH)
 @@ -71 +71 @@
 -#if !defined(__EMSCRIPTEN__)
 +#if !defined(__EMSCRIPTEN__) && !defined(CONFIG_NO_ATOMICS)
+@@ -47481 +47481,4 @@ static int getTimezoneOffset(int64_t time) {
+-#if defined(_WIN32)
++#if defined(CONFIG_UTC_TIMEZONE)
++    (void)time;
++    return 0;
++#elif defined(_WIN32)

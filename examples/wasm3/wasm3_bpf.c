@@ -14,8 +14,8 @@
 
 struct wasm3_bpf_ctrl w3ctrl SEC(".data.w3ctrl");
 
-// wasm3 allocates its runtime from the C allocator; freestanding.c serves it
-// out of the configured Capsule heap.
+// wasm3 allocates its runtime through libc; Capsule's TLSF-backed platform
+// serves it from the configured heap.
 enum { W3_STACK_BYTES = 256u << 10 };
 
 static const unsigned char zlib_wasm_module[] = {

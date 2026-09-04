@@ -68,8 +68,10 @@ framebuffer.
   in the fiber.
 - **The missing machine pieces are built in software.** Dynamic allocation,
   function pointers, software floating point, and wide-integer operations make
-  useful freestanding libraries possible on a CPU target that has no FPU and
-  almost no stack.
+  useful libraries possible on a CPU target that has no FPU and almost no
+  stack. Picolibc supplies the C library and libm; a small Capsule platform
+  layer supplies fiber-local `errno`, TLSF allocation, and replaceable I/O and
+  OS stubs.
 
 `bpf-capsule-cc` compiles C and C++ to LLVM bitcode; Cargo supplies bitcode for
 Rust. `bpf-capsule-ld` links and optimizes the whole program, performs the
@@ -101,7 +103,8 @@ matrix.
 
 Without Nix, building the SDK requires CMake 3.24 or newer, C17 and C++20
 compilers, LLVM and Clang 23 from the same installation, pkg-config, and
-libbpf 1.4 or newer. Generating a libbpf skeleton also requires `bpftool`.
+libbpf 1.4 or newer. Linux UAPI headers and `patch` are also needed while
+building the SDK; generating a libbpf skeleton additionally requires `bpftool`.
 Install the SDK to a prefix, then point a consumer project at it:
 
 ```sh
@@ -112,15 +115,15 @@ cmake -S examples/fib -B build/fib -DCMAKE_PREFIX_PATH="$PWD/build/prefix"
 cmake --build build/fib
 ```
 
-The tools also work directly. `bpf-capsule-cc` compiles the application, the
-installed `runtime/bpf_capsule.c`, and each installed libc source into ordinary
-bitcode in exactly the same way; pass all resulting `.bc` files to
-`bpf-capsule-ld`. The libc compilation additionally needs its `include` and
-TLSF directories on the include path. The default output targets conservative
-v3 BPF with fixed-map memory. For an arena build, compile the runtime with
-`BPF_CAPSULE_FEATURE_ARENA=1` and pass `--memory=arena` to the linker; an atomic
-allocator similarly pairs `BPF_CAPSULE_FEATURE_FULL_ATOMICS=1` on libc with
-`--allocator-lock=atomic`. The linker rejects mismatched inputs and options.
+The tools also work directly. `bpf-capsule-cc` compiles application, guest
+runtime, compiler-runtime, and platform translation units to ordinary bitcode;
+`bpf-capsule-ld` accepts those `.bc` files and the installed Picolibc `libc.a`.
+The compiler finds the installed Capsule headers and guest sysroot relative to
+its own executable. The platform's TLSF wrapper only needs the installed TLSF
+directory on its include path. Runtime feature defines must match the selected
+linker capabilities: the linker reads build markers and rejects a mismatched
+memory backend or allocator lock instead of producing a subtly wrong object.
+The public CMake helper performs this wiring automatically.
 
 ## Use from CMake
 
@@ -136,10 +139,10 @@ add_executable(guest guest_host.c)
 target_link_libraries(guest PRIVATE BpfCapsule::host guest_skeleton)
 ```
 
-`bpf_capsule_object` compiles the guest sources, adds the Capsule runtime and
-freestanding C library, and returns the completed object's path. Pass that path
-to `bpf_capsule_skeleton`; its linkable target carries the generated header and
-embeds the object in the host executable.
+`bpf_capsule_object` compiles the guest sources, adds the Capsule runtime,
+compiler runtime, platform layer, and Picolibc, and returns the completed
+object's path. Pass that path to `bpf_capsule_skeleton`; its linkable target
+carries the generated header and embeds the object in the host executable.
 
 The host lifecycle brackets libbpf's own load: call
 `bpf_capsule_configure()` before loading the object,
@@ -154,10 +157,15 @@ The API is defined by the
 
 ## Limits
 
-The Capsule environment is freestanding:
+The Capsule environment has a C library but no operating system:
 
-- Capsule-transformed code has no operating-system calls, threads, or general
-  TLS;
+- OS-facing functions such as `open`, `fork`, and `clock_gettime` fail with an
+  ordinary error by default; their weak platform definitions can be replaced
+  by an application-provided in-memory or context-backed implementation;
+- there are no processes, threads, or general TLS;
+- `errno` is fiber-local and the allocator is concurrency-safe, but other
+  libc interfaces with implicit mutable state (for example `strtok` or
+  `localtime`) must not be shared by simultaneously running fibers;
 - C `setjmp`/`longjmp` works within a live Capsule invocation, but C++
   exceptions, RTTI, and general cleanup unwinding are disabled;
 - an entry context may be lent explicitly with `capsule_call_ctx()` and read in
@@ -178,4 +186,6 @@ floating point can cost considerably more. The [benchmarks](benchmarks) provide
 exact local measurements.
 
 The project is licensed under Apache-2.0 with the LLVM exception. Fetched and
-vendored components retain their upstream licensing notices.
+vendored components retain their upstream licensing notices. The exception
+covers Capsule code embedded in compiler output, including output linked with
+GPLv2 programs.

@@ -124,7 +124,9 @@ stdenv.mkDerivation {
       [
         asl20
         llvm-exception
+        bsd2
         bsd3
+        isc
       ]
       ++ {
         fib = [ ];

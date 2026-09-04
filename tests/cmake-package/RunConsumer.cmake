@@ -50,6 +50,19 @@ run_checked("building installed-package consumer"
     "${CMAKE_COMMAND}" --build "${WORK}/consumer" --parallel 2
 )
 
+# The installed compiler is useful without CMake too. It must find the
+# packaged guest sysroot relative to itself, never a C library from the host.
+get_filename_component(prefix "${PACKAGE_DIR}/../../.." ABSOLUTE)
+file(MAKE_DIRECTORY "${WORK}/bin")
+run_checked(
+    "creating installed-compiler symlink"
+    "${CMAKE_COMMAND}" -E create_symlink "${prefix}/bin/bpf-capsule-cc" "${WORK}/bin/bpf-capsule-cc"
+)
+run_checked(
+    "compiling through the installed guest sysroot"
+    "${WORK}/bin/bpf-capsule-cc" -c "${CONSUMER_SOURCE}/sysroot.c" -o "${WORK}/sysroot.bc"
+)
+
 set(object "${WORK}/consumer/smoke.bpf.o")
 foreach(product IN ITEMS "${object}" "${WORK}/consumer/host_smoke")
     if(NOT EXISTS "${product}")

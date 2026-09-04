@@ -49,7 +49,14 @@ import ./run.nix {
       local name="$1" marker="$2" drains="$3"
       shift 3
       printf 'RUN:%s\n' "$name"
-      example_output="$("$@" 2>&1)"
+      if example_output="$("$@" 2>&1)"; then
+        :
+      else
+        status=$?
+        printf '%s\n' "$example_output"
+        printf '%s exited with status %s\n' "$name" "$status" >&2
+        exit "$status"
+      fi
       printf '%s\n' "$example_output"
       if [[ "$example_output" != *"$marker"* ]]; then
         printf '%s did not print %q\n' "$name" "$marker" >&2
@@ -72,10 +79,10 @@ import ./run.nix {
     run_example rust 'Rust panic: status=exited code=101' 0 ${examples.rust}/bin/rust
 
     story='text: Once upon a time, there was a little girl named Lily. She loved to play outside in the park.'
-    run_example llama2 "$story" 15 env BPF_CAPSULE_MAX_DRAINS=15 \
+    run_example llama2 "$story" 11 env BPF_CAPSULE_MAX_DRAINS=11 \
       ${examples.llama2}/bin/llama2 ${llamaModel} 32 ${llamaTokenizer}
     [[ "$example_output" == *'native reference: match'* ]]
-    run_example llama2-q8 "$story" 10 env BPF_CAPSULE_MAX_DRAINS=10 \
+    run_example llama2-q8 "$story" 6 env BPF_CAPSULE_MAX_DRAINS=6 \
       ${examples.llama2}/bin/llama2-q8 ${llamaQ8Model} 32 ${llamaTokenizer}
     [[ "$example_output" == *'native reference: match'* ]]
 

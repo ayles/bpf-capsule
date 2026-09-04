@@ -18,7 +18,7 @@ namespace {
 
 // The BPF backend legalizes i128 by splitting for every operation except
 // mul, div and rem, which become libcalls (__multi3, __udivti3) the kernel
-// cannot host. All of that arithmetic lives as C in the freestanding
+// cannot host. All of that arithmetic lives as C in the compiler runtime's
 // int128.c (__bpf_mul128, __bpf_udiv128/__bpf_sdiv128 and friends, plus the
 // 64-bit overflow-multiply helpers the backend would otherwise expand through
 // the same libcall); this pass only decomposes each operation into i64 words
@@ -122,7 +122,7 @@ struct ExpandI128Pass : public PassInfoMixin<ExpandI128Pass> {
         if (!helper || helper->isDeclaration()) {
             report_fatal_error(Twine("bpf-expand-i128: ") + name +
                 " needed but the source defining it (bpf_capsule.c for 64-bit overflow multiply, "
-                "freestanding int128.c for i128 arithmetic) is not linked in");
+                "compiler-runtime int128.c for i128 arithmetic) is not linked in");
         }
         Value* pair = nullptr;
         if (helper->arg_size() > args.size() && helper->getArg(0)->hasStructRetAttr()) {

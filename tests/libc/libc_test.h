@@ -19,4 +19,8 @@ struct libc_test_result {
     char formatted[160];
     char floats[160];
     char float_edges[160];
+    char printed[32];
+    int printed_result;
+    unsigned int printed_length;
+    unsigned int atexit_calls;
 };

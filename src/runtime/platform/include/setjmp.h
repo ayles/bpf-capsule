@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #pragma once
 
-// Opaque saved {pc, sp, fp, result-slot} software-machine state.
+// Opaque saved {pc, sp, fp, result-slot} software-machine state. Picolibc's
+// target setjmp cannot describe a Capsule fiber, so this is the one standard
+// header supplied by the platform overlay.
 typedef unsigned long long jmp_buf[4];
 int __bpf_capsule_setjmp(jmp_buf) __attribute__((returns_twice));
 void __bpf_capsule_longjmp(jmp_buf, int) __attribute__((noreturn));

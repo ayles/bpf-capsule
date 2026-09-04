@@ -1,0 +1,8 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -147 +147,3 @@
+-set(__INIT_FINI_ARRAY 1)
++if(NOT DEFINED __INIT_FINI_ARRAY)
++  set(__INIT_FINI_ARRAY 1)
++endif()

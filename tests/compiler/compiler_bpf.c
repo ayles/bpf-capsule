@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
+#include <inttypes.h>
+#include <malloc.h>
 #include <setjmp.h>
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "bpf_capsule.h"
 #include "compiler_test.h"
+
+_Static_assert(__STDC_HOSTED__ == 0, "Capsule guests must use the freestanding C environment");
+_Static_assert(sizeof("%" PRId64) > 1, "Picolibc integer format macros must be available");
 
 volatile struct compiler_test_result compiler_result SEC(".data.ctres");
 volatile int compiler_input SEC(".data.ctin") = 18;
@@ -20,12 +26,6 @@ uint64_t compiler_jump_continuation SEC(".data.ctstate") = BPF_CAPSULE_NO_CONTIN
 volatile uint64_t compiler_fiber_spin SEC(".data.ctstate");
 volatile unsigned int compiler_native_atomic32 SEC(".data.ctatomic") = 11;
 volatile uint64_t compiler_native_atomic64 SEC(".data.ctatomic") = 101;
-
-extern void* malloc(unsigned long size);
-extern void* memalign(unsigned long alignment, unsigned long size);
-extern void* realloc(void* pointer, unsigned long size);
-extern void free(void* pointer);
-extern unsigned long malloc_usable_size(void* pointer);
 
 // Giving the declaration an LLVM intrinsic name makes this a direct test of
 // the soft-float intrinsic-to-libm lowering, not of a C library shim.
@@ -757,7 +757,18 @@ static void compiler_allocator_body(unsigned int lane) {
         for (unsigned int slot = 0; slot < 6; ++slot) {
             unsigned int size = ((round * 97u + slot * 53u + lane * 29u) & 511u) + 16u;
             sizes[slot] = size;
-            blocks[slot] = slot == 0 ? memalign(64, size) : malloc(size);
+            if (slot != 0) {
+                blocks[slot] = malloc(size);
+            } else if (round % 3u == 0) {
+                blocks[slot] = memalign(64, size);
+            } else if (round % 3u == 1) {
+                blocks[slot] = aligned_alloc(64, (size + 63u) & ~63u);
+            } else {
+                void* aligned = 0;
+                if (!posix_memalign(&aligned, 64, size)) {
+                    blocks[slot] = aligned;
+                }
+            }
             operations++;
             if (!blocks[slot]) {
                 failures |= 1ull << slot;

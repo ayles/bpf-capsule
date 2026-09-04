@@ -513,6 +513,13 @@ public:
         // uses remain are address-of uses (dispatch tables, comparisons) and
         // become the function's integer id. RAUW rather than Use::set: some of
         // those uses live inside uniqued constant initializers.
+        // Source-level `used` retention has completed its job by this point.
+        // It is not an executable address use, and replacing its Function
+        // operand with a Capsule token would make llvm.compiler.used invalid.
+        removeFromUsedLists(Module_, [&](Constant* value) {
+            auto* function = dyn_cast<Function>(value->stripPointerCasts());
+            return function && llvm::any_of(Managed_, [&](const auto& managed) { return managed.first == function; });
+        });
         for (auto&& [func, info] : Managed_) {
             for (auto&& use : func->uses()) {
                 if (auto* call = dyn_cast<CallBase>(use.getUser()); call && call->isCallee(&use)) {

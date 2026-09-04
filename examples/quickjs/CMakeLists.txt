@@ -48,6 +48,9 @@ bpf_capsule_object(
         # allocator accounting that Capsule supports.
         CONFIG_NO_DIRECT_DISPATCH
         CONFIG_NO_ATOMICS
+        # Capsule's default platform has no timezone database and defines
+        # local time as UTC.
+        CONFIG_UTC_TIMEZONE
     COMPILE_OPTIONS -g
     LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
 )

@@ -62,8 +62,6 @@ const char* bpf_capsule_error_string(int64_t code) {
             return "unreachable code executed";
         case CAPSULE_ERROR_TRAP:
             return "trap executed";
-        case CAPSULE_ERROR_UNSUPPORTED_LIBC:
-            return "unsupported libc operation";
         case CAPSULE_ERROR_ALLOCATOR_CORRUPT:
             return "allocator state corrupt";
         case CAPSULE_ERROR_BAD_PLAN:

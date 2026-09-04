@@ -103,3 +103,19 @@ capsule_benchmark(
     INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/overhead"
     SKELETONS overhead_skeleton
 )
+
+bpf_capsule_object(
+    memcpy_bpf
+    OUTPUT memcpy.bpf.o
+    SOURCES memcpy/memcpy_bpf.c
+    INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/memcpy"
+    COMPILE_OPTIONS -g
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
+)
+bpf_capsule_skeleton(memcpy_skeleton OUTPUT memcpy.skel.h OBJECT "${memcpy_bpf}" NAME memcpy)
+capsule_benchmark(
+    memcpy_benchmark
+    SOURCES memcpy/memcpy_benchmark.cc
+    INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/memcpy"
+    SKELETONS memcpy_skeleton
+)

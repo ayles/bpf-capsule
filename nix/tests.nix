@@ -88,6 +88,7 @@ stdenv.mkDerivation {
       mit
       bsd3
       bsd2
+      isc
     ];
     platforms = lib.platforms.linux;
   };

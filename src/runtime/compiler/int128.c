@@ -20,7 +20,6 @@
 static int u128_ge(unsigned long long alo, unsigned long long ahi, unsigned long long blo, unsigned long long bhi) {
     return ahi > bhi || (ahi == bhi && alo >= blo);
 }
-
 // Count leading zeros of a nonzero 64-bit value. Softfloat uses a branchless
 // version because its long division would multiply these states across many
 // iterations; the int128 paths below have only bounded correction steps, so

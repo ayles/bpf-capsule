@@ -38,11 +38,6 @@ public:
         if (function.isDeclaration()) {
             return PreservedAnalyses::all();
         }
-        // Capsule links a freestanding image: calls named like C library
-        // routines resolve inside it and are not host libcalls. Without the
-        // module-wide contract LLVM can rewrite a linked definition back
-        // into an unresolved declaration during -O2.
-        function.addFnAttr("no-builtins");
         bpf::MaterializeFunctionClasses(*function.getParent());
         // A managed variadic function owns the caller-laid argument tail in
         // its software frame. Inlining it would move llvm.va_start into a

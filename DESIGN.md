@@ -229,6 +229,17 @@ the lock.
 Function classes are declared by explicit attribute, never inferred from
 names; symbol names are link-time contracts only.
 
+The library boundary is conventional. Picolibc is a profile-neutral bitcode
+archive, and the linker extracts only members reached by the application.
+Capsule owns the smaller pieces that cannot be generic: compiler-emitted
+soft-float and wide-integer helpers, fiber-local `errno`, the TLSF heap adapter,
+and weak OS-facing functions that fail unless the application replaces them.
+These sources are compiled like any other guest translation unit before the
+whole-program link. `errno` follows the fiber and the heap is synchronized;
+other libc APIs with implicit process-global state retain Picolibc's
+single-threaded contract and cannot be shared concurrently across fibers. The
+default platform has no environment or timezone database, so local time is UTC.
+
 The load-time contract is a 56-byte frozen `.rodata` config (magic
 `"BPCA"`, version, layout, backend, fiber geometry, the window base).
 Frozen-map reads constant-fold in the verifier, so config fields are
@@ -243,8 +254,8 @@ immediately before libbpf destroys the object.
 ## The transformation pipeline
 
 `bpf-capsule-cc` uses clang to emit per-translation-unit bitcode.
-`bpf-capsule-ld` links the complete application and runtime, then performs six
-logical phases:
+`bpf-capsule-ld` resolves the complete application, runtime, and referenced
+Picolibc archive members, then performs six logical phases:
 
 1. **Normalize the source ABI.** Variadics and aggregate returns become
    explicit memory operations. `capsule_call`, exits, atomics, unsupported
@@ -252,7 +263,9 @@ logical phases:
    can optimize across their boundaries.
 2. **Optimize the whole program.** The native and managed domains are checked,
    suspension barriers bracket ordinary LLVM O2, and the call graph is checked
-   again after optimization has reshaped it.
+   again after optimization has reshaped it. If O2 introduces another library
+   call, the required archive member is resolved and this preparation is
+   repeated from the untouched linked module before region formation.
 3. **Expose verifier-scale work.** Large memory operations become bounded
    loops, irreducible control flow is normalized, and Stackify turns managed
    calls, returns, yields, and unsuitable loop backedges into regions with

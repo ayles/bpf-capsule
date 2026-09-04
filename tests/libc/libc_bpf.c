@@ -4,15 +4,39 @@
 
 #include <errno.h>
 #include <fenv.h>
+#include <inttypes.h>
+#include <malloc.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "bpf_capsule.h"
 #include "libc_test.h"
 
 volatile struct libc_test_result libc_test_output SEC(".data.libctest");
+
+// A guest can replace the weak platform beneath Picolibc. printf reaches this
+// implementation through Capsule's default stdout stream.
+ssize_t write(int fd, const void* buffer, size_t size) {
+    struct libc_test_result* output = (struct libc_test_result*)&libc_test_output;
+    if (fd != STDOUT_FILENO) {
+        errno = EBADF;
+        return -1;
+    }
+    if (!size) {
+        return 0;
+    }
+    if (size != 1 || output->printed_length == sizeof(output->printed)) {
+        errno = ENOSPC;
+        return -1;
+    }
+    output->printed[output->printed_length++] = *(const char*)buffer;
+    return 1;
+}
 
 static double from_bits(unsigned long long bits) {
     double value;
@@ -26,6 +50,10 @@ static unsigned long long to_bits(double value) {
     return bits;
 }
 
+static void libc_exit_handler(void) {
+    libc_test_output.atexit_calls++;
+}
+
 static void libc_test_body(void) {
     struct libc_test_result* output = (struct libc_test_result*)&libc_test_output;
     const long long signed_min = (-9223372036854775807ll - 1ll);
@@ -35,7 +63,7 @@ static void libc_test_body(void) {
     char float_edges[sizeof(output->float_edges)];
     output->truncated_length = snprintf(truncated, sizeof(truncated), "%lld", signed_min);
     output->formatted_length = snprintf(formatted, sizeof(formatted), "%hhd/%hd/%ld/%lld/%zu/%jd/%#08x/%#o/%3c/%-5s/%.*s/%%", (int)-7, (int)-32000, (long)-9,
-        signed_min, (unsigned long)17, signed_min, 0x2au, 9u, 'Q', "xy", 3, "abcdef");
+        signed_min, (unsigned long)17, (intmax_t)signed_min, 0x2au, 9u, 'Q', "xy", 3, "abcdef");
     output->float_length = snprintf(floats, sizeof(floats), "%.15g/%+.2f/%.3e/%a/%A/%.0f/%#.0f/%g/%G", 12.5, 1.25, 1234.0, 3.0, 0.1, 2.5, 2.5,
         from_bits(0x7ff0000000000000ull), from_bits(0x7ff8000000000000ull));
     output->float_edge_length = snprintf(float_edges, sizeof(float_edges), "%.17g|%.17g|%010.2f|%#.0a|%.0f|%g|%.3g|%.3g", from_bits(1),
@@ -107,6 +135,18 @@ static void libc_test_body(void) {
         output->failures |= 1ull << 15;
     }
 
+    errno = 0;
+    if (fopen("missing", "r") != NULL || errno != ENOSYS) {
+        output->failures |= 1ull << 21;
+    }
+    if (getenv("CAPSULE_MISSING") != NULL) {
+        output->failures |= 1ull << 22;
+    }
+    output->printed_result = printf("capsule stdio %d", 17);
+    if (output->printed_result != 16 || output->printed_length != 16) {
+        output->failures |= 1ull << 23;
+    }
+
     const char* decimal = "-12.5tail";
     errno = 0;
     if (to_bits(strtod(decimal, &end)) != 0xc029000000000000ull || end != decimal + 5 || errno) {
@@ -118,7 +158,7 @@ static void libc_test_body(void) {
     }
     const char* subnormal = "0x1p-1074/";
     errno = 0;
-    if (to_bits(strtod(subnormal, &end)) != 1 || *end != '/' || errno) {
+    if (to_bits(strtod(subnormal, &end)) != 1 || *end != '/' || errno != ERANGE) {
         output->failures |= 1ull << 18;
     }
     const char* overflow = "1e999999999999999999999x";
@@ -136,6 +176,40 @@ static void libc_test_body(void) {
     if (malloc(1) || errno != ENOMEM) {
         output->failures |= 1ull << 8;
     }
+    errno = 0;
+    volatile size_t invalid_alignment = 3;
+    if (memalign(invalid_alignment, 16) || errno != EINVAL) {
+        output->failures |= 1ull << 24;
+    }
+    void* untouched = (void*)1;
+    if (posix_memalign(&untouched, 3, 16) != EINVAL || untouched != (void*)1) {
+        output->failures |= 1ull << 25;
+    }
+    unsigned char entropy = 0;
+    errno = 0;
+    if (getentropy(&entropy, sizeof(entropy)) != -1 || errno != ENOSYS) {
+        output->failures |= 1ull << 26;
+    }
+    errno = 0;
+    if (sbrk(1) != (void*)-1 || errno != ENOSYS) {
+        output->failures |= 1ull << 27;
+    }
+    sigset_t mask = {0};
+    errno = 0;
+    if (sigprocmask(SIG_SETMASK, &mask, 0) != -1 || errno != ENOSYS) {
+        output->failures |= 1ull << 28;
+    }
+    time_t epoch = 0;
+    struct tm local;
+    if (localtime_r(&epoch, &local) != &local || local.tm_year != 70 || local.tm_mon != 0 || local.tm_mday != 1 || local.tm_hour != 0 || local.tm_min != 0 ||
+        local.tm_sec != 0 || local.tm_wday != 4 || local.tm_yday != 0 || local.tm_isdst != 0) {
+        output->failures |= 1ull << 29;
+    }
+
+    if (atexit(libc_exit_handler)) {
+        output->failures |= 1ull << 30;
+    }
+    exit(37);
 }
 
 SEC("syscall")

@@ -36,8 +36,18 @@ endif()
 if(NOT BPF_CAPSULE_RUNTIME_DIR)
     get_filename_component(BPF_CAPSULE_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/runtime/guest" ABSOLUTE)
 endif()
-if(NOT BPF_CAPSULE_LIBC_DIR)
-    get_filename_component(BPF_CAPSULE_LIBC_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/libc" ABSOLUTE)
+if(NOT BPF_CAPSULE_COMPILER_RUNTIME_DIR)
+    get_filename_component(
+        BPF_CAPSULE_COMPILER_RUNTIME_DIR
+        "${CMAKE_CURRENT_LIST_DIR}/../src/runtime/compiler"
+        ABSOLUTE
+    )
+endif()
+if(NOT BPF_CAPSULE_PLATFORM_DIR)
+    get_filename_component(BPF_CAPSULE_PLATFORM_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/runtime/platform" ABSOLUTE)
+endif()
+if(NOT BPF_CAPSULE_LIBC_ARCHIVE)
+    message(FATAL_ERROR "BPF Capsule C library archive is unavailable")
 endif()
 if(NOT BPF_CAPSULE_RUST_RUNTIME_DIR)
     get_filename_component(BPF_CAPSULE_RUST_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}/../src/rust/bpf-capsule-rt" ABSOLUTE)
@@ -60,12 +70,7 @@ function(_bpf_capsule_compile_bitcode out_var)
     if(NOT BPF_CAPSULE_LIBBPF_TARGET OR NOT TARGET ${BPF_CAPSULE_LIBBPF_TARGET})
         message(FATAL_ERROR "Set BPF_CAPSULE_LIBBPF_TARGET to the imported target that supplies libbpf headers")
     endif()
-
     set(common_flags ${ARG_COMPILE_OPTIONS})
-    # Capsule supplies the guest C environment. Put it before Clang's host
-    # include search for every source, not only sources which happen to name a
-    # libc implementation file themselves.
-    list(APPEND common_flags "-I${BPF_CAPSULE_LIBC_DIR}/include" "-I${BPF_CAPSULE_TLSF_DIR}")
     foreach(directory IN LISTS ARG_INCLUDE_DIRECTORIES)
         list(APPEND common_flags "-I${directory}")
     endforeach()
@@ -77,11 +82,6 @@ function(_bpf_capsule_compile_bitcode out_var)
             endif()
         endforeach()
     endif()
-    foreach(directory IN LISTS CMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES)
-        if(IS_ABSOLUTE "${directory}" AND IS_DIRECTORY "${directory}")
-            list(APPEND common_flags "-isystem${directory}")
-        endif()
-    endforeach()
     foreach(definition IN LISTS ARG_COMPILE_DEFINITIONS)
         if(definition MATCHES "^-D")
             list(APPEND common_flags "${definition}")
@@ -278,47 +278,67 @@ function(bpf_capsule_rust_bitcode out_var)
     set(${out_var} "${cargo_bitcode}" PARENT_SCOPE)
 endfunction()
 
-# Compile the guest C library once per consumer directory. It is part of the
-# toolchain, not an application source list; whole-program DCE removes every
-# implementation the linked program does not use.
-function(_bpf_capsule_libc_bitcode out_var)
+# Compile the compiler runtime once per consumer directory. These are
+# operations introduced by Capsule's LLVM passes, not C library routines.
+function(_bpf_capsule_compiler_runtime_bitcode out_var)
+    get_property(bitcode DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_BITCODE)
+    get_property(target DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_TARGET)
+    if(NOT bitcode)
+        _bpf_capsule_compile_bitcode(
+            bitcode
+            SOURCES "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/int128.c" "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/softfloat.c"
+            COMPILE_OPTIONS -g
+        )
+        string(MD5 target_id "${CMAKE_CURRENT_BINARY_DIR};compiler-runtime")
+        set(target "bpf_capsule_compiler_runtime_${target_id}")
+        add_custom_target(${target} DEPENDS ${bitcode})
+        set_property(DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_BITCODE "${bitcode}")
+        set_property(DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_TARGET "${target}")
+    endif()
+    set(${out_var} "${bitcode}" PARENT_SCOPE)
+    set(${out_var}_target "${target}" PARENT_SCOPE)
+endfunction()
+
+# Compile the Capsule-specific platform beneath Picolibc once per consumer
+# directory and allocator-lock shape. Picolibc itself remains a normal static
+# bitcode archive and is linked separately below.
+function(_bpf_capsule_platform_bitcode out_var)
     cmake_parse_arguments(ARG "" "" "COMPILE_DEFINITIONS" ${ARGN})
     if(ARG_UNPARSED_ARGUMENTS)
         message(
             FATAL_ERROR
-            "_bpf_capsule_libc_bitcode(${out_var}) received unknown arguments: ${ARG_UNPARSED_ARGUMENTS}"
+            "_bpf_capsule_platform_bitcode(${out_var}) received unknown arguments: ${ARG_UNPARSED_ARGUMENTS}"
         )
     endif()
-    string(MD5 libc_key "${ARG_COMPILE_DEFINITIONS}")
-    get_property(libc_bitcode DIRECTORY PROPERTY "BPF_CAPSULE_LIBC_BITCODE_${libc_key}")
-    get_property(libc_target DIRECTORY PROPERTY "BPF_CAPSULE_LIBC_TARGET_${libc_key}")
-    if(NOT libc_bitcode)
-        if(NOT IS_DIRECTORY "${BPF_CAPSULE_LIBC_DIR}")
-            message(FATAL_ERROR "BPF Capsule libc sources are unavailable: ${BPF_CAPSULE_LIBC_DIR}")
+    string(MD5 platform_key "${ARG_COMPILE_DEFINITIONS}")
+    get_property(platform_bitcode DIRECTORY PROPERTY "BPF_CAPSULE_PLATFORM_BITCODE_${platform_key}")
+    get_property(platform_target DIRECTORY PROPERTY "BPF_CAPSULE_PLATFORM_TARGET_${platform_key}")
+    if(NOT platform_bitcode)
+        if(NOT IS_DIRECTORY "${BPF_CAPSULE_PLATFORM_DIR}")
+            message(FATAL_ERROR "BPF Capsule platform sources are unavailable: ${BPF_CAPSULE_PLATFORM_DIR}")
         endif()
         if(NOT IS_DIRECTORY "${BPF_CAPSULE_TLSF_DIR}")
             message(FATAL_ERROR "BPF Capsule TLSF sources are unavailable: ${BPF_CAPSULE_TLSF_DIR}")
         endif()
         _bpf_capsule_compile_bitcode(
-            libc_bitcode
+            platform_bitcode
             SOURCES
-                "${BPF_CAPSULE_LIBC_DIR}/freestanding.c"
-                "${BPF_CAPSULE_LIBC_DIR}/tlsf_capsule.c"
-                "${BPF_CAPSULE_LIBC_DIR}/int128.c"
-                "${BPF_CAPSULE_LIBC_DIR}/softfloat.c"
-                "${BPF_CAPSULE_LIBC_DIR}/mathfns.c"
-                "${BPF_CAPSULE_LIBC_DIR}/strtod.c"
+                "${BPF_CAPSULE_PLATFORM_DIR}/allocator.c"
+                "${BPF_CAPSULE_PLATFORM_DIR}/picolibc.c"
+                "${BPF_CAPSULE_PLATFORM_DIR}/syscalls.c"
+                "${BPF_CAPSULE_PLATFORM_DIR}/tlsf_capsule.c"
+            INCLUDE_DIRECTORIES "${BPF_CAPSULE_TLSF_DIR}"
             COMPILE_DEFINITIONS ${ARG_COMPILE_DEFINITIONS}
             COMPILE_OPTIONS -g
         )
-        string(MD5 target_id "${CMAKE_CURRENT_BINARY_DIR};libc;${libc_key}")
-        set(libc_target "bpf_capsule_libc_${target_id}")
-        add_custom_target(${libc_target} DEPENDS ${libc_bitcode})
-        set_property(DIRECTORY PROPERTY "BPF_CAPSULE_LIBC_BITCODE_${libc_key}" "${libc_bitcode}")
-        set_property(DIRECTORY PROPERTY "BPF_CAPSULE_LIBC_TARGET_${libc_key}" "${libc_target}")
+        string(MD5 target_id "${CMAKE_CURRENT_BINARY_DIR};platform;${platform_key}")
+        set(platform_target "bpf_capsule_platform_${target_id}")
+        add_custom_target(${platform_target} DEPENDS ${platform_bitcode})
+        set_property(DIRECTORY PROPERTY "BPF_CAPSULE_PLATFORM_BITCODE_${platform_key}" "${platform_bitcode}")
+        set_property(DIRECTORY PROPERTY "BPF_CAPSULE_PLATFORM_TARGET_${platform_key}" "${platform_target}")
     endif()
-    set(${out_var} "${libc_bitcode}" PARENT_SCOPE)
-    set(${out_var}_target "${libc_target}" PARENT_SCOPE)
+    set(${out_var} "${platform_bitcode}" PARENT_SCOPE)
+    set(${out_var}_target "${platform_target}" PARENT_SCOPE)
 endfunction()
 
 # Compile the object runtime once per directory and geometry definition set.
@@ -387,11 +407,11 @@ function(bpf_capsule_object out_var)
         list(APPEND input_bitcode ${compiled_bitcode})
     endif()
 
-    # The linker owns target selection. Compile only its private runtime/libc
-    # inputs in the matching shape; application translation units remain
-    # target-neutral LLVM bitcode and receive their final target-cpu in ld.
+    # The linker owns target selection. Compile only its private runtime and
+    # platform inputs in the matching shape; application translation units
+    # remain profile-neutral LLVM bitcode and receive their final target-cpu in ld.
     set(runtime_definitions ${ARG_SYSTEM_COMPILE_DEFINITIONS})
-    set(libc_definitions ${ARG_SYSTEM_COMPILE_DEFINITIONS})
+    set(platform_definitions ${ARG_SYSTEM_COMPILE_DEFINITIONS})
     set(memory_backend fixed)
     set(allocator_lock map)
     set(expect_memory_value OFF)
@@ -420,26 +440,32 @@ function(bpf_capsule_object out_var)
         list(APPEND runtime_definitions BPF_CAPSULE_FEATURE_ARENA=1)
     endif()
     if(allocator_lock STREQUAL "atomic")
-        list(APPEND libc_definitions BPF_CAPSULE_FEATURE_FULL_ATOMICS=1)
+        list(APPEND platform_definitions BPF_CAPSULE_FEATURE_FULL_ATOMICS=1)
     endif()
     list(REMOVE_DUPLICATES runtime_definitions)
-    list(REMOVE_DUPLICATES libc_definitions)
+    list(REMOVE_DUPLICATES platform_definitions)
 
     _bpf_capsule_runtime_bitcode(runtime_bitcode COMPILE_DEFINITIONS ${runtime_definitions})
-    _bpf_capsule_libc_bitcode(libc_bitcode COMPILE_DEFINITIONS ${libc_definitions})
+    _bpf_capsule_compiler_runtime_bitcode(compiler_runtime_bitcode)
+    _bpf_capsule_platform_bitcode(platform_bitcode COMPILE_DEFINITIONS ${platform_definitions})
     add_custom_command(
         OUTPUT "${output}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${output_directory}"
         COMMAND
             $<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}> --fiber-stack "${BPF_CAPSULE_FIBER_STACK_BYTES}" ${ARG_LINK_OPTIONS}
-            -o "${output}" ${input_bitcode} ${runtime_bitcode} ${libc_bitcode}
+            -o "${output}" ${input_bitcode} ${runtime_bitcode} ${compiler_runtime_bitcode} ${platform_bitcode}
+            "${BPF_CAPSULE_LIBC_ARCHIVE}"
         DEPENDS
             ${BPF_CAPSULE_LD_TARGET}
             ${input_bitcode}
             ${runtime_bitcode}
             ${runtime_bitcode_target}
-            ${libc_bitcode}
-            ${libc_bitcode_target}
+            ${compiler_runtime_bitcode}
+            ${compiler_runtime_bitcode_target}
+            ${platform_bitcode}
+            ${platform_bitcode_target}
+            "${BPF_CAPSULE_LIBC_ARCHIVE}"
+            ${BPF_CAPSULE_LIBC_TARGET}
             ${ARG_DEPENDS}
         COMMENT "capsule-ld: ${out_var}"
         COMMAND_EXPAND_LISTS

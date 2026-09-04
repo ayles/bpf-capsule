@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Private C linkage between the Capsule runtime and freestanding int128.c.
+// Private C linkage between the Capsule runtime and compiler-runtime int128.c.
 #pragma once
 
 struct bpf_u128_pair {

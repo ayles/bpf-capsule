@@ -18,8 +18,8 @@ entry:
   ret i32 %c
 }
 
-attributes #0 = { mustprogress nofree noinline norecurse nosync nounwind willreturn memory(none) "no-builtins" }
-attributes #1 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) "no-builtins" }
+attributes #0 = { mustprogress nofree noinline norecurse nosync nounwind willreturn memory(none) }
+attributes #1 = { mustprogress nofree norecurse nosync nounwind willreturn memory(none) }
 
 !llvm.module.flags = !{!0}
 

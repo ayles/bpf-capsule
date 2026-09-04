@@ -143,7 +143,6 @@ TEST(ErrorStrings, CodeNames) {
         {CAPSULE_ERROR_INTRINSIC_GUARD, "unlowered compiler intrinsic"},
         {CAPSULE_ERROR_UNREACHABLE, "unreachable code executed"},
         {CAPSULE_ERROR_TRAP, "trap executed"},
-        {CAPSULE_ERROR_UNSUPPORTED_LIBC, "unsupported libc operation"},
         {CAPSULE_ERROR_ALLOCATOR_CORRUPT, "allocator state corrupt"},
         {CAPSULE_ERROR_BAD_PLAN, "loader applied an incomplete configuration plan"},
         // Non-negative codes are the guest's own exit statuses.

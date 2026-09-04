@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Freestanding build of mattconte/tlsf at commit
+// Capsule build of mattconte/tlsf at commit
 // deff9ab509341f264addbd3c8ada533678591905. The SDK fetches and installs the
 // unmodified upstream sources; every Capsule adaptation lives here:
 //
@@ -10,8 +10,9 @@
 //     inspection-helper output, and this build has no process stdout;
 //     allocator operations must stay independent of fiber-local stdio.
 //
-// The libc headers are included first so the stubs cannot mangle their
-// declarations; the upstream #includes then reduce to include guards.
+// NDEBUG selects the standard no-op assert implementation. Include stdio
+// before replacing printf so the declaration itself remains intact.
+#define NDEBUG 1
 #include <assert.h>
 #include <limits.h>
 #include <stddef.h>
@@ -19,8 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#undef assert
-#define assert(x) ((void)0)
 #undef printf
 #define printf(...) ((void)0)
 

@@ -1,1 +1,1 @@
-bpf-soft-float: llvm.sqrt.f64 needs sqrt, which is not defined in the linked program
+bpf-soft-float: llvm.sqrt.f64 needs sqrt, which is not defined in the linked image
