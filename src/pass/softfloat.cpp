@@ -276,11 +276,15 @@ struct SoftFloat {
         auto isZero = [&] { return b.CreateICmpEQ(magnitude, ConstantInt::get(type, 0)); };
         auto isNormal = [&] {
             Value* exponent = b.CreateAnd(magnitude, ConstantInt::get(type, exponentMask));
-            return b.CreateAnd(b.CreateICmpNE(exponent, ConstantInt::get(type, 0)), b.CreateICmpNE(exponent, ConstantInt::get(type, exponentMask)));
+            Value* nonzero = b.CreateICmpNE(exponent, ConstantInt::get(type, 0));
+            Value* finite = b.CreateICmpNE(exponent, ConstantInt::get(type, exponentMask));
+            return b.CreateAnd(nonzero, finite);
         };
         auto isSubnormal = [&] {
             Value* exponent = b.CreateAnd(magnitude, ConstantInt::get(type, exponentMask));
-            return b.CreateAnd(b.CreateICmpEQ(exponent, ConstantInt::get(type, 0)), b.CreateICmpNE(magnitude, ConstantInt::get(type, 0)));
+            Value* zeroExponent = b.CreateICmpEQ(exponent, ConstantInt::get(type, 0));
+            Value* nonzero = b.CreateICmpNE(magnitude, ConstantInt::get(type, 0));
+            return b.CreateAnd(zeroExponent, nonzero);
         };
         Value* negative = nullptr;
         auto isNegative = [&] {
@@ -305,14 +309,26 @@ struct SoftFloat {
                 return isZero();
             case fcFinite:
                 return b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask));
-            case fcPosFinite:
-                return b.CreateAnd(b.CreateNot(isNegative()), b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask)));
-            case fcNegFinite:
-                return b.CreateAnd(isNegative(), b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask)));
-            case fcPositive:
-                return b.CreateAnd(b.CreateNot(isNegative()), b.CreateICmpULE(magnitude, ConstantInt::get(type, exponentMask)));
-            case fcNegative:
-                return b.CreateAnd(isNegative(), b.CreateICmpULE(magnitude, ConstantInt::get(type, exponentMask)));
+            case fcPosFinite: {
+                Value* nonnegative = b.CreateNot(isNegative());
+                Value* finite = b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask));
+                return b.CreateAnd(nonnegative, finite);
+            }
+            case fcNegFinite: {
+                Value* negative = isNegative();
+                Value* finite = b.CreateICmpULT(magnitude, ConstantInt::get(type, exponentMask));
+                return b.CreateAnd(negative, finite);
+            }
+            case fcPositive: {
+                Value* nonnegative = b.CreateNot(isNegative());
+                Value* notNan = b.CreateICmpULE(magnitude, ConstantInt::get(type, exponentMask));
+                return b.CreateAnd(nonnegative, notNan);
+            }
+            case fcNegative: {
+                Value* negative = isNegative();
+                Value* notNan = b.CreateICmpULE(magnitude, ConstantInt::get(type, exponentMask));
+                return b.CreateAnd(negative, notNan);
+            }
             default:
                 break;
         }
@@ -336,7 +352,8 @@ struct SoftFloat {
             if ((mask & fcNan) == fcNan) {
                 include(nan);
             } else {
-                Value* quiet = b.CreateICmpNE(b.CreateAnd(bits, ConstantInt::get(type, quietMask)), ConstantInt::get(type, 0));
+                Value* quietBits = b.CreateAnd(bits, ConstantInt::get(type, quietMask));
+                Value* quiet = b.CreateICmpNE(quietBits, ConstantInt::get(type, 0));
                 include(b.CreateAnd(nan, (mask & fcQNan) ? quiet : b.CreateNot(quiet)));
             }
         }
