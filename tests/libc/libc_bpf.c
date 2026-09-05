@@ -5,14 +5,17 @@
 #include <errno.h>
 #include <fenv.h>
 #include <inttypes.h>
+#include <locale.h>
 #include <malloc.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+#include <wchar.h>
 
 #include "bpf_capsule.h"
 #include "libc_test.h"
@@ -145,6 +148,53 @@ static void libc_test_body(void) {
     output->printed_result = printf("capsule stdio %d", 17);
     if (output->printed_result != 16 || output->printed_length != 16) {
         output->failures |= 1ull << 23;
+    }
+    struct stat stream_status;
+    errno = 0;
+    if (fstat(STDOUT_FILENO, &stream_status) || !S_ISCHR(stream_status.st_mode) || errno) {
+        output->failures |= 1ull << 31;
+    }
+    errno = 0;
+    if (fstat(42, &stream_status) != -1 || errno != EBADF) {
+        output->failures |= 1ull << 32;
+    }
+    if (fileno(stdin) != STDIN_FILENO || fileno(stdout) != STDOUT_FILENO || fileno(stderr) != STDERR_FILENO) {
+        output->failures |= 1ull << 33;
+    }
+    char cwd[] = "unchanged";
+    errno = 0;
+    if (getcwd(cwd, sizeof(cwd)) || errno != ENOSYS || strcmp(cwd, "unchanged")) {
+        output->failures |= 1ull << 34;
+    }
+    errno = 0;
+    if (getpid() != (pid_t)-1 || errno != ENOSYS) {
+        output->failures |= 1ull << 35;
+    }
+    errno = 0;
+    if (umask(0022) != (mode_t)-1 || errno != ENOSYS) {
+        output->failures |= 1ull << 36;
+    }
+    errno = 0;
+    if (isatty(STDOUT_FILENO) || errno != ENOTTY) {
+        output->failures |= 1ull << 37;
+    }
+    // CPython's UTF-8 startup uses the standard multibyte conversion APIs.
+    if (!setlocale(LC_CTYPE, "C.UTF-8")) {
+        output->failures |= 1ull << 38;
+    } else {
+        mbstate_t state = {0};
+        wchar_t decoded = 0;
+        char encoded[4] = {0};
+        if (mbrtowc(&decoded, "\xe2\x82", 2, &state) != (size_t)-2 || mbrtowc(&decoded, "\xac", 1, &state) != 1 || decoded != 0x20ac || !mbsinit(&state) ||
+            wcrtomb(encoded, decoded, &state) != 3 || memcmp(encoded, "\xe2\x82\xac", 3)) {
+            output->failures |= 1ull << 38;
+        }
+        state = (mbstate_t){0};
+        errno = 0;
+        if (mbrtowc(&decoded, "\xff", 1, &state) != (size_t)-1 || errno != EILSEQ) {
+            output->failures |= 1ull << 39;
+        }
+        (void)setlocale(LC_CTYPE, "C");
     }
 
     const char* decimal = "-12.5tail";

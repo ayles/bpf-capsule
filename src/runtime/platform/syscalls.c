@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Default platform beneath Picolibc. Capsule has no file descriptors,
-// processes or wall clock, so OS-backed operations fail explicitly. Every
-// definition is weak: a guest can provide a real in-memory adapter or a test
-// double without rebuilding either Capsule or Picolibc.
+// Default platform beneath Picolibc. Capsule exposes the conventional three
+// standard streams, but has no filesystem, processes or wall clock, so other
+// OS-backed operations fail explicitly. Every definition is weak: a guest can
+// provide a real in-memory adapter or a test double without rebuilding either
+// Capsule or Picolibc.
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdio-bufio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -34,7 +38,39 @@ CAPSULE_PLATFORM_WEAK int open(const char* path, int flags, ...) {
     return -1;
 }
 
+CAPSULE_PLATFORM_WEAK int fcntl(int fd, int command, ...) {
+    (void)fd;
+    (void)command;
+    errno = EBADF;
+    return -1;
+}
+
 CAPSULE_PLATFORM_WEAK int close(int fd) {
+    (void)fd;
+    errno = EBADF;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int dup2(int old_fd, int new_fd) {
+    (void)old_fd;
+    (void)new_fd;
+    errno = EBADF;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int dup(int fd) {
+    (void)fd;
+    errno = EBADF;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int fsync(int fd) {
+    (void)fd;
+    errno = EBADF;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int fdatasync(int fd) {
     (void)fd;
     errno = EBADF;
     return -1;
@@ -56,38 +92,16 @@ CAPSULE_PLATFORM_WEAK ssize_t write(int fd, const void* buffer, size_t size) {
     return -1;
 }
 
-static int capsule_stream_get(FILE* stream) {
-    (void)stream;
-    unsigned char byte;
-    ssize_t result = read(STDIN_FILENO, &byte, 1);
-    if (result == 1) {
-        return byte;
-    }
-    return result == 0 ? _FDEV_EOF : _FDEV_ERR;
-}
+// Picolibc's descriptor-backed stream is also what makes fileno() report the
+// conventional 0/1/2 identities. The syscall functions remain weak hooks for
+// an embedding. Streams start unbuffered; setvbuf() may allocate a buffer.
+static struct __file_bufio capsule_stdin = FDEV_SETUP_BUFIO(STDIN_FILENO, NULL, 0, read, NULL, lseek, NULL, __SRD, 0);
+static struct __file_bufio capsule_stdout = FDEV_SETUP_BUFIO(STDOUT_FILENO, NULL, 0, NULL, write, lseek, NULL, __SWR, 0);
+static struct __file_bufio capsule_stderr = FDEV_SETUP_BUFIO(STDERR_FILENO, NULL, 0, NULL, write, lseek, NULL, __SWR, 0);
 
-static int capsule_stdout_put(char byte, FILE* stream) {
-    (void)stream;
-    return write(STDOUT_FILENO, &byte, 1) == 1 ? (unsigned char)byte : _FDEV_ERR;
-}
-
-static int capsule_stderr_put(char byte, FILE* stream) {
-    (void)stream;
-    return write(STDERR_FILENO, &byte, 1) == 1 ? (unsigned char)byte : _FDEV_ERR;
-}
-
-static int capsule_stream_flush(FILE* stream) {
-    (void)stream;
-    return 0;
-}
-
-static FILE capsule_stdin = FDEV_SETUP_STREAM(NULL, capsule_stream_get, capsule_stream_flush, _FDEV_SETUP_READ);
-static FILE capsule_stdout = FDEV_SETUP_STREAM(capsule_stdout_put, NULL, capsule_stream_flush, _FDEV_SETUP_WRITE);
-static FILE capsule_stderr = FDEV_SETUP_STREAM(capsule_stderr_put, NULL, capsule_stream_flush, _FDEV_SETUP_WRITE);
-
-CAPSULE_PLATFORM_WEAK FILE* const stdin = &capsule_stdin;
-CAPSULE_PLATFORM_WEAK FILE* const stdout = &capsule_stdout;
-CAPSULE_PLATFORM_WEAK FILE* const stderr = &capsule_stderr;
+CAPSULE_PLATFORM_WEAK FILE* const stdin = (FILE*)&capsule_stdin;
+CAPSULE_PLATFORM_WEAK FILE* const stdout = (FILE*)&capsule_stdout;
+CAPSULE_PLATFORM_WEAK FILE* const stderr = (FILE*)&capsule_stderr;
 
 CAPSULE_PLATFORM_WEAK off_t lseek(int fd, off_t offset, int whence) {
     (void)fd;
@@ -98,21 +112,120 @@ CAPSULE_PLATFORM_WEAK off_t lseek(int fd, off_t offset, int whence) {
 }
 
 CAPSULE_PLATFORM_WEAK int fstat(int fd, struct stat* status) {
-    (void)fd;
-    (void)status;
+    if (fd >= STDIN_FILENO && fd <= STDERR_FILENO && status) {
+        *status = (struct stat){0};
+        status->st_mode = S_IFCHR | S_IRUSR | S_IWUSR;
+        status->st_nlink = 1;
+        return 0;
+    }
+    if (!status) {
+        errno = EFAULT;
+        return -1;
+    }
     errno = EBADF;
     return -1;
 }
 
 CAPSULE_PLATFORM_WEAK int isatty(int fd) {
-    (void)fd;
-    errno = EBADF;
+    errno = fd >= STDIN_FILENO && fd <= STDERR_FILENO ? ENOTTY : EBADF;
     return 0;
 }
 
 CAPSULE_PLATFORM_WEAK int stat(const char* path, struct stat* status) {
     (void)path;
     (void)status;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int lstat(const char* path, struct stat* status) {
+    (void)path;
+    (void)status;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int access(const char* path, int mode) {
+    (void)path;
+    (void)mode;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int chdir(const char* path) {
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int chroot(const char* path) {
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int fchdir(int fd) {
+    (void)fd;
+    errno = EBADF;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK char* getcwd(char* buffer, size_t size) {
+    (void)buffer;
+    (void)size;
+    errno = ENOSYS;
+    return NULL;
+}
+
+CAPSULE_PLATFORM_WEAK int mkdir(const char* path, mode_t mode) {
+    (void)path;
+    (void)mode;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int rmdir(const char* path) {
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int symlink(const char* target, const char* path) {
+    (void)target;
+    (void)path;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK DIR* opendir(const char* path) {
+    (void)path;
+    errno = ENOSYS;
+    return NULL;
+}
+
+CAPSULE_PLATFORM_WEAK int closedir(DIR* directory) {
+    (void)directory;
+    errno = EBADF;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK struct dirent* readdir(DIR* directory) {
+    (void)directory;
+    errno = EBADF;
+    return NULL;
+}
+
+CAPSULE_PLATFORM_WEAK int dirfd(DIR* directory) {
+    (void)directory;
+    errno = EBADF;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int utimensat(int directory, const char* path, const struct timespec times[2], int flags) {
+    (void)directory;
+    (void)path;
+    (void)times;
+    (void)flags;
     errno = ENOSYS;
     return -1;
 }
@@ -172,6 +285,47 @@ CAPSULE_PLATFORM_WEAK pid_t fork(void) {
     return (pid_t)-1;
 }
 
+CAPSULE_PLATFORM_WEAK pid_t getpid(void) {
+    errno = ENOSYS;
+    return (pid_t)-1;
+}
+
+// The BPF ABI and the fixed-memory fallback both use 4 KiB as their minimum
+// mapping granularity. Consumers which expose a different virtual-memory
+// model can override this together with mmap().
+CAPSULE_PLATFORM_WEAK int getpagesize(void) {
+    return 4096;
+}
+
+CAPSULE_PLATFORM_WEAK mode_t umask(mode_t mask) {
+    (void)mask;
+    errno = ENOSYS;
+    return (mode_t)-1;
+}
+
+CAPSULE_PLATFORM_WEAK int pause(void) {
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int sched_yield(void) {
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int setgroups(int count, const gid_t* groups) {
+    (void)count;
+    (void)groups;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK long sysconf(int name) {
+    (void)name;
+    errno = ENOSYS;
+    return -1;
+}
+
 CAPSULE_PLATFORM_WEAK int sigprocmask(int how, const sigset_t* set, sigset_t* old_set) {
     (void)how;
     (void)set;
@@ -184,6 +338,13 @@ CAPSULE_PLATFORM_WEAK int raise(int signal) {
     (void)signal;
     errno = ENOSYS;
     return -1;
+}
+
+CAPSULE_PLATFORM_WEAK _sig_func_ptr signal(int number, _sig_func_ptr handler) {
+    (void)number;
+    (void)handler;
+    errno = ENOSYS;
+    return SIG_ERR;
 }
 
 CAPSULE_PLATFORM_WEAK int execve(const char* path, char* const arguments[], char* const environment[]) {
@@ -219,6 +380,13 @@ CAPSULE_PLATFORM_WEAK int gettimeofday(struct timeval* time, void* timezone) {
 CAPSULE_PLATFORM_WEAK int clock_gettime(clockid_t clock, struct timespec* time) {
     (void)clock;
     (void)time;
+    errno = ENOSYS;
+    return -1;
+}
+
+CAPSULE_PLATFORM_WEAK int clock_getres(clockid_t clock, struct timespec* resolution) {
+    (void)clock;
+    (void)resolution;
     errno = ENOSYS;
     return -1;
 }

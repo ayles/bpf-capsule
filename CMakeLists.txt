@@ -68,7 +68,10 @@ pkg_check_modules(LibBpf libbpf>=1.4.0 REQUIRED IMPORTED_TARGET)
 # A clean guest sysroot contains Picolibc plus Linux UAPI. Locate the three
 # include roots separately because distributions commonly keep asm/ in a
 # multiarch directory while Nix installs all three together.
-find_path(BPF_CAPSULE_LINUX_UAPI_INCLUDE_DIR NAMES linux/bpf.h REQUIRED)
+# libbpf also installs a private linux/bpf.h copy, but not the UAPI headers
+# that it includes.  linux/types.h therefore identifies the complete UAPI
+# include root rather than that partial compatibility directory.
+find_path(BPF_CAPSULE_LINUX_UAPI_INCLUDE_DIR NAMES linux/types.h REQUIRED)
 find_path(
     BPF_CAPSULE_LINUX_UAPI_ARCH_INCLUDE_DIR
     NAMES asm/types.h

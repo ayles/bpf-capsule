@@ -247,6 +247,11 @@ whole-program link. `errno` follows the fiber and the heap is synchronized;
 other libc APIs with implicit process-global state retain Picolibc's
 single-threaded contract and cannot be shared concurrently across fibers. The
 default platform has no environment or timezone database, so local time is UTC.
+Its descriptor-backed standard streams have the usual `fileno()` values 0, 1,
+and 2; an embedding supplies `read()` and `write()` to connect them to actual
+input and output. Other OS operations, including filesystem access and process
+queries, fail rather than inventing a working directory or a process ID.
+Picolibc's multibyte support is enabled, including UTF-8 conversion.
 
 The bare linker defaults are fixed memory, BPF v3, and a map-based allocator
 lease. Native read-modify-write operations are limited to relaxed,

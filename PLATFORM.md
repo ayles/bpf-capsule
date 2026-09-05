@@ -1,7 +1,8 @@
 # A virtual platform plan for Capsule programs
 
 Status: design note. The default platform currently supplies allocation,
-fiber-local `errno`, termination, and weak OS stubs. The components below are
+fiber-local `errno`, termination, descriptor-backed standard streams with weak
+`read`/`write` hooks, and weak OS stubs. The components below are
 planned, not part of the public API yet.
 
 ## Goal
