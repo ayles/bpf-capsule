@@ -40,3 +40,9 @@
 
 // Host-run generated program.
 #define BPF_CAPSULE_PROGRAM_INIT "bpf_capsule_init"
+
+// Compiler-generated freplace programs. Other freplace sections in the same
+// object belong to the application and are not part of the Capsule lifetime.
+#define BPF_CAPSULE_FREPLACE_SECTION_PREFIX "freplace/"
+#define BPF_CAPSULE_FREPLACE_TARGET_PREFIX "bpf_dispatch_output_"
+#define BPF_CAPSULE_FREPLACE_PROGRAM_PREFIX BPF_CAPSULE_FREPLACE_SECTION_PREFIX BPF_CAPSULE_FREPLACE_TARGET_PREFIX

@@ -62,6 +62,7 @@ inline constexpr llvm::StringLiteral FlattenUnit{"bpf.capsule.flatten.unit"};
 inline constexpr llvm::StringLiteral FlattenRouter{"bpf.capsule.flatten.router"};
 inline constexpr llvm::StringLiteral FlattenRoot{"bpf.capsule.flatten.root"};
 inline constexpr llvm::StringLiteral FlattenedUnits{"bpf.capsule.flattened.units"};
+inline constexpr llvm::StringLiteral FreplaceRoots{"bpf.capsule.freplace.roots"};
 
 // Stackify -> memory-pass handoff.
 inline constexpr llvm::StringLiteral FiberStackSize{"bpf.fiber.stack.size"};

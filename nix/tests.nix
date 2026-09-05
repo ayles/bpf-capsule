@@ -69,7 +69,8 @@ stdenv.mkDerivation {
     "-DCMAKE_PREFIX_PATH=${bpfCapsule}"
     "-DBPF_CAPSULE_LINK_OPTIONS=${lib.concatStringsSep ";" targetProfile.linkOptions}"
     "-DFETCHCONTENT_SOURCE_DIR_LUA=${luaSource}"
-  ];
+  ]
+  ++ lib.optional targetProfile.freplace "-DBPF_CAPSULE_TEST_FREPLACE=ON";
   # Privileged suites skip themselves without root; the VM checks run them.
   doCheck = true;
   enableParallelChecking = true;

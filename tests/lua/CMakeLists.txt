@@ -11,12 +11,17 @@ FetchContent_MakeAvailable(lua)
 file(GLOB LUA_BPF_SOURCES "${lua_SOURCE_DIR}/src/*.c")
 list(FILTER LUA_BPF_SOURCES EXCLUDE REGEX "/(lua|luac)\\.c$")
 
+set(lua_runner_link_options)
+if(BPF_CAPSULE_TEST_FREPLACE)
+    list(APPEND lua_runner_link_options --freplace)
+endif()
 capsule_test_object(
     lua_runner
     SOURCES lua_bpf.c ${LUA_BPF_SOURCES}
     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/common ${lua_SOURCE_DIR}/src
     COMPILE_DEFINITIONS LUA_USE_JUMPTABLE=0
     COMPILE_OPTIONS -include ${CMAKE_CURRENT_SOURCE_DIR}/common/lua_capsule_config.h
+    LINK_OPTIONS ${lua_runner_link_options}
 )
 capsule_gtest_host(
     lua_test
@@ -25,6 +30,9 @@ capsule_gtest_host(
     INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_compile_definitions(lua_test PRIVATE LUA_TEST_SCRIPT="${CMAKE_CURRENT_SOURCE_DIR}/script.lua")
+if(BPF_CAPSULE_TEST_FREPLACE)
+    target_compile_definitions(lua_test PRIVATE BPF_CAPSULE_TEST_FREPLACE=1)
+endif()
 
 set(LUA_XDP_EXAMPLE "${BPF_CAPSULE_REPOSITORY_DIR}/examples/lua-xdp")
 capsule_test_object(

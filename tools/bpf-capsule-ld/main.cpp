@@ -32,6 +32,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DiagnosticInfo.h>
 #include <llvm/IR/DiagnosticPrinter.h>
+#include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -75,6 +76,7 @@ cl::OptionCategory LinkerCategory("bpf-capsule-ld options");
 
 cl::list<std::string> InputFilenames(cl::Positional, cl::desc("<input .bc/.ll/.mir files>"), cl::OneOrMore, cl::cat(LinkerCategory));
 cl::opt<std::string> OutputFilename("o", cl::desc("Output BPF object"), cl::value_desc("file"), cl::Required, cl::cat(LinkerCategory));
+cl::opt<bool> Freplace("freplace", cl::desc("Embed physical managed step roots as freplace programs"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<bool> ManagedAtomics(
     "managed-atomics", cl::desc("Target supports scalar C atomics in Capsule-managed memory"), cl::init(false), cl::cat(LinkerCategory));
 // FiberStack registers and validates the public option. Its value is read by
@@ -218,6 +220,64 @@ void resolveExternalWeak(Module& module) {
     }
 }
 
+bool isFreplaceRoot(const Function& function) {
+    StringRef name = function.getName();
+    return !function.isDeclaration() && function.getMetadata(bpf::md::FlattenRoot) && name.starts_with(bpf::sym::DispatchRouterPrefix) &&
+        name.drop_front(bpf::sym::DispatchRouterPrefix.size()).starts_with("output.");
+}
+
+std::string freplaceTargetName(StringRef llvmName) {
+    std::string btfName = llvmName.str();
+    llvm::replace(btfName, '.', '_');
+    return btfName;
+}
+
+void embedFreplaceRoots(Module& module) {
+    SmallVector<Function*> roots;
+    for (Function& function : module) {
+        if (isFreplaceRoot(function)) {
+            roots.push_back(&function);
+        }
+    }
+    if (roots.empty()) {
+        fail("--freplace needs a program large enough to have physical managed step roots");
+    }
+
+    for (Function* target : roots) {
+        std::string targetName = target->getName().str();
+        std::string btfTargetName = freplaceTargetName(targetName);
+        if (!StringRef(btfTargetName).starts_with(BPF_CAPSULE_FREPLACE_TARGET_PREFIX)) {
+            report_fatal_error(Twine("bpf-capsule-ld: unexpected freplace root name: ") + targetName);
+        }
+        ValueToValueMapTy values;
+        Function* replacement = CloneFunction(target, values);
+        replacement->setName((Twine(btfTargetName) + "_freplace").str());
+        replacement->setSection((Twine(BPF_CAPSULE_FREPLACE_SECTION_PREFIX) + btfTargetName).str());
+        replacement->setLinkage(GlobalValue::ExternalLinkage);
+        if (DISubprogram* subprogram = replacement->getSubprogram()) {
+            subprogram->replaceLinkageName(MDString::get(module.getContext(), replacement->getName()));
+        }
+
+        // Keep the original symbol as the typed BTF target reached by the
+        // base entry programs. Its safe stub stops the bounded driver with the
+        // fiber still pending until the replacement has been attached.
+        DISubprogram* debugInfo = target->getSubprogram();
+        target->deleteBody();
+        target->setSubprogram(debugInfo);
+        target->setMetadata(bpf::md::FlattenRoot, nullptr);
+        BasicBlock* entry = BasicBlock::Create(module.getContext(), "unattached", target);
+        IRBuilder<>(entry).CreateRet(ConstantInt::get(target->getReturnType(), 1));
+    }
+
+    // Allocation units are private callees of their replacement root. The
+    // late machine flattener folds them into that root before ELF emission.
+    for (Function& function : module) {
+        if (!function.isDeclaration() && function.getMetadata(bpf::md::FlattenUnit)) {
+            function.setLinkage(GlobalValue::InternalLinkage);
+        }
+    }
+}
+
 void addMachinePass(PassManagerBase& passes, StringRef name, TargetPassConfig& config) {
     if (name == "none") {
         return;
@@ -276,6 +336,9 @@ int main(int argc, char** argv) {
 
     if (stopCodegen && (EmitLlvm || EmitAssembly)) {
         fail("-stop-before/-stop-after cannot be combined with --emit-llvm or --emit-asm");
+    }
+    if (Freplace && (runPassMode || !PipelineOverride.empty() || stopCodegen)) {
+        fail("--freplace requires the complete Capsule pipeline");
     }
     if (ManagedAtomics && (runPassMode || !PipelineOverride.empty() || stopCodegen)) {
         fail("--managed-atomics requires the complete Capsule pipeline");
@@ -552,6 +615,9 @@ int main(int argc, char** argv) {
     };
     checkBuildMarker(bpf::sym::MemoryBackend, Memory == MemoryMode::Arena ? 1 : 0, "runtime memory backend", hasRuntime);
     checkBuildMarker(bpf::sym::AllocatorLockMode, AllocatorLock == AllocatorLockMode::Atomic ? 1 : 0, "platform allocator lock", false);
+    if (Freplace && !module->getModuleFlag(bpf::md::FreplaceRoots)) {
+        module->addModuleFlag(Module::ModFlagBehavior::Error, bpf::md::FreplaceRoots, 1);
+    }
 
     // Function target attributes control BPF instruction selection after the
     // modules have been linked. Reject a concrete frontend/linker disagreement
@@ -606,18 +672,17 @@ int main(int argc, char** argv) {
         pipeline.run(targetModule, moduleAnalyses);
     };
 
-    auto saveModule = [&](const Twine& suffix) {
-        std::string path = OutputFilename + suffix.str();
+    auto saveModule = [&](const Module& outputModule, StringRef path) {
         std::error_code errorCode;
         raw_fd_ostream out(path, errorCode, sys::fs::OF_None);
         if (errorCode) {
             fail(errorCode.message() + ": " + path);
         }
-        WriteBitcodeToFile(*module, out);
+        WriteBitcodeToFile(outputModule, out);
     };
     if (!PipelineOverride.empty()) {
         if (SaveTemps) {
-            saveModule(".linked.bc");
+            saveModule(*module, std::string(OutputFilename) + ".linked.bc");
         }
         resolveExternalWeak(*module);
         runPipeline(*module, PipelineOverride);
@@ -641,15 +706,24 @@ int main(int argc, char** argv) {
                 continue;
             }
             if (SaveTemps) {
-                saveModule(".linked.bc");
+                saveModule(*module, std::string(OutputFilename) + ".linked.bc");
             }
             module = std::move(prepared);
             break;
         }
         runPipeline(*module, capsuleFinalPipeline());
     }
+    if (Freplace) {
+        if (SaveTemps) {
+            saveModule(*module, std::string(OutputFilename) + ".capsule.unsplit.bc");
+        }
+        embedFreplaceRoots(*module);
+        if (verifyModule(*module, &errs())) {
+            fail("freplace embedding produced an invalid module");
+        }
+    }
     if (SaveTemps) {
-        saveModule(".capsule.bc");
+        saveModule(*module, std::string(OutputFilename) + ".capsule.bc");
     }
 
     if (EmitLlvm) {

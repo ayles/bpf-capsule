@@ -341,6 +341,25 @@ subprogram as new stack marks appear; one huge
 root can therefore load far more slowly without reducing exploration work.
 Applications do not select allocation-unit or root counts.
 
+For programs which still cannot fit one loaded BPF program, `--freplace` uses
+those same merge roots as the split boundary. Each physical root is cloned into
+an extension program in a `freplace/<root>` section, while its ordinary symbol
+stays in the base program as the typed BTF target and a fail-closed stub. Both
+forms live in the same ELF. After libbpf loads the base programs,
+`bpf_capsule_attach_freplace()` reopens those bytes for each applicable entry,
+reuses every mutable map, loads only the matching extensions, and owns their
+links until `bpf_capsule_release()`. Initialization fails with `ENOLINK` if an
+object which requires replacements was not attached. The required BPF
+trampolines exist throughout Capsule's x86-64 kernel range and on arm64 since
+Linux 6.0. The scheme works on both memory tiers and changes no source-level
+call or continuation boundary.
+
+An extension is bound to one loaded target program. Consequently, an object
+with several applicable entry programs loads a separate copy of every matching
+root for each entry: verification work and kernel memory scale with entries
+times roots. This is still preferable only when the unsplit entries do not fit
+or are substantially more expensive to load.
+
 Without the indirect-jump capability, the bounded driver enters a public step
 and a balanced compare tree selects the region. Objects with multiple
 allocation units first map the PC to its owning unit; a large verifier-ABI

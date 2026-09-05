@@ -42,6 +42,12 @@ protected:
         config.heap_bytes = 16ull << 20;
         ASSERT_EQ(bpf_capsule_configure(&capsule_, skeleton_->obj, config), 0) << strerror(errno);
         ASSERT_EQ(lua_runner__load(skeleton_), 0) << strerror(errno);
+#if BPF_CAPSULE_TEST_FREPLACE
+        errno = 0;
+        ASSERT_EQ(bpf_capsule_initialize(&capsule_), -1);
+        ASSERT_EQ(errno, ENOLINK);
+        ASSERT_EQ(bpf_capsule_attach_freplace(&capsule_, skeleton_->skeleton->data, skeleton_->skeleton->data_sz), 0) << strerror(errno);
+#endif
         ASSERT_EQ(bpf_capsule_initialize(&capsule_), 0) << strerror(errno);
         control_ = &skeleton_->data_lua_runner->lua_runner_control;
     }

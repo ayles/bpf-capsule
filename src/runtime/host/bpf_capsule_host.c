@@ -5,6 +5,7 @@
 #include "bpf_capsule_names.h"
 
 #include <bpf/bpf.h>
+#include <bpf/btf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <limits.h>
@@ -88,7 +89,23 @@ struct bpf_capsule_state {
     int overflow_fd;
     size_t overflow_value_size;
     uint32_t overflow_entries;
+    struct bpf_capsule_extension* extensions;
+    int freplace_required;
+    int freplace_attached;
 };
+
+struct bpf_capsule_extension {
+    struct bpf_object* object;
+    struct bpf_link** links;
+    size_t link_count;
+    struct bpf_capsule_extension* next;
+};
+
+static int __bpf_capsule_is_freplace_program(const struct bpf_program* program) {
+    static const char prefix[] = BPF_CAPSULE_FREPLACE_PROGRAM_PREFIX;
+    const char* section = bpf_program__section_name(program);
+    return section && !strncmp(section, prefix, sizeof(prefix) - 1) && section[sizeof(prefix) - 1];
+}
 
 static struct bpf_capsule_state* __bpf_capsule_state(const struct bpf_capsule* capsule) {
     return capsule ? (struct bpf_capsule_state*)capsule->private_data : NULL;
@@ -299,6 +316,19 @@ int bpf_capsule_configure(struct bpf_capsule* capsule, struct bpf_object* object
         errno = EBUSY;
         return -1;
     }
+    int freplace_required = 0;
+    struct bpf_program* program;
+    bpf_object__for_each_program(program, object) {
+        if (!__bpf_capsule_is_freplace_program(program)) {
+            continue;
+        }
+        int error = bpf_program__set_autoload(program, false);
+        if (error) {
+            errno = error < 0 ? -error : error;
+            return -1;
+        }
+        freplace_required = 1;
+    }
     if (config->memory_view_base != (uintptr_t)(state ? state->window : NULL)) {
         // A reservation can only be replaced by the handle that owns it.
         errno = EBUSY;
@@ -419,10 +449,269 @@ int bpf_capsule_configure(struct bpf_capsule* capsule, struct bpf_object* object
     capsule->object = object;
     capsule->private_data = state;
     state->window = (void*)window;
+    state->freplace_required = freplace_required;
+    state->freplace_attached = 0;
     if (old_window) {
         (void)munmap(old_window, (size_t)BPF_CAPSULE_MEMORY_WINDOW_SIZE);
     }
     return 0;
+}
+
+static void __bpf_capsule_destroy_extension(struct bpf_capsule_extension* extension) {
+    if (!extension) {
+        return;
+    }
+    while (extension->link_count) {
+        bpf_link__destroy(extension->links[--extension->link_count]);
+    }
+    free(extension->links);
+    bpf_object__close(extension->object);
+    free(extension);
+}
+
+struct __bpf_capsule_target_functions {
+    struct btf* btf;
+    void* records;
+    uint32_t count;
+    uint32_t record_size;
+};
+
+static void __bpf_capsule_destroy_target_functions(struct __bpf_capsule_target_functions* functions) {
+    btf__free(functions->btf);
+    free(functions->records);
+}
+
+static int __bpf_capsule_read_target_functions(int fd, struct __bpf_capsule_target_functions* functions) {
+    struct bpf_prog_info info = {0};
+    uint32_t info_size = sizeof(info);
+    if (bpf_prog_get_info_by_fd(fd, &info, &info_size)) {
+        return -1;
+    }
+    if (!info.btf_id || !info.nr_func_info || info.func_info_rec_size < sizeof(struct bpf_func_info)) {
+        errno = ENODATA;
+        return -1;
+    }
+    if (info.nr_func_info > SIZE_MAX / info.func_info_rec_size) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    uint32_t btf_id = info.btf_id;
+    uint32_t count = info.nr_func_info;
+    uint32_t record_size = info.func_info_rec_size;
+    functions->records = calloc(count, record_size);
+    if (!functions->records) {
+        return -1;
+    }
+    functions->count = count;
+    functions->record_size = record_size;
+    memset(&info, 0, sizeof(info));
+    info.nr_func_info = count;
+    info.func_info_rec_size = record_size;
+    info.func_info = (uintptr_t)functions->records;
+    info_size = sizeof(info);
+    if (bpf_prog_get_info_by_fd(fd, &info, &info_size)) {
+        return -1;
+    }
+    functions->count = info.nr_func_info;
+    functions->btf = btf__load_from_kernel_by_id(btf_id);
+    return functions->btf ? 0 : -1;
+}
+
+static int __bpf_capsule_target_has_function(const struct __bpf_capsule_target_functions* functions, const char* name) {
+    for (uint32_t index = 0; index < functions->count; ++index) {
+        const struct bpf_func_info* info = (const struct bpf_func_info*)((const uint8_t*)functions->records + (size_t)index * functions->record_size);
+        const struct btf_type* type = btf__type_by_id(functions->btf, info->type_id);
+        const char* candidate = type && btf_kind(type) == BTF_KIND_FUNC ? btf__name_by_offset(functions->btf, type->name_off) : NULL;
+        if (candidate && !strcmp(candidate, name)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int __bpf_capsule_load_freplace(
+    struct bpf_capsule* capsule, const void* object_data, size_t object_size, struct bpf_program* target, struct bpf_capsule_extension** output) {
+    *output = NULL;
+    struct bpf_capsule_extension* extension = calloc(1, sizeof(*extension));
+    if (!extension) {
+        return -1;
+    }
+    // libbpf prefixes internal data maps with the object name. Preserve it so
+    // reopened maps have the same names as the already loaded base maps and
+    // can be matched and reused below.
+    struct bpf_object_open_opts open_options = {
+        .sz = sizeof(open_options),
+        .object_name = bpf_object__name(capsule->object),
+    };
+    extension->object = bpf_object__open_mem(object_data, object_size, &open_options);
+    if (!extension->object) {
+        int saved_errno = errno;
+        free(extension);
+        errno = saved_errno;
+        return -1;
+    }
+    struct __bpf_capsule_target_functions target_functions = {0};
+    if (__bpf_capsule_read_target_functions(bpf_program__fd(target), &target_functions)) {
+        goto error;
+    }
+
+    struct bpf_map* map;
+    bpf_object__for_each_map(map, extension->object) {
+        struct bpf_map* base_map = bpf_object__find_map_by_name(capsule->object, bpf_map__name(map));
+        int fd = base_map ? bpf_map__fd(base_map) : -1;
+        if (fd < 0) {
+            // Machine code can introduce a constant-pool map used only by
+            // freplace programs, so the base load legitimately skipped it.
+            // Immutable program data may be private to each reopened object;
+            // every mutable map carries Capsule state and must be shared.
+            if (bpf_map__map_flags(map) & BPF_F_RDONLY_PROG) {
+                continue;
+            }
+            errno = ENOENT;
+            goto error;
+        }
+        int result = bpf_map__reuse_fd(map, fd);
+        if (result) {
+            errno = result < 0 ? -result : result;
+            goto error;
+        }
+    }
+
+    size_t program_count = 0;
+    struct bpf_program* program;
+    bpf_object__for_each_program(program, extension->object) {
+        if (!__bpf_capsule_is_freplace_program(program)) {
+            int disable_error = bpf_program__set_autoload(program, false);
+            if (disable_error) {
+                errno = disable_error < 0 ? -disable_error : disable_error;
+                goto error;
+            }
+            continue;
+        }
+        const char* target_name = bpf_program__section_name(program) + sizeof(BPF_CAPSULE_FREPLACE_SECTION_PREFIX) - 1;
+        if (!__bpf_capsule_target_has_function(&target_functions, target_name)) {
+            int disable_error = bpf_program__set_autoload(program, false);
+            if (disable_error) {
+                errno = disable_error < 0 ? -disable_error : disable_error;
+                goto error;
+            }
+            continue;
+        }
+        int result = bpf_program__set_attach_target(program, bpf_program__fd(target), target_name);
+        if (result) {
+            errno = result < 0 ? -result : result;
+            goto error;
+        }
+        ++program_count;
+    }
+    if (!program_count) {
+        __bpf_capsule_destroy_target_functions(&target_functions);
+        __bpf_capsule_destroy_extension(extension);
+        return 0;
+    }
+    __bpf_capsule_destroy_target_functions(&target_functions);
+    memset(&target_functions, 0, sizeof(target_functions));
+    extension->links = calloc(program_count, sizeof(*extension->links));
+    if (!extension->links) {
+        goto error;
+    }
+    int result = bpf_object__load(extension->object);
+    if (result) {
+        errno = result < 0 ? -result : result;
+        goto error;
+    }
+    bpf_object__for_each_program(program, extension->object) {
+        if (!bpf_program__autoload(program)) {
+            continue;
+        }
+        // The target was fixed before load, when its BTF id is part of the
+        // extension program's verifier contract.
+        struct bpf_link* link = bpf_program__attach_freplace(program, 0, NULL);
+        long link_error = libbpf_get_error(link);
+        if (link_error) {
+            errno = (int)-link_error;
+            goto error;
+        }
+        extension->links[extension->link_count++] = link;
+    }
+    *output = extension;
+    return 0;
+
+error:
+    {
+        int saved_errno = errno;
+        __bpf_capsule_destroy_target_functions(&target_functions);
+        __bpf_capsule_destroy_extension(extension);
+        errno = saved_errno;
+        return -1;
+    }
+}
+
+// Attach every compiler-produced freplace step from the original object to
+// every loaded entry program which contains the corresponding BTF targets.
+// The same ELF bytes are reopened because freplace needs the target program's
+// fd at load time. All reopened objects and links join the Capsule lifetime.
+int bpf_capsule_attach_freplace(struct bpf_capsule* capsule, const void* object_data, size_t object_size) {
+    struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
+    if (!capsule || !capsule->object || !state || !object_data || !object_size) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (state->config) {
+        errno = EBUSY;
+        return -1;
+    }
+    if (!state->freplace_required) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (state->freplace_attached) {
+        errno = EALREADY;
+        return -1;
+    }
+
+    struct bpf_capsule_extension* attached = NULL;
+    size_t attached_targets = 0;
+    struct bpf_program* target;
+    bpf_object__for_each_program(target, capsule->object) {
+        if (__bpf_capsule_is_freplace_program(target) || bpf_program__fd(target) < 0) {
+            continue;
+        }
+        struct bpf_capsule_extension* extension = NULL;
+        if (__bpf_capsule_load_freplace(capsule, object_data, object_size, target, &extension)) {
+            goto error;
+        }
+        if (!extension) {
+            continue;
+        }
+        extension->next = attached;
+        attached = extension;
+        ++attached_targets;
+    }
+    if (!attached_targets) {
+        errno = ENOENT;
+        goto error;
+    }
+    while (attached) {
+        struct bpf_capsule_extension* extension = attached;
+        attached = extension->next;
+        extension->next = state->extensions;
+        state->extensions = extension;
+    }
+    state->freplace_attached = 1;
+    return 0;
+
+error:
+    {
+        int saved_errno = errno;
+        while (attached) {
+            struct bpf_capsule_extension* extension = attached;
+            attached = extension->next;
+            __bpf_capsule_destroy_extension(extension);
+        }
+        errno = saved_errno;
+        return -1;
+    }
 }
 
 // End the host lifetime and release its complete address-space window. Call
@@ -437,6 +726,11 @@ int bpf_capsule_release(struct bpf_capsule* capsule) {
     if (!state) {
         capsule->object = NULL;
         return 0;
+    }
+    while (state->extensions) {
+        struct bpf_capsule_extension* extension = state->extensions;
+        state->extensions = extension->next;
+        __bpf_capsule_destroy_extension(extension);
     }
     if (state->window && munmap(state->window, (size_t)BPF_CAPSULE_MEMORY_WINDOW_SIZE)) {
         return -1;
@@ -815,6 +1109,10 @@ int bpf_capsule_initialize(struct bpf_capsule* capsule) {
     struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
     if (!capsule || !capsule->object || !state || !state->window) {
         errno = EINVAL;
+        return -1;
+    }
+    if (state->freplace_required && !state->freplace_attached) {
+        errno = ENOLINK;
         return -1;
     }
     struct bpf_object* object = capsule->object;

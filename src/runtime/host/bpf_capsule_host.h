@@ -33,6 +33,9 @@ const char* bpf_capsule_error_string(int64_t code);
 
 int bpf_capsule_configure(struct bpf_capsule* capsule, struct bpf_object* object, struct bpf_capsule_config requested);
 int bpf_capsule_initialize(struct bpf_capsule* capsule);
+// Attach the freplace steps embedded in the original ELF after loading its
+// base programs and before bpf_capsule_initialize().
+int bpf_capsule_attach_freplace(struct bpf_capsule* capsule, const void* object_data, size_t object_size);
 int bpf_capsule_release(struct bpf_capsule* capsule);
 
 // Checked copies across a Capsule boundary. The Capsule side is inferred from

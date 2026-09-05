@@ -25,6 +25,7 @@ find_package(GTest REQUIRED)
 find_program(CSMITH_EXECUTABLE NAMES csmith REQUIRED)
 find_path(CSMITH_INCLUDE_DIR NAMES csmith.h REQUIRED)
 enable_testing()
+option(BPF_CAPSULE_TEST_FREPLACE "Exercise compiler-generated freplace roots" OFF)
 
 # The lua-xdp integration test compiles that example's runtime from the
 # repository checkout beside this directory.

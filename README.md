@@ -72,6 +72,11 @@ framebuffer.
   stack. Picolibc supplies the C library and libm; a small Capsule platform
   layer supplies fiber-local `errno`, TLSF allocation, and replaceable I/O and
   OS stubs.
+- **Large programs can span ordinary BPF extensions.** On kernels with BPF
+  trampoline support, the linker's `--freplace` option can place physical step
+  functions from an otherwise oversized program in extension programs embedded
+  in the same ELF. The host attaches them once before initialization; source
+  calls, fibers, memory, and continuations keep exactly the same model.
 
 `bpf-capsule-cc` compiles C and C++ to LLVM bitcode; Cargo supplies bitcode for
 Rust. `bpf-capsule-ld` links and optimizes the whole program, performs the

@@ -365,7 +365,8 @@ public:
         , I64_(Type::getInt64Ty(Ctx_))
         , FixedMemory_(fixedMemory)
         , DirectDispatch_(directDispatch)
-        , BoundedDispatch_(boundedDispatch) {
+        , BoundedDispatch_(boundedDispatch)
+        , FreplaceRoots_(module.getModuleFlag(bpf::md::FreplaceRoots) != nullptr) {
     }
 
     bool run() {
@@ -1893,8 +1894,17 @@ private:
                     signature.push_back(backingDebugType);
                 }
                 auto* type = db.createSubroutineType(db.getOrCreateTypeArray(signature));
-                unit.Subprogram = db.createFunction(
-                    cu, unit.Func->getName(), unit.Func->getName(), cu->getFile(), 0, type, 0, DINode::FlagArtificial, DISubprogram::SPFlagDefinition);
+                DISubprogram::DISPFlags subprogramFlags = DISubprogram::SPFlagDefinition;
+                if (FreplaceRoots_) {
+                    // The extension's allocation units are private callees of
+                    // one replacement root. Mark their BTF linkage static so
+                    // the verifier follows the root's concrete map-pointer
+                    // arguments instead of validating each unit against the
+                    // nullable generic global-function pointer ABI.
+                    subprogramFlags |= DISubprogram::SPFlagLocalToUnit;
+                }
+                unit.Subprogram =
+                    db.createFunction(cu, unit.Func->getName(), unit.Func->getName(), cu->getFile(), 0, type, 0, DINode::FlagArtificial, subprogramFlags);
                 unit.Func->setSubprogram(unit.Subprogram);
                 if (unit.BorrowedContext) {
                     db.createParameterVariable(unit.Subprogram, "ctx", 1, cu->getFile(), 0, cast<DIType>(BorrowedDebugType_), true);
@@ -4787,12 +4797,22 @@ private:
         SmallVector<SwitchInst*, 32> rootSwitches;
         SmallVector<Function*, 32> rootFunctions;
         SmallVector<BasicBlock*, 32> rootCases;
+        SmallVector<Value*, 32> rootControls;
+        SmallVector<Value*, 32> rootStackBackings;
         if (physicalRootMode) {
             sw = b.CreateSwitch(dispatchKey, trap, Units_.size());
             rootSwitches.reserve(physicalRoots);
             rootFunctions.reserve(physicalRoots);
             rootCases.reserve(physicalRoots);
-            SmallVector<Type*> rootParameters(parameters.begin(), parameters.end());
+            SmallVector<Type*> rootParameters;
+            if (FreplaceRoots_) {
+                if (borrowed) {
+                    rootParameters.push_back(parameters.front());
+                }
+                rootParameters.push_back(I32_);
+            } else {
+                rootParameters.append(parameters.begin(), parameters.end());
+            }
             rootParameters.push_back(I32_);
             auto* rootType = FunctionType::get(I32_, rootParameters, false);
             for (unsigned root = 0; root < physicalRoots; ++root) {
@@ -4801,15 +4821,63 @@ private:
                 output->setCallingConv(CallingConv::C);
                 output->addFnAttr(Attribute::NoInline);
                 MarkFlattenClass(*output, bpf::md::FlattenRoot, physicalClassBase + root);
-                StepAbi outputAbi = ConfigureStepAbi(*output, borrowed);
-                Argument* outputFiber = outputAbi.Fiber;
-                Argument* outputControl = outputAbi.Control;
-                output->getArg(parameters.size())->setName("dispatch_key");
+                Argument* outputContext = nullptr;
+                Argument* outputFiber = nullptr;
+                Argument* outputDispatchKey = nullptr;
+                if (FreplaceRoots_) {
+                    if (borrowed) {
+                        outputContext = output->getArg(0);
+                        outputContext->setName("ctx");
+                        outputContext->addAttr(Attribute::get(Ctx_, bpf::md::Borrowed));
+                    }
+                    outputFiber = output->getArg(borrowed ? 1 : 0);
+                    outputFiber->setName("fiber");
+                    outputDispatchKey = output->getArg(borrowed ? 2 : 1);
+                } else {
+                    StepAbi outputAbi = ConfigureStepAbi(*output, borrowed);
+                    outputContext = borrowed ? output->getArg(0) : nullptr;
+                    outputFiber = outputAbi.Fiber;
+                    outputDispatchKey = output->getArg(parameters.size());
+                }
+                outputDispatchKey->setName("dispatch_key");
 
                 BasicBlock* outputEntry = BasicBlock::Create(Ctx_, "entry", output);
                 BasicBlock* outputDispatch = BasicBlock::Create(Ctx_, "dispatch", output);
                 BasicBlock* outputTrap = BasicBlock::Create(Ctx_, "bad.id", output);
                 IRBuilder<> outputBuilder(outputEntry);
+                if (FreplaceRoots_ && ArenaTier_) {
+                    GlobalVariable* arena = Module_.getNamedGlobal(bpf::sym::ArenaMap);
+                    if (!arena) {
+                        report_fatal_error("stackify: freplace root is missing the arena map");
+                    }
+                    // An extension program which reaches arena memory only
+                    // through addr_space_cast still needs one ELF map
+                    // relocation so the verifier associates that program
+                    // with the shared arena. The empty assembly emits no BPF
+                    // operation; materializing its operand is the relocation.
+                    auto* anchor = InlineAsm::get(FunctionType::get(Type::getVoidTy(Ctx_), {arena->getType()}, false), "# bpf.capsule.freplace.arena", "r",
+                        /*hasSideEffects=*/true);
+                    outputBuilder.CreateCall(anchor, {arena});
+                }
+                Value* outputControl = FreplaceRoots_ ? FiberControlPtr(outputBuilder, outputFiber) : output->getArg(ControlArgumentIndex(borrowed));
+                rootControls.push_back(outputControl);
+                Value* outputStackBacking = nullptr;
+                Value* outputStackRegion = nullptr;
+                if (FixedMemory_) {
+                    if (FreplaceRoots_) {
+                        Function* stackRegion = Module_.getFunction(bpf::sym::StackRegion);
+                        Function* stackOffset = Module_.getFunction(bpf::sym::StackOffset);
+                        if (!stackRegion || !stackOffset) {
+                            report_fatal_error("stackify: fixed-memory freplace root is missing the stack-backing intrinsics");
+                        }
+                        outputStackRegion = outputBuilder.CreateCall(stackRegion, {outputFiber}, "stack.region");
+                        Value* offset = outputBuilder.CreateCall(stackOffset, {outputFiber}, "stack.offset");
+                        outputStackBacking = outputBuilder.CreateGEP(I8_, outputStackRegion, outputBuilder.CreateZExt(offset, I64_), "stack.base");
+                    } else {
+                        outputStackBacking = output->getArg(StackBackingArgumentIndex(borrowed));
+                    }
+                }
+                rootStackBackings.push_back(outputStackBacking);
                 BasicBlock* pointerReady = outputDispatch;
                 if (FixedMemory_) {
                     pointerReady = BasicBlock::Create(Ctx_, "stack.check", output, outputDispatch);
@@ -4817,10 +4885,11 @@ private:
                 outputBuilder.CreateCondBr(outputBuilder.CreateIsNotNull(outputControl), pointerReady, outputTrap);
                 if (FixedMemory_) {
                     IRBuilder<> stackCheck(pointerReady);
-                    stackCheck.CreateCondBr(stackCheck.CreateIsNotNull(output->getArg(StackBackingArgumentIndex(borrowed))), outputDispatch, outputTrap);
+                    Value* checkedStack = FreplaceRoots_ ? outputStackRegion : outputStackBacking;
+                    stackCheck.CreateCondBr(stackCheck.CreateIsNotNull(checkedStack), outputDispatch, outputTrap);
                 }
                 outputBuilder.SetInsertPoint(outputDispatch);
-                rootSwitches.push_back(outputBuilder.CreateSwitch(output->getArg(parameters.size()), outputTrap));
+                rootSwitches.push_back(outputBuilder.CreateSwitch(outputDispatchKey, outputTrap));
                 IRBuilder<> bad(outputTrap);
                 PublishExit(bad, outputFiber, CAPSULE_ERROR_INVALID_DISPATCH);
                 bad.CreateRet(ConstantInt::get(I32_, 1));
@@ -4828,8 +4897,15 @@ private:
                 BasicBlock* routeRoot = BasicBlock::Create(Ctx_, rootName, step, terminal);
                 IRBuilder<> routeBuilder(routeRoot);
                 SmallVector<Value*, 4> rootArguments;
-                for (Argument& argument : step->args()) {
-                    rootArguments.push_back(&argument);
+                if (FreplaceRoots_) {
+                    if (borrowed) {
+                        rootArguments.push_back(step->getArg(0));
+                    }
+                    rootArguments.push_back(fiber);
+                } else {
+                    for (Argument& argument : step->args()) {
+                        rootArguments.push_back(&argument);
+                    }
                 }
                 rootArguments.push_back(dispatchKey);
                 routeBuilder.CreateRet(routeBuilder.CreateCall(output, rootArguments));
@@ -4944,16 +5020,18 @@ private:
             }
             if (physicalRootMode) {
                 Function* output = rootFunctions[unit.OutputRoot];
+                Value* outputFiber = output->getArg(FreplaceRoots_ ? (borrowed ? 1 : 0) : FiberArgumentIndex(borrowed));
+                Value* outputControl = rootControls[unit.OutputRoot];
                 auto* caseBlock = BasicBlock::Create(Ctx_, unit.Func->getName(), output);
                 IRBuilder<> cb(caseBlock);
                 SmallVector<Value*, 4> arguments;
                 if (unit.BorrowedContext) {
                     arguments.push_back(output->getArg(0));
                 }
-                arguments.push_back(output->getArg(FiberArgumentIndex(borrowed)));
-                arguments.push_back(output->getArg(ControlArgumentIndex(borrowed)));
+                arguments.push_back(outputFiber);
+                arguments.push_back(outputControl);
                 if (FixedMemory_) {
-                    arguments.push_back(output->getArg(StackBackingArgumentIndex(borrowed)));
+                    arguments.push_back(rootStackBackings[unit.OutputRoot]);
                 }
                 cb.CreateRet(cb.CreateCall(unit.Func, arguments));
                 auto addRootCase = [&](unsigned key) {
@@ -5018,7 +5096,15 @@ private:
             }
             BtfFunctionAddDebugInfo(debugBuilder, *step, signature);
             if (physicalRootMode) {
-                SmallVector<Metadata*> outputSignature(signature);
+                SmallVector<Metadata*> outputSignature{BtfGetInt(debugBuilder, 32, true)};
+                if (FreplaceRoots_) {
+                    if (borrowed) {
+                        outputSignature.push_back(BorrowedDebugType_);
+                    }
+                    outputSignature.push_back(BtfGetInt(debugBuilder, 32, false));
+                } else {
+                    outputSignature.append(signature.begin() + 1, signature.end());
+                }
                 outputSignature.push_back(BtfGetInt(debugBuilder, 32, false));
                 for (Function* output : rootFunctions) {
                     BtfFunctionAddDebugInfo(debugBuilder, *output, outputSignature);
@@ -5473,6 +5559,7 @@ private:
     bool FixedMemory_ = false;
     bool DirectDispatch_ = false;
     bool BoundedDispatch_ = false;
+    bool FreplaceRoots_ = false;
     unsigned PhysicalScalarRoots_ = 0;
     unsigned PhysicalBorrowedRoots_ = 0;
 };

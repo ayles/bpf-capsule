@@ -21,13 +21,16 @@ let
   # The x86-64 JIT supported the complete v3 atomic set before our kernel
   # floor; arm64 added everything beyond atomic add in Linux 5.18.
   managedAtomics = arch == "x86_64" || atLeast "5.18";
+  # Program extensions need architecture-specific BPF trampolines: x86-64
+  # had them before Capsule's kernel floor, arm64 gained them in Linux 6.0.
+  freplace = atLeast (if arch == "aarch64" then "6.0" else "5.6");
   nativeArenaSignedLoads = arena && atLeast "7.0";
   indirectJumps = arena && atLeast "7.1";
 in
 assert lib.assertMsg supportedArch "BPF Capsule has no target profile for ${arch}";
 assert lib.assertMsg (atLeast "5.15") "BPF Capsule requires Linux 5.15 or newer";
 {
-  inherit arena;
+  inherit arena freplace managedAtomics;
   kernel = selectedKernel;
 
   linkOptions = [
