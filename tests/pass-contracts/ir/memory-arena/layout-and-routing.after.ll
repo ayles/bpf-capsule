@@ -10,6 +10,7 @@ target triple = "bpfel"
 @bpf_capsule_config = constant %config { i32 4112, i32 4096, i32 12288, i32 16384, i32 1, i32 4096, i32 1, i32 1, i32 1, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_capsule_arena_control = global %arena_control zeroinitializer, section ".data.bpfctrl", align 8
 @arena = global %map zeroinitializer, section ".maps", align 8, !dbg !0
+@exchange = global [32 x i8] zeroinitializer, section ".data.exchange", align 8
 @initialized = internal addrspace(1) global i32 9, align 4
 @packed = internal addrspace(1) global %packed_pointer <{ i8 7, ptr null }>, align 1
 
@@ -40,8 +41,57 @@ entry:
   ret i1 %same
 }
 
+define i32 @late_copies(ptr %destination, ptr %source, i32 %count) {
+entry:
+  br label %loop
+
+loop:                                             ; preds = %loop, %entry
+  %remaining = phi i32 [ %count, %entry ], [ %next, %loop ]
+  %source.word = ptrtoint ptr %source to i64
+  %source.span = inttoptr i64 %source.word to ptr addrspace(1)
+  %source.arena = addrspacecast ptr addrspace(1) %source.span to ptr
+  %first = load volatile i8, ptr %source.arena, align 1
+  %destination.word = ptrtoint ptr %destination to i64
+  %destination.span = inttoptr i64 %destination.word to ptr addrspace(1)
+  %destination.arena = addrspacecast ptr addrspace(1) %destination.span to ptr
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %destination.arena, ptr align 8 %source.arena, i64 16, i1 false)
+  %second = load volatile i8, ptr %source.arena, align 1
+  call void @llvm.memset.p0.i64(ptr align 8 %destination.arena, i8 0, i64 8, i1 false)
+  call void @llvm.memmove.p0.p0.i64(ptr align 8 %source.arena, ptr align 8 %destination.arena, i64 8, i1 false)
+  %next = sub i32 %remaining, 1
+  %more = icmp sgt i32 %next, 0
+  br i1 %more, label %loop, label %done
+
+done:                                             ; preds = %loop
+  %a = zext i8 %first to i32
+  %b = zext i8 %second to i32
+  %sum = add i32 %a, %b
+  ret i32 %sum
+}
+
+define void @native_copy_operands(ptr %frame) {
+entry:
+  %local = alloca [32 x i8], align 8
+  %frame.word = ptrtoint ptr %frame to i64
+  %frame.span = inttoptr i64 %frame.word to ptr addrspace(1)
+  %frame.arena = addrspacecast ptr addrspace(1) %frame.span to ptr
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %local, ptr align 8 %frame.arena, i64 32, i1 false)
+  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %frame.arena, ptr align 8 @exchange, i64 32, i1 false)
+  call void @llvm.memset.p0.i64(ptr align 8 @exchange, i8 1, i64 32, i1 false)
+  ret void
+}
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memcpy.p0.p0.i64(ptr noalias writeonly captures(none), ptr noalias readonly captures(none), i64, i1 immarg) #0
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
+declare void @llvm.memmove.p0.p0.i64(ptr writeonly captures(none), ptr readonly captures(none), i64, i1 immarg) #0
+
+; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: write)
+declare void @llvm.memset.p0.i64(ptr writeonly captures(none), i8, i64, i1 immarg) #1
+
 ; Function Attrs: noinline
-define internal i32 @__bpf_capsule_init() #0 !dbg !15 !bpf.capsule.init !18 {
+define internal i32 @__bpf_capsule_init() #2 !dbg !15 !bpf.capsule.init !18 {
 entry:
   %0 = atomicrmw add ptr @bpf_capsule_arena_control, i32 0 seq_cst, align 4, !dbg !19
   %1 = icmp eq i32 %0, 2, !dbg !19
@@ -90,13 +140,15 @@ contested:                                        ; preds = %claim
 declare !dbg !20 ptr addrspace(1) @bpf_arena_alloc_pages(ptr, ptr addrspace(1), i32, i32, i64) section ".ksyms"
 
 ; Function Attrs: noinline
-define i32 @bpf_capsule_init() #0 section "syscall" !dbg !33 {
+define i32 @bpf_capsule_init() #2 section "syscall" !dbg !33 {
 entry:
   %0 = call i32 @__bpf_capsule_init(), !dbg !34
   ret i32 %0, !dbg !34
 }
 
-attributes #0 = { noinline }
+attributes #0 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
+attributes #1 = { nocallback nofree nosync nounwind willreturn memory(argmem: write) }
+attributes #2 = { noinline }
 
 !llvm.dbg.cu = !{!2}
 !llvm.module.flags = !{!13, !14}

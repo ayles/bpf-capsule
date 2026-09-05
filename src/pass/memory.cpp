@@ -3605,7 +3605,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
 
         SmallVector<Instruction*> work;
         for (auto&& inst : instructions(func)) {
-            if (isa<LoadInst>(&inst) || isa<StoreInst>(&inst) || isa<AtomicRMWInst>(&inst) || isa<AtomicCmpXchgInst>(&inst)) {
+            if (isa<LoadInst, StoreInst, AtomicRMWInst, AtomicCmpXchgInst, MemIntrinsic>(inst)) {
                 work.push_back(&inst);
             }
         }
@@ -3637,6 +3637,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         };
         DenseMap<BasicBlock*, DenseMap<Value*, unsigned>> rootUses;
         for (Instruction* inst : work) {
+            if (isa<MemIntrinsic>(inst)) {
+                continue;
+            }
             auto [ptr, ptrIdx] = MemoryPointerOperand(inst);
             if (loops.getLoopFor(inst->getParent()) && needsCast(ptr)) {
                 rootUses[inst->getParent()][addressRoot(ptr)]++;
@@ -3644,6 +3647,23 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
 
         for (auto* inst : work) {
+            // Stackify introduces frame copies after bpf-expand-mem. License
+            // both operands before the backend expands them. Process all
+            // accesses in instruction order so a cached cast always dominates
+            // subsequent uses, including scalar loads before a later memcpy.
+            if (auto* memory = dyn_cast<MemIntrinsic>(inst)) {
+                Value* destination = memory->getRawDest();
+                if (needsCast(destination)) {
+                    memory->setDest(arenaPointer(arenaPointer, destination, memory));
+                }
+                if (auto* transfer = dyn_cast<MemTransferInst>(memory)) {
+                    Value* source = transfer->getRawSource();
+                    if (needsCast(source)) {
+                        transfer->setSource(arenaPointer(arenaPointer, source, transfer));
+                    }
+                }
+                continue;
+            }
             auto [ptr, ptrIdx] = MemoryPointerOperand(inst);
             // An access whose address is provably null exists only on a
             // dynamically dead undefined-behavior path that inlining exposed
