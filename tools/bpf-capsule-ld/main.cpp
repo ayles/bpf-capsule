@@ -75,6 +75,8 @@ cl::OptionCategory LinkerCategory("bpf-capsule-ld options");
 
 cl::list<std::string> InputFilenames(cl::Positional, cl::desc("<input .bc/.ll/.mir files>"), cl::OneOrMore, cl::cat(LinkerCategory));
 cl::opt<std::string> OutputFilename("o", cl::desc("Output BPF object"), cl::value_desc("file"), cl::Required, cl::cat(LinkerCategory));
+cl::opt<bool> ManagedAtomics(
+    "managed-atomics", cl::desc("Target supports scalar C atomics in Capsule-managed memory"), cl::init(false), cl::cat(LinkerCategory));
 // FiberStack registers and validates the public option. Its value is read by
 // the pre-scan below because it determines flags injected into LLVM's parse.
 cl::opt<unsigned> FiberStack(
@@ -121,8 +123,14 @@ cl::list<std::string> RunPasses(
 std::string capsulePreparationPipeline() {
     bool v4 = CPU == "v4";
     std::string pipeline = "bpf-expand-sret,"
-                           "bpf-lower-capsule-call,bpf-capsule-domains,bpf-lower-capsule-exit,bpf-add-suspend-barriers,"
-                           "function(bpf-validate-atomics),bpf-expand-i128,bpf-soft-float,";
+                           "bpf-lower-capsule-call,bpf-capsule-domains,bpf-lower-capsule-exit,bpf-add-suspend-barriers,";
+    if (!ManagedAtomics) {
+        pipeline += "function(bpf-validate-atomics),";
+    }
+    // With managed atomics, generic optimization sees the original C atomic
+    // operations. Lower and validate them exactly once in the final pipeline:
+    // O2 may otherwise rebuild an operation from an early CAS loop.
+    pipeline += "bpf-expand-i128,bpf-soft-float,";
     if (!v4) {
         pipeline += "bpf-lower-sdiv,";
     }
@@ -140,6 +148,10 @@ std::string capsuleFinalPipeline() {
     bool arena = Memory == MemoryMode::Arena;
     std::string pipeline = "function(bpf-expand-mem),bpf-internalize,globaldce,function(bpf-validate-no-float),"
                            "function(bpf-normalize-irreducible,fix-irreducible),bpf-capsule-domains,bpf-remove-suspend-barriers,";
+    if (ManagedAtomics) {
+        pipeline += arena ? "function(bpf-lower-managed-atomics)," : "function(bpf-lower-managed-atomics-fixed),";
+    }
+    pipeline += "function(" + std::string(ManagedAtomics ? "bpf-validate-managed-atomics" : "bpf-validate-atomics") + "),";
     if (!arena) {
         pipeline += v4 ? "bpf-stackify-fixed," : "bpf-stackify-fixed-v3,";
     } else {
@@ -154,9 +166,9 @@ std::string capsuleFinalPipeline() {
         "always-inline,globaldce,function(early-cse,gvn,adce),function(bpf-normalize-irreducible,fix-irreducible),"
         "function(bpf-define-undef),";
     if (!arena) {
-        pipeline += "function(bpf-scalarize-agg),bpf-memory-fixed,";
+        pipeline += ManagedAtomics ? "function(bpf-scalarize-agg),bpf-memory-fixed-atomics," : "function(bpf-scalarize-agg),bpf-memory-fixed,";
     } else {
-        pipeline += "bpf-memory-arena,";
+        pipeline += ManagedAtomics ? "bpf-memory-arena-atomics," : "bpf-memory-arena,";
     }
     pipeline += "function(bpf-infer-as),";
     if (arena && !NativeArenaSignedLoads) {
@@ -264,6 +276,9 @@ int main(int argc, char** argv) {
 
     if (stopCodegen && (EmitLlvm || EmitAssembly)) {
         fail("-stop-before/-stop-after cannot be combined with --emit-llvm or --emit-asm");
+    }
+    if (ManagedAtomics && (runPassMode || !PipelineOverride.empty() || stopCodegen)) {
+        fail("--managed-atomics requires the complete Capsule pipeline");
     }
     if (PipelineOverride.empty()) {
         if (CPU != "v3" && CPU != "v4") {

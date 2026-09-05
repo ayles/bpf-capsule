@@ -16,6 +16,16 @@ struct atomic_managed_result {
     int64_t reader_code;
     uint64_t writer_failures;
     uint64_t reader_failures;
+    unsigned int rmw_status;
+    int64_t rmw_code;
+    uint64_t rmw_failures;
+    unsigned int counter_status;
+    int64_t counter_code;
+    uint64_t counter_value;
+    uint64_t overflow_address;
+    unsigned int overflow_status;
+    int64_t overflow_code;
+    uint64_t overflow_failures;
 };
 
 #define ATOMIC_RUNTIME_INITIAL_WORD 17u

@@ -18,6 +18,9 @@ let
   # Arena was initially x86-64-only in 6.9; arm64 support followed in 6.10.
   arena = atLeast (if arch == "aarch64" then "6.10" else "6.9");
   fullAtomics = atLeast "6.9";
+  # The x86-64 JIT supported the complete v3 atomic set before our kernel
+  # floor; arm64 added everything beyond atomic add in Linux 5.18.
+  managedAtomics = arch == "x86_64" || atLeast "5.18";
   nativeArenaSignedLoads = arena && atLeast "7.0";
   indirectJumps = arena && atLeast "7.1";
 in
@@ -31,6 +34,7 @@ assert lib.assertMsg (atLeast "5.15") "BPF Capsule requires Linux 5.15 or newer"
     "-mcpu=${cpu}"
     "--memory=${if arena then "arena" else "fixed"}"
   ]
+  ++ lib.optional managedAtomics "--managed-atomics"
   ++ lib.optional fullAtomics "--allocator-lock=atomic"
   ++ lib.optional nativeArenaSignedLoads "--native-arena-signed-loads"
   ++ lib.optional indirectJumps "--indirect-jumps"

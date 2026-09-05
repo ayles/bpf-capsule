@@ -46,6 +46,10 @@ set(test_has_full_atomics OFF)
 if("--allocator-lock=atomic" IN_LIST BPF_CAPSULE_LINK_OPTIONS)
     set(test_has_full_atomics ON)
 endif()
+set(test_has_managed_atomics OFF)
+if("--managed-atomics" IN_LIST BPF_CAPSULE_LINK_OPTIONS)
+    set(test_has_managed_atomics ON)
+endif()
 
 # Compiler transformations have their own unprivileged contract suite.  Each
 # case records the complete canonical LLVM IR (or MIR for machine passes)
@@ -243,8 +247,19 @@ capsule_gtest_host(
 )
 
 # Runtime atomics: real BPF atomic ISA from concurrent CPUs, and managed
-# relaxed load/store staying tearing-free under a writer/reader pair.
-capsule_test_object(atomics SOURCES atomics/native_bpf.c INCLUDE_DIRECTORIES ${test_source_dir}/atomics)
+# relaxed load/store staying tearing-free under a writer/reader pair. Profiles
+# with managed atomics additionally exercise the complete C atomic surface in
+# Capsule memory, through either arena pointers or fixed-map accessors.
+set(atomics_definitions)
+if(test_has_managed_atomics)
+    list(APPEND atomics_definitions BPF_CAPSULE_TEST_MANAGED_RMW=1)
+endif()
+capsule_test_object(
+    atomics
+    SOURCES atomics/native_bpf.c
+    INCLUDE_DIRECTORIES ${test_source_dir}/atomics
+    COMPILE_DEFINITIONS ${atomics_definitions}
+)
 capsule_gtest_host(
     atomics_test
     SOURCES atomics/atomics_test.cc
@@ -252,6 +267,9 @@ capsule_gtest_host(
     INCLUDE_DIRECTORIES ${test_source_dir}/atomics
     LIBRARIES pthread
 )
+if(test_has_managed_atomics)
+    target_compile_definitions(atomics_test PRIVATE BPF_CAPSULE_TEST_MANAGED_RMW=1)
+endif()
 
 # Arena first-entry initialization under eight simultaneous lanes.
 if(test_has_arena)

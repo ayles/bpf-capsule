@@ -5,7 +5,8 @@ include(GoogleTest)
 
 # capsule_test_object(<name> SOURCES ... [DEPENDS ...]
 #                     [INCLUDE_DIRECTORIES ...] [COMPILE_DEFINITIONS ...]
-#                     [COMPILE_OPTIONS ...] [SYSTEM_COMPILE_DEFINITIONS ...])
+#                     [COMPILE_OPTIONS ...] [SYSTEM_COMPILE_DEFINITIONS ...]
+#                     [LINK_OPTIONS ...])
 #
 # Build through the same public helpers used by examples and installed
 # consumers. Test links additionally enable MachineInstr verification.
@@ -16,7 +17,7 @@ function(capsule_test_object name)
         ARG
         ""
         ""
-        "SOURCES;DEPENDS;INCLUDE_DIRECTORIES;COMPILE_DEFINITIONS;COMPILE_OPTIONS;SYSTEM_COMPILE_DEFINITIONS"
+        "SOURCES;DEPENDS;INCLUDE_DIRECTORIES;COMPILE_DEFINITIONS;COMPILE_OPTIONS;SYSTEM_COMPILE_DEFINITIONS;LINK_OPTIONS"
         ${ARGN}
     )
     if(ARG_UNPARSED_ARGUMENTS)
@@ -37,7 +38,7 @@ function(capsule_test_object name)
         SYSTEM_COMPILE_DEFINITIONS ${ARG_SYSTEM_COMPILE_DEFINITIONS}
         # Production avoids LLVM's quadratic whole-CFG verifier cost. Tests
         # deliberately retain it as an end-to-end machine-pipeline contract.
-        LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS} -verify-machineinstrs
+        LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS} -verify-machineinstrs ${ARG_LINK_OPTIONS}
     )
     add_custom_target(${name}_object ALL DEPENDS "${object}")
     bpf_capsule_skeleton(${name}_skeleton OUTPUT "${name}.skel.h" OBJECT "${object}" NAME ${name})

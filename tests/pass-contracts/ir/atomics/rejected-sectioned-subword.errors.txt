@@ -1,0 +1,1 @@
+bpf-validate-atomics: sectioned i16 atomic or in managed cannot be widened without modifying adjacent map data

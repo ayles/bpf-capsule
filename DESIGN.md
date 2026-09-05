@@ -240,6 +240,21 @@ other libc APIs with implicit process-global state retain Picolibc's
 single-threaded contract and cannot be shared concurrently across fibers. The
 default platform has no environment or timezone database, so local time is UTC.
 
+On profiles whose kernel JIT supports the complete v3 atomic set,
+`--managed-atomics` extends this model to supported scalar C11 atomics in
+managed memory. Naturally aligned 32- and 64-bit add, exchange,
+compare-exchange, and fixed-memory bitwise operations become native BPF
+atomics after address routing; subtraction becomes addition. Fetched bitwise
+operations in arena memory use explicit compare-exchange loops because some
+JITs cannot recover faults from a loop hidden inside one BPF instruction.
+Eight- and 16-bit objects update their containing word without disturbing
+neighbouring bytes. Strong loads, stores, and thread fences use an exact native
+RMW; signal fences remain compiler barriers and emit no BPF instruction.
+Sectioned map globals remain verifier-native. Target profiles add the option
+when the matching JIT supports it; a manual link must select it deliberately
+because it changes generated code and the required kernel capability. Without
+it, unsupported managed RMWs remain compile errors.
+
 The load-time contract is a 56-byte frozen `.rodata` config (magic
 `"BPCA"`, version, layout, backend, fiber geometry, the window base).
 Frozen-map reads constant-fold in the verifier, so config fields are

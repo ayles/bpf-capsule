@@ -102,8 +102,16 @@ TEST(Atomics, NativeAndManaged) {
     ASSERT_NE(skeleton, nullptr);
     struct bpf_capsule capsule = {};
     struct bpf_capsule_config config = {};
-    config.fiber_count = 2;
+    config.fiber_count = kThreads;
+#if BPF_CAPSULE_TEST_MANAGED_RMW
+    // Put one target beyond the 32 directly addressed fixed-map regions so
+    // the same test executes the overflow ARRAY atomic accessors. Arena
+    // profiles use the identical logical address.
+    config.heap_bytes = 68ull << 20;
+    config.reserved_bytes = 66ull << 20;
+#else
     config.heap_bytes = 4ull << 20;
+#endif
     ASSERT_EQ(bpf_capsule_configure(&capsule, skeleton->obj, config), 0) << strerror(errno);
     ASSERT_EQ(atomics__load(skeleton), 0) << strerror(errno);
     ASSERT_EQ(bpf_capsule_initialize(&capsule), 0) << strerror(errno);
@@ -146,6 +154,32 @@ TEST(Atomics, NativeAndManaged) {
     EXPECT_EQ(managed->reader_code, 0);
     EXPECT_EQ(managed->writer_failures, 0u);
     EXPECT_EQ(managed->reader_failures, 0u) << "torn managed atomic observed: 0x" << std::hex << managed->reader_failures;
+
+#if BPF_CAPSULE_TEST_MANAGED_RMW
+    ASSERT_EQ(capsule_test_run_program(skeleton->obj, "atomic_managed_rmw"), 0) << strerror(errno);
+    EXPECT_EQ(managed->rmw_status, (unsigned)CAPSULE_OK);
+    EXPECT_EQ(managed->rmw_code, 0);
+    EXPECT_EQ(managed->rmw_failures, 0u) << "managed C atomic failure bitmap: 0x" << std::hex << managed->rmw_failures;
+
+    int managed_increment_fds[kThreads];
+    for (unsigned i = 0; i < kThreads; ++i) {
+        managed_increment_fds[i] = bpf_program__fd(skeleton->progs.atomic_managed_increment);
+    }
+    ASSERT_EQ(run_concurrently(managed_increment_fds, nullptr, kThreads, kIterations), 0);
+    ASSERT_EQ(capsule_test_run_program(skeleton->obj, "atomic_managed_counter_read"), 0) << strerror(errno);
+    EXPECT_EQ(managed->counter_status, (unsigned)CAPSULE_OK);
+    EXPECT_EQ(managed->counter_code, 0);
+    EXPECT_EQ(managed->counter_value, (uint64_t)kThreads * kIterations);
+
+    unsigned char* overflow = (unsigned char*)bpf_capsule_memory_start(&capsule) + (64ull << 20);
+    unsigned char initial[16] = {};
+    ASSERT_EQ(bpf_capsule_memcpy(&capsule, overflow, &initial, sizeof(initial)), 0) << strerror(errno);
+    managed->overflow_address = (uintptr_t)overflow;
+    ASSERT_EQ(capsule_test_run_program(skeleton->obj, "atomic_managed_overflow"), 0) << strerror(errno);
+    EXPECT_EQ(managed->overflow_status, (unsigned)CAPSULE_OK);
+    EXPECT_EQ(managed->overflow_code, 0);
+    EXPECT_EQ(managed->overflow_failures, 0u) << "overflow-region C atomic failure bitmap: 0x" << std::hex << managed->overflow_failures;
+#endif
 
     EXPECT_EQ(bpf_capsule_release(&capsule), 0) << strerror(errno);
     atomics__destroy(skeleton);

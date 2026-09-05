@@ -49,6 +49,7 @@ let
   suiteFor = targetKernel: callPackage ./tests.nix { inherit llvmPackages bpfCapsule targetKernel; };
   suites = {
     "5.15" = suiteFor "5.15";
+    "5.18" = suiteFor "5.18";
     "6.6" = suiteFor "6.6";
     "6.9" = suiteFor "6.9";
     "6.10" = suiteFor "6.10";
@@ -100,7 +101,9 @@ in
     examples-vm-default = examplesVm defaultKernel linuxPackages_latest;
   }
   // lib.optionalAttrs (stdenv.hostPlatform.parsed.cpu.name == "aarch64") {
+    suite-518 = suites."5.18";
     suite-610 = suites."6.10";
+    vm-518 = vm "5.18" linuxPackages_latest;
     vm-610 = vm "6.10" linuxPackages_latest;
   }
   // lib.optionalAttrs (lib.versionAtLeast linuxPackages_latest.kernel.version "7.1") {

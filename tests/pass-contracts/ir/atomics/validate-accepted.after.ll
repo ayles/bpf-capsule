@@ -29,6 +29,7 @@ entry:
   %xor64 = atomicrmw xor ptr @native64, i64 %value64 monotonic, align 8
   %xchg64 = atomicrmw xchg ptr @native64, i64 %value64 monotonic, align 8
   %cmp64 = cmpxchg ptr @native64, i64 %add64, i64 %value64 monotonic monotonic, align 8
+  fence syncscope("singlethread") acq_rel
   ret i64 %loaded64
 }
 

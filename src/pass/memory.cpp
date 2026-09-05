@@ -98,11 +98,22 @@ void VerifyStackifyConsumedAllocas(Module& module) {
 }
 
 struct MemoryPass : public PassInfoMixin<MemoryPass> {
-    explicit MemoryPass(bool fixedMemory)
-        : FixedMemory_(fixedMemory) {
+    enum class HeapAtomicKind {
+        Add,
+        And,
+        Or,
+        Xor,
+        Exchange,
+        CompareExchange,
+    };
+
+    explicit MemoryPass(bool fixedMemory, bool managedRmw = false)
+        : FixedMemory_(fixedMemory)
+        , ManagedRmw_(managedRmw) {
     }
 
     bool FixedMemory_ = false;
+    bool ManagedRmw_ = false;
     uint64_t HeapBase_ = 0;
     static constexpr unsigned HeapShift = BPF_CAPSULE_MEMORY_REGION_SHIFT;
     // Linux 5.15 permits at most 64 maps in one loaded call graph. Keep the
@@ -1056,6 +1067,203 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return func;
     }
 
+    static StringRef AtomicKindName(HeapAtomicKind kind) {
+        switch (kind) {
+            case HeapAtomicKind::Add:
+                return "add";
+            case HeapAtomicKind::And:
+                return "and";
+            case HeapAtomicKind::Or:
+                return "or";
+            case HeapAtomicKind::Xor:
+                return "xor";
+            case HeapAtomicKind::Exchange:
+                return "exchange";
+            case HeapAtomicKind::CompareExchange:
+                return "compare_exchange";
+        }
+        llvm_unreachable("unknown heap atomic kind");
+    }
+
+    static Value* CreateNativeAtomic(IRBuilder<>& builder, HeapAtomicKind kind, Value* address, Value* operand, Value* replacement, Align alignment) {
+        switch (kind) {
+            case HeapAtomicKind::Add:
+                return builder.CreateAtomicRMW(AtomicRMWInst::Add, address, operand, alignment, AtomicOrdering::SequentiallyConsistent);
+            case HeapAtomicKind::And:
+                return builder.CreateAtomicRMW(AtomicRMWInst::And, address, operand, alignment, AtomicOrdering::SequentiallyConsistent);
+            case HeapAtomicKind::Or:
+                return builder.CreateAtomicRMW(AtomicRMWInst::Or, address, operand, alignment, AtomicOrdering::SequentiallyConsistent);
+            case HeapAtomicKind::Xor:
+                return builder.CreateAtomicRMW(AtomicRMWInst::Xor, address, operand, alignment, AtomicOrdering::SequentiallyConsistent);
+            case HeapAtomicKind::Exchange:
+                return builder.CreateAtomicRMW(AtomicRMWInst::Xchg, address, operand, alignment, AtomicOrdering::SequentiallyConsistent);
+            case HeapAtomicKind::CompareExchange: {
+                auto* exchange = builder.CreateAtomicCmpXchg(
+                    address, operand, replacement, alignment, AtomicOrdering::SequentiallyConsistent, AtomicOrdering::SequentiallyConsistent);
+                return builder.CreateExtractValue(exchange, 0);
+            }
+        }
+        llvm_unreachable("unknown heap atomic kind");
+    }
+
+    Function* CreateHeapArrayAtomicAccessor(Module& module, unsigned bits, HeapAtomicKind kind) {
+        LLVMContext& ctx = module.getContext();
+        auto* i32 = Type::getInt32Ty(ctx);
+        auto* i64 = Type::getInt64Ty(ctx);
+        auto* rawType = IntegerType::get(ctx, bits);
+        SmallVector<Type*> params{i64, i64};
+        if (kind == HeapAtomicKind::CompareExchange) {
+            params.push_back(i64);
+        }
+        std::string name = (Twine(bpf::sym::HeapPrefix) + "array_atomic_" + AtomicKindName(kind) + Twine(bits)).str();
+        if (module.getFunction(name)) {
+            report_fatal_error(Twine("bpf-memory: reserved compiler accessor already exists: ") + name);
+        }
+        auto* func = Function::Create(FunctionType::get(i64, params, false), GlobalValue::ExternalLinkage, name, module);
+        func->setCallingConv(CallingConv::C);
+        func->addFnAttr(Attribute::NoInline);
+        func->addFnAttr(bpf::cls::HeapAccessor);
+        func->getArg(0)->setName("offset");
+        func->getArg(1)->setName(kind == HeapAtomicKind::CompareExchange ? "expected" : "value");
+        if (kind == HeapAtomicKind::CompareExchange) {
+            func->getArg(2)->setName("replacement");
+        }
+
+        const uint64_t span = uint64_t(1) << HeapShift;
+        const uint64_t width = bits / 8;
+        const Align accessWidth(width);
+        auto* entry = BasicBlock::Create(ctx, "entry", func);
+        auto* lookup = BasicBlock::Create(ctx, "lookup", func);
+        auto* access = BasicBlock::Create(ctx, "access", func);
+        auto* invalid = BasicBlock::Create(ctx, "invalid", func);
+        IRBuilder<> b(entry);
+        auto* key = b.CreateAlloca(i32, nullptr, "bpf.heap.array.key");
+        key->setAlignment(Align(4));
+        key->setMetadata(bpf::md::NativeAlloca, MDNode::get(ctx, {}));
+        Value* offset = func->getArg(0);
+        Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - width));
+        low = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.heap.atomic.offset.visible");
+        Value* index = b.CreateLShr(b.CreateTrunc(offset, i32), ConstantInt::get(i32, HeapShift));
+        Value* afterDirect = b.CreateICmpUGE(index, ConstantInt::get(i32, Regions_.size()));
+        Value* beforeEnd = b.CreateICmpULT(index, ConstantInt::get(i32, TotalRegions_));
+        b.CreateCondBr(b.CreateAnd(afterDirect, beforeEnd), lookup, invalid);
+
+        b.SetInsertPoint(lookup);
+        Value* arrayIndex = b.CreateSub(index, ConstantInt::get(i32, Regions_.size()));
+        Value* base = CreateHeapArrayLookup(b, arrayIndex, key);
+        b.CreateCondBr(b.CreateICmpNE(base, ConstantPointerNull::get(cast<PointerType>(base->getType()))), access, invalid);
+
+        b.SetInsertPoint(access);
+        Value* address = b.CreateGEP(Type::getInt8Ty(ctx), base, {low});
+        Value* operand = b.CreateZExtOrTrunc(func->getArg(1), rawType);
+        Value* replacement = kind == HeapAtomicKind::CompareExchange ? b.CreateZExtOrTrunc(func->getArg(2), rawType) : nullptr;
+        Value* result = CreateNativeAtomic(b, kind, address, operand, replacement, accessWidth);
+        b.CreateRet(b.CreateZExtOrTrunc(result, i64));
+
+        b.SetInsertPoint(invalid);
+        b.CreateRet(ConstantInt::get(i64, 0));
+        if (!module.debug_compile_units().empty()) {
+            DIBuilder db(module, false, *module.debug_compile_units_begin());
+            SmallVector<Metadata*> signature{BtfGetInt(db, 64, false), BtfGetInt(db, 64, false), BtfGetInt(db, 64, false)};
+            if (kind == HeapAtomicKind::CompareExchange) {
+                signature.push_back(BtfGetInt(db, 64, false));
+            }
+            BtfFunctionAddDebugInfo(db, *func, signature);
+            db.finalize();
+        }
+        return func;
+    }
+
+    Function* CreateHeapAtomicAccessor(Module& module, unsigned bits, HeapAtomicKind kind) {
+        LLVMContext& ctx = module.getContext();
+        auto* i32 = Type::getInt32Ty(ctx);
+        auto* i64 = Type::getInt64Ty(ctx);
+        auto* rawType = IntegerType::get(ctx, bits);
+        SmallVector<Type*> params{i64, i64};
+        if (kind == HeapAtomicKind::CompareExchange) {
+            params.push_back(i64);
+        }
+        std::string name = (Twine(bpf::sym::HeapPrefix) + "atomic_" + AtomicKindName(kind) + Twine(bits)).str();
+        if (module.getFunction(name)) {
+            report_fatal_error(Twine("bpf-memory: reserved compiler accessor already exists: ") + name);
+        }
+        auto* func = Function::Create(FunctionType::get(i64, params, false), GlobalValue::ExternalLinkage, name, module);
+        func->setCallingConv(CallingConv::C);
+        func->addFnAttr(Attribute::NoInline);
+        func->addFnAttr(bpf::cls::HeapAccessor);
+        func->getArg(0)->setName("offset");
+        func->getArg(1)->setName(kind == HeapAtomicKind::CompareExchange ? "expected" : "value");
+        if (kind == HeapAtomicKind::CompareExchange) {
+            func->getArg(2)->setName("replacement");
+        }
+
+        const uint64_t span = uint64_t(1) << HeapShift;
+        const uint64_t width = bits / 8;
+        const Align accessWidth(width);
+        auto* entry = BasicBlock::Create(ctx, "entry", func);
+        auto* invalid = BasicBlock::Create(ctx, "invalid", func);
+        IRBuilder<> b(entry);
+        const bool hasArray = HeapArray_ && TotalRegions_ > Regions_.size();
+        Function* arrayAccessor = hasArray ? CreateHeapArrayAtomicAccessor(module, bits, kind) : nullptr;
+        Value* offset = func->getArg(0);
+        Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - width));
+        low = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.heap.atomic.offset.visible");
+        Value* index = b.CreateLShr(b.CreateTrunc(offset, i32), ConstantInt::get(i32, HeapShift));
+        auto* overflow = hasArray ? BasicBlock::Create(ctx, "array", func, invalid) : invalid;
+        auto* routeBlock = BasicBlock::Create(ctx, "region.route", func, invalid);
+        auto* firstRegion = BasicBlock::Create(ctx, "region.0", func, invalid);
+        b.CreateCondBr(b.CreateICmpEQ(index, ConstantInt::get(i32, 0)), firstRegion, routeBlock);
+
+        IRBuilder<> routeBuilder(routeBlock);
+        auto* route = routeBuilder.CreateSwitch(index, overflow, Regions_.size() - 1);
+        for (unsigned regionIndex = 0; regionIndex < Regions_.size(); ++regionIndex) {
+            auto* block = regionIndex == 0 ? firstRegion : BasicBlock::Create(ctx, "region." + Twine(regionIndex), func, invalid);
+            if (regionIndex != 0) {
+                route->addCase(ConstantInt::get(i32, regionIndex), block);
+            }
+            IRBuilder<> rb(block);
+            Value* address = rb.CreateGEP(Type::getInt8Ty(ctx), Regions_[regionIndex], {low});
+            Value* operand = rb.CreateZExtOrTrunc(func->getArg(1), rawType);
+            Value* replacement = kind == HeapAtomicKind::CompareExchange ? rb.CreateZExtOrTrunc(func->getArg(2), rawType) : nullptr;
+            Value* result = CreateNativeAtomic(rb, kind, address, operand, replacement, accessWidth);
+            rb.CreateRet(rb.CreateZExtOrTrunc(result, i64));
+        }
+
+        CallBase* arrayCall = nullptr;
+        if (hasArray) {
+            IRBuilder<> ab(overflow);
+            SmallVector<Value*> arguments{func->getArg(0), func->getArg(1)};
+            if (kind == HeapAtomicKind::CompareExchange) {
+                arguments.push_back(func->getArg(2));
+            }
+            arrayCall = ab.CreateCall(arrayAccessor, arguments);
+            ab.CreateRet(arrayCall);
+        }
+
+        b.SetInsertPoint(invalid);
+        b.CreateRet(ConstantInt::get(i64, 0));
+        if (!module.debug_compile_units().empty()) {
+            DIBuilder db(module, false, *module.debug_compile_units_begin());
+            SmallVector<Metadata*> signature{BtfGetInt(db, 64, false), BtfGetInt(db, 64, false), BtfGetInt(db, 64, false)};
+            if (kind == HeapAtomicKind::CompareExchange) {
+                signature.push_back(BtfGetInt(db, 64, false));
+            }
+            BtfFunctionAddDebugInfo(db, *func, signature);
+            db.finalize();
+        }
+        if (arrayCall) {
+            InlineFunctionInfo info;
+            if (!InlineFunction(*arrayCall, info).isSuccess()) {
+                report_fatal_error(Twine("bpf-memory: cannot inline ARRAY overflow path into ") + func->getName());
+            }
+            if (!arrayAccessor->use_empty()) {
+                report_fatal_error(Twine("bpf-memory: ARRAY overflow atomic accessor has unexpected uses: ") + arrayAccessor->getName());
+            }
+            arrayAccessor->eraseFromParent();
+        }
+        return func;
+    }
+
     Function* CreateHeapAccessor(Module& module, unsigned bits, bool isStore) {
         LLVMContext& ctx = module.getContext();
         auto* i32 = Type::getInt32Ty(ctx);
@@ -1220,6 +1428,16 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         for (unsigned bits : {8u, 16u, 32u, 64u}) {
             CreateHeapAccessor(module, bits, /*isStore=*/false);
             CreateHeapAccessor(module, bits, /*isStore=*/true);
+        }
+        if (ManagedRmw_) {
+            for (unsigned bits : {32u, 64u}) {
+                CreateHeapAtomicAccessor(module, bits, HeapAtomicKind::Add);
+                CreateHeapAtomicAccessor(module, bits, HeapAtomicKind::And);
+                CreateHeapAtomicAccessor(module, bits, HeapAtomicKind::Or);
+                CreateHeapAtomicAccessor(module, bits, HeapAtomicKind::Xor);
+                CreateHeapAtomicAccessor(module, bits, HeapAtomicKind::Exchange);
+                CreateHeapAtomicAccessor(module, bits, HeapAtomicKind::CompareExchange);
+            }
         }
     }
 
@@ -2045,7 +2263,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (!IsSoftwareStackAddress(ptr)) {
                 continue;
             }
-            if (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst)) {
+            if (!ManagedRmw_ && (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst))) {
                 report_fatal_error("bpf-memory: unsupported atomic operation reached the Capsule software stack");
             }
             auto path = DecomposeSoftwareStackAddress(module, ptr);
@@ -2113,6 +2331,15 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             Value* raw = RecoverFiberStackOffset(root);
             if (raw) {
                 raw = b.CreateZExtOrTrunc(raw, i64, "bpf.stack.root.offset");
+                if (ManagedRmw_) {
+                    // Stackify rounds every frame to this alignment. Restate
+                    // the low zero bits after the verifier-opaque stack
+                    // arithmetic so native atomics on promoted frame slots
+                    // retain their required alignment on the fixed-map
+                    // backend. Every managed frame is at least 16-byte
+                    // aligned, while the largest BPF atomic is 8 bytes.
+                    raw = b.CreateAnd(raw, ConstantInt::get(i64, ~uint64_t(15)), "bpf.stack.root.aligned");
+                }
             } else {
                 raw = b.CreatePtrToInt(root, i64);
             }
@@ -2462,6 +2689,22 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return func;
     }
 
+    Function* AtomicAccessor(Module& module, Type* type, HeapAtomicKind kind) {
+        uint64_t bits = module.getDataLayout().getTypeStoreSizeInBits(type);
+        if ((!type->isIntegerTy() && !type->isPointerTy()) || (bits != 32 && bits != 64)) {
+            std::string spelling;
+            raw_string_ostream out(spelling);
+            type->print(out);
+            report_fatal_error(Twine("bpf-memory: unsupported virtual atomic type ") + out.str());
+        }
+        std::string name = (Twine(bpf::sym::HeapPrefix) + "atomic_" + AtomicKindName(kind) + Twine(bits)).str();
+        Function* func = module.getFunction(name);
+        if (!func || func->isDeclaration()) {
+            report_fatal_error(Twine("bpf-memory: the program must define ") + name);
+        }
+        return func;
+    }
+
     // Slice the flat image across the regions that back it. Each region's map
     // is longer than the range it owns -- the tail shadows the start of the
     // next one -- so the shadow bytes are filled in here too, exactly as the
@@ -2532,7 +2775,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (verifierNative.contains(ptr)) {
                 continue;
             }
-            if (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst)) {
+            if (!ManagedRmw_ && (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst))) {
                 report_fatal_error("bpf-memory: unsupported atomic operation reached Capsule virtual memory");
             }
 
@@ -2610,7 +2853,45 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 continue;
             }
 
-            if (auto* load = dyn_cast<LoadInst>(inst)) {
+            if (auto* rmw = dyn_cast<AtomicRMWInst>(inst)) {
+                HeapAtomicKind kind;
+                if (rmw->getOperation() == AtomicRMWInst::Add) {
+                    kind = HeapAtomicKind::Add;
+                } else if (rmw->getOperation() == AtomicRMWInst::And) {
+                    kind = HeapAtomicKind::And;
+                } else if (rmw->getOperation() == AtomicRMWInst::Or) {
+                    kind = HeapAtomicKind::Or;
+                } else if (rmw->getOperation() == AtomicRMWInst::Xor) {
+                    kind = HeapAtomicKind::Xor;
+                } else if (rmw->getOperation() == AtomicRMWInst::Xchg) {
+                    kind = HeapAtomicKind::Exchange;
+                } else {
+                    report_fatal_error(Twine("bpf-memory: unsupported virtual atomic ") + AtomicRMWInst::getOperationName(rmw->getOperation()));
+                }
+                Type* type = rmw->getValOperand()->getType();
+                Function* accessor = AtomicAccessor(module, type, kind);
+                Value* operand = type->isPointerTy() ? b.CreatePtrToInt(rmw->getValOperand(), i64) : b.CreateZExtOrTrunc(rmw->getValOperand(), i64);
+                Value* raw = b.CreateCall(accessor, {offset, operand});
+                cast<Instruction>(raw)->setDebugLoc(loc);
+                Value* result = type->isPointerTy() ? b.CreateIntToPtr(raw, type) : b.CreateZExtOrTrunc(raw, type);
+                rmw->replaceAllUsesWith(result);
+                rmw->eraseFromParent();
+            } else if (auto* exchange = dyn_cast<AtomicCmpXchgInst>(inst)) {
+                Type* type = exchange->getCompareOperand()->getType();
+                Function* accessor = AtomicAccessor(module, type, HeapAtomicKind::CompareExchange);
+                Value* expected =
+                    type->isPointerTy() ? b.CreatePtrToInt(exchange->getCompareOperand(), i64) : b.CreateZExtOrTrunc(exchange->getCompareOperand(), i64);
+                Value* replacement =
+                    type->isPointerTy() ? b.CreatePtrToInt(exchange->getNewValOperand(), i64) : b.CreateZExtOrTrunc(exchange->getNewValOperand(), i64);
+                Value* raw = b.CreateCall(accessor, {offset, expected, replacement});
+                cast<Instruction>(raw)->setDebugLoc(loc);
+                Value* observed = type->isPointerTy() ? b.CreateIntToPtr(raw, type) : b.CreateZExtOrTrunc(raw, type);
+                Value* result = PoisonValue::get(exchange->getType());
+                result = b.CreateInsertValue(result, observed, 0);
+                result = b.CreateInsertValue(result, b.CreateICmpEQ(raw, expected), 1);
+                exchange->replaceAllUsesWith(result);
+                exchange->eraseFromParent();
+            } else if (auto* load = dyn_cast<LoadInst>(inst)) {
                 Type* type = load->getType();
                 Function* accessor = Accessor(module, type, /*isStore=*/false);
                 Value* raw = b.CreateCall(accessor, {offset});
@@ -3408,7 +3689,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (!needsCast(ptr)) {
                 continue;
             }
-            if (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst)) {
+            if (!ManagedRmw_ && (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst))) {
                 report_fatal_error("bpf-arena: unsupported atomic operation reached Capsule virtual memory");
             }
             if (isa<Constant>(ptr) || rebuildableRoot(addressRoot(ptr)) || rootUses[inst->getParent()].lookup(addressRoot(ptr)) >= 2) {
@@ -3447,8 +3728,16 @@ bool RegisterMemoryPass(llvm::StringRef name, llvm::ModulePassManager& manager) 
         manager.addPass(MemoryPass(true));
         return true;
     }
+    if (name == "bpf-memory-fixed-atomics") {
+        manager.addPass(MemoryPass(true, true));
+        return true;
+    }
     if (name == "bpf-memory-arena" || name == "bpf-memory") {
         manager.addPass(MemoryPass(false));
+        return true;
+    }
+    if (name == "bpf-memory-arena-atomics") {
+        manager.addPass(MemoryPass(false, true));
         return true;
     }
     return false;

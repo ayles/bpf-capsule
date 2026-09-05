@@ -133,11 +133,22 @@ capsule_ir_pass_contract(
     "function(bpf-finalize-atomic-load-store)"
     atomics/finalize-load-store
 )
+capsule_ir_pass_contract(lower-managed-atomics "function(bpf-lower-managed-atomics)" atomics/lower-managed)
+capsule_ir_pass_contract(
+    lower-managed-atomics-fixed
+    "function(bpf-lower-managed-atomics-fixed)"
+    atomics/lower-managed-fixed
+)
 capsule_ir_pass_contract(scalarize-agg "function(bpf-scalarize-agg)" scalarize-agg/nested)
 capsule_ir_pass_contract(define-undef "function(bpf-define-undef)" define-undef/traps-and-poison)
 capsule_ir_pass_contract(add-suspend-barriers "bpf-add-suspend-barriers" suspend-barriers/add)
 capsule_ir_pass_contract(remove-suspend-barriers "bpf-remove-suspend-barriers" suspend-barriers/remove)
 capsule_ir_pass_contract(validate-atomics-accepted "function(bpf-validate-atomics)" atomics/validate-accepted)
+capsule_ir_pass_diagnostic(
+    validate-atomics-sectioned-subword
+    "function(bpf-lower-managed-atomics,bpf-validate-managed-atomics)"
+    atomics/rejected-sectioned-subword
+)
 capsule_ir_pass_contract(validate-no-float-accepted "function(bpf-validate-no-float)" validate-no-float/accepted)
 capsule_ir_pass_contract(expand-sret "bpf-expand-sret" expand-sret/direct)
 capsule_ir_pass_contract(expand-i128 "bpf-expand-i128" expand-i128/arithmetic)
