@@ -66,9 +66,9 @@ bpf_capsule_object(
     DEPENDS "${WASM_ZLIB_MODULE}"
     SOURCES wasm3_bpf.c ${WASM3_SRC}
     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_BINARY_DIR} ${wasm3_SOURCE_DIR}/source
-    # Leave half of the fiber stack for the C frames surrounding wasm3's
-    # recursive interpreter calls.
-    COMPILE_DEFINITIONS d_m3MaxNativeStack=${BPF_CAPSULE_FIBER_STACK_BYTES}/2
+    # With the default 256 KiB Capsule stack, leave half for the C frames
+    # surrounding wasm3's recursive interpreter calls.
+    COMPILE_DEFINITIONS d_m3MaxNativeStack=131072
     COMPILE_OPTIONS -g
     LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
 )

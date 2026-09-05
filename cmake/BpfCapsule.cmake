@@ -2,16 +2,6 @@
 # Public CMake integration for the bpf-capsule-cc / bpf-capsule-ld toolchain.
 include_guard(GLOBAL)
 
-set(BPF_CAPSULE_FIBER_STACK_BYTES 262144 CACHE STRING "Bytes in each Capsule fiber stack")
-math(EXPR _bpf_capsule_stack_power "${BPF_CAPSULE_FIBER_STACK_BYTES} & (${BPF_CAPSULE_FIBER_STACK_BYTES} - 1)")
-if(
-    BPF_CAPSULE_FIBER_STACK_BYTES LESS 1
-    OR BPF_CAPSULE_FIBER_STACK_BYTES GREATER 4194304
-    OR NOT _bpf_capsule_stack_power EQUAL 0
-)
-    message(FATAL_ERROR "BPF_CAPSULE_FIBER_STACK_BYTES must be a power of two from 1 to 4194304")
-endif()
-
 set(BPF_CAPSULE_MAX_FIBERS "" CACHE STRING "Compiled fiber ceiling; empty uses the runtime default")
 if(
     BPF_CAPSULE_MAX_FIBERS
@@ -393,7 +383,6 @@ function(bpf_capsule_object out_var)
     endif()
     cmake_path(ABSOLUTE_PATH ARG_OUTPUT BASE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}" NORMALIZE OUTPUT_VARIABLE output)
     get_filename_component(output_directory "${output}" DIRECTORY)
-
     set(input_bitcode ${ARG_BITCODE})
     if(ARG_SOURCES)
         _bpf_capsule_compile_bitcode(
@@ -452,9 +441,8 @@ function(bpf_capsule_object out_var)
         OUTPUT "${output}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${output_directory}"
         COMMAND
-            $<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}> --fiber-stack "${BPF_CAPSULE_FIBER_STACK_BYTES}" ${ARG_LINK_OPTIONS}
-            -o "${output}" ${input_bitcode} ${runtime_bitcode} ${compiler_runtime_bitcode} ${platform_bitcode}
-            "${BPF_CAPSULE_LIBC_ARCHIVE}"
+            $<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}> ${ARG_LINK_OPTIONS} -o "${output}" ${input_bitcode}
+            ${runtime_bitcode} ${compiler_runtime_bitcode} ${platform_bitcode} "${BPF_CAPSULE_LIBC_ARCHIVE}"
         DEPENDS
             ${BPF_CAPSULE_LD_TARGET}
             ${input_bitcode}
