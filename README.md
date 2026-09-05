@@ -89,6 +89,8 @@ and indirect region dispatch where the kernel and JIT support them.
 [DESIGN.md](DESIGN.md) is the technical description of the current system: the
 execution model, fibers, software calling convention, memory backends,
 compiler pipeline, and verifier constraints.
+[PLATFORM.md](PLATFORM.md) sketches the planned optional virtual filesystem,
+stdio, clocks, and other Unix-like services for existing libraries.
 
 ## Build
 

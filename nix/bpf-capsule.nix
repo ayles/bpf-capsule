@@ -39,6 +39,7 @@ stdenv.mkDerivation {
       ../LICENSE
       ../README.md
       ../DESIGN.md
+      ../PLATFORM.md
     ];
   };
 
