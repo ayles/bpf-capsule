@@ -101,7 +101,9 @@ Value* ExtractNarrow(IRBuilder<>& builder, Value* word, Value* shift, IntegerTyp
 
 Value* ReplaceNarrow(IRBuilder<>& builder, Value* word, Value* shift, Value* mask, Value* value) {
     Value* inserted = builder.CreateShl(builder.CreateZExt(value, builder.getInt32Ty()), shift);
-    return builder.CreateOr(builder.CreateAnd(word, builder.CreateNot(mask)), builder.CreateAnd(inserted, mask));
+    Value* preserved = builder.CreateAnd(word, builder.CreateNot(mask));
+    Value* replacement = builder.CreateAnd(inserted, mask);
+    return builder.CreateOr(preserved, replacement);
 }
 
 AtomicCmpXchgInst* CreateCas(IRBuilder<>& builder, Value* pointer, Value* expected, Value* desired, Align alignment) {
