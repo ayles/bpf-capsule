@@ -44,6 +44,36 @@ entry:
   ret i32 %value
 }
 
+; Function Attrs: alwaysinline
+define void @runtime_outer_loop(ptr %counter) #3 {
+entry:
+  br label %loop
+
+loop:                                             ; preds = %loop, %entry
+  %value = load volatile i32, ptr %counter, align 4
+  %done = icmp eq i32 %value, 0
+  br i1 %done, label %exit, label %loop
+
+exit:                                             ; preds = %loop
+  ret void
+}
+
+; Function Attrs: noinline
+define void @runtime_inner_loop(ptr %counter) #4 {
+entry:
+  br label %loop
+
+loop:                                             ; preds = %loop, %entry
+  %value = load volatile i32, ptr %counter, align 4
+  %done = icmp eq i32 %value, 0
+  br i1 %done, label %exit, label %loop
+
+exit:                                             ; preds = %loop
+  ret void
+}
+
 attributes #0 = { alwaysinline }
 attributes #1 = { alwaysinline "capsule.heap-accessor" }
 attributes #2 = { noinline }
+attributes #3 = { alwaysinline "capsule.trampoline" }
+attributes #4 = { noinline "capsule.trampoline" }

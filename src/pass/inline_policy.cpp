@@ -61,6 +61,12 @@ public:
         if (bpf::HasFunctionClass(function, bpf::cls::EntryGlue)) {
             return PreservedAnalyses::none();
         }
+        // Runtime drivers deliberately inline their outer loop and retain
+        // the inner verifier boundary. Outlining the outer loop adds a BPF
+        // frame to every managed call and steals stack from all step roots.
+        if (bpf::HasFunctionClass(function, bpf::cls::Trampoline)) {
+            return PreservedAnalyses::none();
+        }
         LoopInfo& loops = manager.getResult<LoopAnalysis>(function);
         // Static alloca bytes count too: inlining copies the buffers into
         // every caller's native frame (a helper-visible print buffer
