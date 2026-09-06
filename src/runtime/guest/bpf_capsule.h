@@ -85,10 +85,8 @@ static __attribute__((always_inline)) inline uint32_t capsule_fiber_count(void) 
 
 // One load-time-sized allocation pool in Capsule's unified address space.
 // Freestanding support libraries use this to initialize their allocator;
-// applications may use it to install another allocator. If the host reserved
-// a staging prefix, these accessors expose only the suffix after that aligned
-// prefix; pointers into the reserved prefix remain valid Capsule memory but
-// are not part of the managed allocation pool.
+// applications may use it to install another allocator. Host allocations use
+// that same allocator and pool through bpf_capsule_malloc/bpf_capsule_free.
 extern void* __bpf_capsule_heap_start(void);
 extern uint64_t __bpf_capsule_heap_size(void);
 static __attribute__((always_inline)) inline void* capsule_heap_start(void) {

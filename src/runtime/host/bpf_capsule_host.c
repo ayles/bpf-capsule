@@ -2,6 +2,7 @@
 // Host-side Capsule setup, memory access, and lifetime management.
 #include "bpf_capsule_host.h"
 #include "bpf_capsule_abi.h"
+#include "bpf_capsule_alloc.h"
 #include "bpf_capsule_names.h"
 
 #include <bpf/bpf.h>
@@ -79,6 +80,7 @@ struct bpf_capsule_state {
     struct bpf_capsule_extension* extensions;
     int freplace_required;
     int freplace_attached;
+    int initialized;
 };
 
 struct bpf_capsule_extension {
@@ -116,8 +118,7 @@ static inline int __bpf_capsule_layout_header_valid(const struct __bpf_capsule_o
 // is written until every check has passed. This is the function a
 // non-libbpf loader ports. Errors: ENOENT the
 // record is not this compiler's; EINVAL inconsistent record; E2BIG
-// fiber_count above the compiled ceiling; ENOMEM reserved_bytes exceeds the
-// heap; EOVERFLOW unrepresentable capacities.
+// fiber_count above the compiled ceiling; EOVERFLOW unrepresentable capacities.
 int __bpf_capsule_plan(struct __bpf_capsule_object_config* config, size_t config_size, struct bpf_capsule_config requested, uint32_t* backend_entries) {
     if (!config || !backend_entries || !requested.fiber_count) {
         errno = EINVAL;
@@ -133,17 +134,6 @@ int __bpf_capsule_plan(struct __bpf_capsule_object_config* config, size_t config
     }
     if (!__bpf_capsule_layout_header_valid(config)) {
         errno = EINVAL;
-        return -1;
-    }
-    // The allocator pool follows the reserved prefix; keep its start
-    // 16-byte aligned even for an odd reservation.
-    if (requested.reserved_bytes > requested.heap_bytes) {
-        errno = ENOMEM;
-        return -1;
-    }
-    uint64_t heap_reserved = (requested.reserved_bytes + 15u) & ~15ull;
-    if (heap_reserved > requested.heap_bytes) {
-        errno = ENOMEM;
         return -1;
     }
     int has_arena = config->memory_backend == BPF_CAPSULE_MEMORY_ARENA;
@@ -198,7 +188,6 @@ int __bpf_capsule_plan(struct __bpf_capsule_object_config* config, size_t config
 
     config->fiber_count = requested.fiber_count;
     config->heap_bytes = requested.heap_bytes;
-    config->heap_reserved = (uint32_t)heap_reserved;
     config->stack_base = stack_base;
     config->memory_end = memory_end;
     *backend_entries = entries;
@@ -274,15 +263,15 @@ static inline int __bpf_capsule_restore_reservation(void* address, size_t size) 
 // 4GiB-aligned memory window, and bakes the window base into the
 // to-be-frozen config, where the object's first-entry check demands a
 // nonzero value. On the fixed tier the window is where
-// bpf_capsule_initialize() later assembles the read view, so guest
+// bpf_capsule_initialize() later assembles the shared view, so guest
 // pointers are host pointers; on the arena tier the window becomes the
 // arena's kernel-pinned user_vm_start (libbpf maps the arena into it with
 // MAP_FIXED at load). Calling it again before load replaces the previous
 // selection (the prior window reservation is released). Errors: EBUSY the
 // object is already loaded; E2BIG fiber_count exceeds the compiled
 // BPF_CAPSULE_MAX_FIBERS ceiling; ENOENT the object was not built by this
-// compiler; ENOMEM the reservation exceeds the heap or no window is
-// available; EINVAL/EOVERFLOW malformed or unrepresentable capacities. A
+// compiler; ENOMEM no memory window is available;
+// EINVAL/EOVERFLOW malformed or unrepresentable capacities. A
 // libbpf map-resize failure is returned through the errno corresponding to
 // libbpf's negative error.
 int bpf_capsule_configure(struct bpf_capsule* capsule, struct bpf_object* object, struct bpf_capsule_config requested) {
@@ -780,9 +769,8 @@ static int __bpf_capsule_prepare_memory(struct bpf_capsule* capsule) {
     }
     uint64_t heap_end = (uint64_t)config->heap_base + config->heap_bytes;
     uint64_t stack_bytes = (uint64_t)config->stack_bytes_per_fiber * config->fiber_count;
-    if (!__bpf_capsule_layout_header_valid(config) || !config->fiber_count || config->fiber_count > config->max_fibers ||
-        config->heap_reserved > config->heap_bytes || (config->heap_reserved & 15u) || heap_end > config->stack_base || config->stack_base > UINT32_MAX ||
-        stack_bytes > (1ull << 32) - config->stack_base || config->memory_end != config->stack_base + stack_bytes) {
+    if (!__bpf_capsule_layout_header_valid(config) || !config->fiber_count || config->fiber_count > config->max_fibers || heap_end > config->stack_base ||
+        config->stack_base > UINT32_MAX || stack_bytes > (1ull << 32) - config->stack_base || config->memory_end != config->stack_base + stack_bytes) {
         errno = EINVAL;
         return -1;
     }
@@ -931,6 +919,7 @@ int bpf_capsule_initialize(struct bpf_capsule* capsule) {
     // too. Idempotent: a second call observes the word and changes nothing.
     struct bpf_map* ready_map = bpf_object__find_map_by_name(object, BPF_CAPSULE_SECTION_READY);
     if (!ready_map) {
+        state->initialized = 1;
         return 0; // arena tier: readiness is the arena control word
     }
     size_t ready_size = 0;
@@ -940,6 +929,7 @@ int bpf_capsule_initialize(struct bpf_capsule* capsule) {
         return -1;
     }
     if (*ready) {
+        state->initialized = 1;
         return 0;
     }
     uintptr_t window = state->config->memory_view_base;
@@ -963,12 +953,85 @@ int bpf_capsule_initialize(struct bpf_capsule* capsule) {
         }
     }
     *ready = 1;
+    state->initialized = 1;
     return 0;
 }
 
+// Kept separate from object discovery so the syscall/error protocol can be
+// tested without loading a BPF program. Not part of the public host API.
+int __bpf_capsule_alloc_run(int fd, struct __bpf_capsule_alloc_request* request) {
+    struct bpf_test_run_opts options = {
+        .sz = sizeof(options),
+        // For BPF_PROG_TYPE_SYSCALL, ctx_in is an in/out buffer; ctx_out is
+        // not supported. This storage belongs to this host call alone.
+        .ctx_in = request,
+        .ctx_size_in = sizeof(*request),
+    };
+    for (;;) {
+        int error = bpf_prog_test_run_opts(fd, &options);
+        if (error || (int)options.retval < 0) {
+            int saved_errno = error ? errno : -(int)options.retval;
+            // If a resume failed before consuming the known continuation,
+            // return its fiber. Preserve the original error even if reset
+            // also fails (for example, because the program fd was closed).
+            if (request->result.continuation != BPF_CAPSULE_NO_CONTINUATION) {
+                request->operation = BPF_CAPSULE_ALLOC_RESET;
+                (void)bpf_prog_test_run_opts(fd, &options);
+            }
+            errno = saved_errno;
+            return -1;
+        }
+        switch (request->result.status) {
+            case CAPSULE_OK:
+                if (request->output.error) {
+                    errno = request->output.error;
+                    return -1;
+                }
+                return 0;
+            case CAPSULE_PENDING:
+            case CAPSULE_YIELD:
+                request->operation = BPF_CAPSULE_ALLOC_CONTINUE;
+                break;
+            case CAPSULE_EXITED:
+                errno = request->result.code == CAPSULE_ERROR_POOL_EXHAUSTED ? EAGAIN : ECANCELED;
+                return -1;
+            default:
+                errno = EPROTO;
+                return -1;
+        }
+    }
+}
+
+static int __bpf_capsule_allocate(const struct bpf_capsule* capsule, struct __bpf_capsule_alloc_request* request) {
+    const struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
+    if (!state || !state->initialized) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct bpf_program* program = bpf_object__find_program_by_name(capsule->object, BPF_CAPSULE_PROGRAM_ALLOC);
+    if (!program || bpf_program__fd(program) < 0) {
+        errno = ENOENT;
+        return -1;
+    }
+    return __bpf_capsule_alloc_run(bpf_program__fd(program), request);
+}
+
+void* bpf_capsule_malloc(const struct bpf_capsule* capsule, size_t size) {
+    struct __bpf_capsule_alloc_request request = {.operation = BPF_CAPSULE_ALLOC_MALLOC, .size = size, .result = {.continuation = BPF_CAPSULE_NO_CONTINUATION}};
+    return __bpf_capsule_allocate(capsule, &request) ? NULL : request.output.pointer;
+}
+
+int bpf_capsule_free(const struct bpf_capsule* capsule, void* pointer) {
+    if (!pointer) {
+        return 0;
+    }
+    struct __bpf_capsule_alloc_request request = {
+        .operation = BPF_CAPSULE_ALLOC_FREE, .pointer = pointer, .result = {.continuation = BPF_CAPSULE_NO_CONTINUATION}};
+    return __bpf_capsule_allocate(capsule, &request);
+}
+
 // Observability over the view: the managed image's bounds in the external
-// virtual address domain, and the host-reserved heap prefix selected at
-// configure time. Capsule pointers are full virtual addresses on both
+// virtual address domain. Capsule pointers are full virtual addresses on both
 // tiers; on the arena tier the start is meaningful once
 // bpf_capsule_initialize() has run (virtual_base reads as zero before
 // then).
@@ -992,24 +1055,4 @@ void* bpf_capsule_memory_start(const struct bpf_capsule* capsule) {
     // Fixed tier: capsule pointers are base + offset and this is that base
     // (the window bpf_capsule_configure() reserved and baked).
     return (void*)state->config->memory_view_base;
-}
-
-// The reserved prefix opens the heap: staging input there keeps it out of
-// the allocator's reach for the object's whole lifetime, and both sides may
-// pass pointers into it freely.
-uint64_t bpf_capsule_memory_reserved_size(const struct bpf_capsule* capsule) {
-    const struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
-    return state && state->config ? state->config->heap_reserved : 0;
-}
-
-void* bpf_capsule_memory_reserved_start(const struct bpf_capsule* capsule) {
-    const struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
-    if (!state || !state->config) {
-        return 0;
-    }
-    uintptr_t base = state->config->heap_base;
-    if (state->arena_control) {
-        return (void*)(state->arena_control->virtual_base + base);
-    }
-    return (void*)(state->config->memory_view_base + base);
 }

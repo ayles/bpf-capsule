@@ -73,19 +73,6 @@ static char* read_stream(FILE* file, size_t* size) {
     }
 }
 
-static int reserve_buffer(size_t* total, size_t size, size_t* offset) {
-    if (*total > SIZE_MAX - 15u) {
-        return -1;
-    }
-    size_t aligned = (*total + 15u) & ~(size_t)15u;
-    if (size > SIZE_MAX - aligned) {
-        return -1;
-    }
-    *offset = aligned;
-    *total = aligned + size;
-    return 0;
-}
-
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: lua SCRIPT\n");
@@ -119,11 +106,7 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    size_t script_offset = 0, input_offset = 0, output_offset = 0, error_offset = 0;
-    size_t reserved_bytes = 0;
-    if (reserve_buffer(&reserved_bytes, script_size, &script_offset) || reserve_buffer(&reserved_bytes, input_size, &input_offset) ||
-        reserve_buffer(&reserved_bytes, LUA_OUTPUT_BYTES, &output_offset) || reserve_buffer(&reserved_bytes, LUA_ERROR_BYTES, &error_offset) ||
-        reserved_bytes > SIZE_MAX - LUA_HEAP_BYTES) {
+    if (script_size >= UINT32_MAX || input_size >= UINT32_MAX) {
         fprintf(stderr, "script and stdin are too large for Capsule memory\n");
         goto cleanup;
     }
@@ -136,8 +119,7 @@ int main(int argc, char** argv) {
     if (bpf_capsule_configure(&capsule, skeleton->obj,
             (struct bpf_capsule_config){
                 .fiber_count = 1,
-                .heap_bytes = reserved_bytes + LUA_HEAP_BYTES,
-                .reserved_bytes = reserved_bytes,
+                .heap_bytes = (uint64_t)script_size + input_size + LUA_OUTPUT_BYTES + LUA_ERROR_BYTES + LUA_HEAP_BYTES,
             }) ||
         bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
         fprintf(stderr, "cannot configure/load Capsule Lua: %s\n", strerror(errno));
@@ -145,17 +127,20 @@ int main(int argc, char** argv) {
     }
 
     volatile struct lua_runner_ctrl* control = &skeleton->data_lua_runner->lua_runner_control;
-    char* memory = bpf_capsule_memory_reserved_start(&capsule);
-    control->script.address = memory + script_offset;
+    control->script.address = bpf_capsule_malloc(&capsule, script_size);
     control->script.capacity = script_size;
     control->script.size = script_size;
-    control->input.address = memory + input_offset;
+    control->input.address = bpf_capsule_malloc(&capsule, input_size);
     control->input.capacity = input_size;
     control->input.size = input_size;
-    control->output.address = memory + output_offset;
+    control->output.address = bpf_capsule_malloc(&capsule, LUA_OUTPUT_BYTES);
     control->output.capacity = LUA_OUTPUT_BYTES;
-    control->error.address = memory + error_offset;
+    control->error.address = bpf_capsule_malloc(&capsule, LUA_ERROR_BYTES);
     control->error.capacity = LUA_ERROR_BYTES;
+    if (!control->script.address || !control->input.address || !control->output.address || !control->error.address) {
+        perror("allocate lua buffers");
+        goto cleanup;
+    }
     if (script_size) {
         memcpy(control->script.address, script, script_size);
     }

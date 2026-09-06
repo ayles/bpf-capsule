@@ -40,6 +40,8 @@
 
 // Host-run generated program.
 #define BPF_CAPSULE_PROGRAM_INIT "bpf_capsule_init"
+#define BPF_CAPSULE_ALLOC_PROGRAM bpf_capsule_alloc
+#define BPF_CAPSULE_PROGRAM_ALLOC __BPF_CAPSULE_STRINGIFY(BPF_CAPSULE_ALLOC_PROGRAM)
 
 // Compiler-generated freplace programs. Other freplace sections in the same
 // object belong to the application and are not part of the Capsule lifetime.

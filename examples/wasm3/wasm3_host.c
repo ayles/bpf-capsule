@@ -88,13 +88,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "open failed\n");
         goto cleanup;
     }
-    size_t output_offset = ((size_t)compressed_size + 15u) & ~(size_t)15u;
-    size_t reserved_bytes = output_offset + input_size;
     if (bpf_capsule_configure(&capsule, skeleton->obj,
             (struct bpf_capsule_config){
                 .fiber_count = 1,
-                .heap_bytes = reserved_bytes + WASM3_HEAP_BYTES,
-                .reserved_bytes = reserved_bytes,
+                .heap_bytes = compressed_size + input_size + WASM3_HEAP_BYTES,
             }) ||
         bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
         fprintf(stderr, "load failed: %s\n", strerror(errno));
@@ -102,8 +99,12 @@ int main(int argc, char** argv) {
     }
 
     volatile struct wasm3_bpf_ctrl* control = &skeleton->data_w3ctrl->w3ctrl;
-    unsigned char* staged_input = bpf_capsule_memory_reserved_start(&capsule);
-    unsigned char* output = staged_input + output_offset;
+    unsigned char* staged_input = bpf_capsule_malloc(&capsule, compressed_size);
+    unsigned char* output = bpf_capsule_malloc(&capsule, input_size);
+    if (!staged_input || !output) {
+        perror("allocate wasm3 buffers");
+        goto cleanup;
+    }
     memcpy(staged_input, compressed, compressed_size);
     control->input = staged_input;
     control->input_size = compressed_size;

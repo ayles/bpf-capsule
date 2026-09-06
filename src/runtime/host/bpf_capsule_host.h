@@ -16,7 +16,6 @@ extern "C" {
 struct bpf_capsule_config {
     uint32_t fiber_count;
     uint64_t heap_bytes;
-    uint64_t reserved_bytes;
 };
 
 // One host-side Capsule lifetime. Zero-initialize it, configure it before
@@ -38,12 +37,26 @@ int bpf_capsule_initialize(struct bpf_capsule* capsule);
 int bpf_capsule_attach_freplace(struct bpf_capsule* capsule, const void* object_data, size_t object_size);
 int bpf_capsule_release(struct bpf_capsule* capsule);
 
+// After initialization, allocate through the guest's malloc/free using
+// BPF_PROG_TEST_RUN. Each call leases an ordinary fiber and drives it to
+// completion, then releases it.
+// Concurrent calls are safe with the default allocator: requests do not share
+// host state or a mutex. Supply enough fibers or synchronize calls yourself;
+// EAGAIN means the pool was full and the operation did not start (including
+// free). ENOMEM means malloc could not allocate; other failures set errno.
+// Only EAGAIN guarantees the request did not start: do not blindly retry a
+// free after another error. Destroying the Capsule reclaims all its blocks.
+// malloc(0) requests one byte; free(NULL) succeeds without taking a fiber.
+// Pointers can be passed between host and guest and freed on either side.
+// As with free(), the pointer must be a live allocation from this Capsule.
+// Configure/initialize/release must not race these calls or guest execution.
+void* bpf_capsule_malloc(const struct bpf_capsule* capsule, size_t size);
+int bpf_capsule_free(const struct bpf_capsule* capsule, void* pointer);
+
 // After initialization, Capsule pointers can be read and written directly on
 // either memory tier. Synchronize access to data shared with running BPF code.
 void* bpf_capsule_memory_start(const struct bpf_capsule* capsule);
 uint64_t bpf_capsule_memory_size(const struct bpf_capsule* capsule);
-void* bpf_capsule_memory_reserved_start(const struct bpf_capsule* capsule);
-uint64_t bpf_capsule_memory_reserved_size(const struct bpf_capsule* capsule);
 
 #ifdef __cplusplus
 }

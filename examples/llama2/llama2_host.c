@@ -269,12 +269,10 @@ int main(int argc, char** argv) {
         fprintf(stderr, "open failed\n");
         goto cleanup;
     }
-    size_t reserved_bytes = (model_size + 15u) & ~(size_t)15u;
     if (bpf_capsule_configure(&capsule, skeleton->obj,
             (struct bpf_capsule_config){
                 .fiber_count = 1,
-                .heap_bytes = reserved_bytes + LLAMA_HEAP_BYTES,
-                .reserved_bytes = model_size,
+                .heap_bytes = model_size + LLAMA_HEAP_BYTES,
             }) ||
         bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
         fprintf(stderr, "load failed: %s\n", strerror(errno));
@@ -282,7 +280,11 @@ int main(int argc, char** argv) {
     }
 
     volatile struct llama2_bpf_ctrl* control = LLAMA_CONTROL(skeleton);
-    unsigned char* model_address = bpf_capsule_memory_reserved_start(&capsule);
+    unsigned char* model_address = bpf_capsule_malloc(&capsule, model_size);
+    if (!model_address) {
+        perror("allocate model");
+        goto cleanup;
+    }
     memcpy(model_address, model, model_size);
     control->model = model_address;
     control->model_size = model_size;

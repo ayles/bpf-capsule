@@ -67,8 +67,7 @@ static int configure_capsule(struct bpf_capsule* capsule, struct bpf_object* obj
     return bpf_capsule_configure(capsule, object,
         (struct bpf_capsule_config){
             .fiber_count = (unsigned int)count,
-            .heap_bytes = (4ull << 20) + (uint64_t)count * (256ull << 10),
-            .reserved_bytes = script_size,
+            .heap_bytes = script_size + (4ull << 20) + (uint64_t)count * (256ull << 10),
         });
 }
 
@@ -212,7 +211,11 @@ int main(int argc, char** argv) {
         fprintf(stderr, "cannot find Lua XDP programs and maps\n");
         goto cleanup;
     }
-    control->script = bpf_capsule_memory_reserved_start(&capsule);
+    control->script = bpf_capsule_malloc(&capsule, source_size);
+    if (!control->script) {
+        perror("allocate script");
+        goto cleanup;
+    }
     control->script_size = source_size;
     memcpy(control->script, source, source_size);
     if (initialize_states(object, control, &initialization_drains)) {

@@ -145,7 +145,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     static constexpr unsigned ConfigMaxFibers = BPF_CAPSULE_OBJECT_CONFIG_MAX_FIBERS;
     static constexpr unsigned ConfigArenaImagePages = BPF_CAPSULE_OBJECT_CONFIG_ARENA_IMAGE_PAGES;
     static constexpr unsigned ConfigMemoryBackend = BPF_CAPSULE_OBJECT_CONFIG_MEMORY_BACKEND;
-    static constexpr unsigned ConfigHeapReserved = BPF_CAPSULE_OBJECT_CONFIG_HEAP_RESERVED;
     static constexpr unsigned ConfigAbiMagic = BPF_CAPSULE_OBJECT_CONFIG_ABI_MAGIC;
     static constexpr unsigned ConfigAbiVersion = BPF_CAPSULE_OBJECT_CONFIG_ABI_VERSION;
     static constexpr unsigned ConfigMemoryViewBase = BPF_CAPSULE_OBJECT_CONFIG_MEMORY_VIEW_BASE;
@@ -169,8 +168,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             report_fatal_error("bpf-memory: malformed bpf_capsule_config");
         }
         for (unsigned index = 0; index < ConfigFieldCount; ++index) {
-            // The final two fields occupy full 64-bit ABI words.
-            unsigned width = index == ConfigMemoryViewBase || index == ConfigDirectMemoryRegions ? 64 : 32;
+            unsigned width = index == ConfigMemoryViewBase ? 64 : 32;
             if (!type->getElementType(index)->isIntegerTy(width)) {
                 report_fatal_error("bpf-memory: malformed bpf_capsule_config");
             }
@@ -226,7 +224,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         uint64_t declaredMemoryEnd = ConfigInteger(initial, ConfigMemoryEnd, "memory end");
         uint64_t declaredArenaImagePages = ConfigInteger(initial, ConfigArenaImagePages, "arena image pages");
         uint64_t declaredMemoryBackend = ConfigInteger(initial, ConfigMemoryBackend, "memory backend");
-        uint64_t declaredHeapReserved = ConfigInteger(initial, ConfigHeapReserved, "heap reservation");
         const uint64_t addressLimit = 1ull << 32;
         uint64_t abiMagic = ConfigInteger(initial, ConfigAbiMagic, "ABI magic");
         uint64_t abiVersion = ConfigInteger(initial, ConfigAbiVersion, "ABI version");
@@ -237,7 +234,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             abiVersion != BPF_CAPSULE_ABI_VERSION) {
             report_fatal_error("bpf-memory: linked runtime fiber ABI disagrees with the compiler stack geometry");
         }
-        if (declaredHeapBase || declaredStackBase || declaredMemoryEnd || declaredArenaImagePages || declaredHeapReserved ||
+        if (declaredHeapBase || declaredStackBase || declaredMemoryEnd || declaredArenaImagePages ||
             ConfigInteger(initial, ConfigDirectMemoryRegions, "direct regions")) {
             report_fatal_error("bpf-memory: linked runtime object layout is not in its pre-compiler state");
         }
@@ -272,13 +269,12 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 ConstantInt::get(Type::getInt32Ty(ctx), maxFibers),
                 ConstantInt::get(Type::getInt32Ty(ctx), arenaImagePages),
                 ConstantInt::get(Type::getInt32Ty(ctx), memoryBackend),
-                ConstantInt::get(Type::getInt32Ty(ctx), 0),
+                ConstantInt::get(Type::getInt32Ty(ctx), DirectRegions_),
                 ConstantInt::get(Type::getInt32Ty(ctx), BPF_CAPSULE_ABI_MAGIC),
                 ConstantInt::get(Type::getInt32Ty(ctx), BPF_CAPSULE_ABI_VERSION),
                 // The host writes the real view base into the frozen
                 // config before load; the compiled default is no view.
                 ConstantInt::get(Type::getInt64Ty(ctx), 0),
-                ConstantInt::get(Type::getInt64Ty(ctx), DirectRegions_),
             }));
         return memoryEnd;
     }
@@ -305,15 +301,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             for (CallInst* call : calls) {
                 IRBuilder<> b(call);
                 Value* replacement = nullptr;
-                // The host-reserved heap prefix is preload configuration in
-                // the frozen object record; the allocator pool starts after
-                // it, with nothing left to seal at run time.
-                Value* reservedSlot = b.CreateStructGEP(config->getValueType(), config, ConfigHeapReserved);
-                auto* reserved32 = b.CreateLoad(Type::getInt32Ty(module.getContext()), reservedSlot, "bpf.heap.reserved32");
-                reserved32->setVolatile(true);
-                Value* reserved = b.CreateZExt(reserved32, Type::getInt64Ty(module.getContext()), "bpf.heap.reserved");
                 if (returnsPointer) {
-                    Value* address = b.CreateAdd(ConstantInt::get(Type::getInt64Ty(module.getContext()), HeapBase_), reserved, "bpf.heap.offset");
+                    Value* address = ConstantInt::get(Type::getInt64Ty(module.getContext()), HeapBase_);
                     if (arenaControl) {
                         Value* baseSlot = b.CreateStructGEP(arenaControl->getValueType(), arenaControl, ArenaVirtualBase);
                         Value* base = b.CreateLoad(Type::getInt64Ty(module.getContext()), baseSlot, "bpf.arena.base");
@@ -336,16 +325,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                     Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigHeapBytes);
                     auto* load32 = b.CreateLoad(Type::getInt32Ty(module.getContext()), slot, "bpf.heap.size32");
                     load32->setVolatile(true);
-                    Value* load = b.CreateZExt(load32, Type::getInt64Ty(module.getContext()), "bpf.heap.size");
-                    // Capsule virtual addresses occupy the low 32-bit
-                    // domain, and preload configuration rejects any heap
-                    // which cannot leave room for its stack bank. Preserve
-                    // the selected value while making that ABI bound visible
-                    // to older verifiers; otherwise allocator size arithmetic
-                    // begins with an arbitrary u64 and can exhaust path state.
-                    Value* available = b.CreateSub(load, reserved, "bpf.heap.available");
-                    replacement = b.CreateZExt(b.CreateTrunc(available, Type::getInt32Ty(module.getContext()), "bpf.heap.size32"),
-                        Type::getInt64Ty(module.getContext()), "bpf.heap.size.bounded");
+                    replacement = b.CreateZExt(load32, Type::getInt64Ty(module.getContext()), "bpf.heap.size");
                 }
                 call->replaceAllUsesWith(replacement);
                 call->eraseFromParent();

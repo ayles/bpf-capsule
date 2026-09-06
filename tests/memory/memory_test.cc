@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Managed memory: pre-load heap sizing grows the selected backend, the
-// host-reserved prefix is real memory the guest does not see, host memory I/O
+// Managed memory: pre-load heap sizing grows the selected backend, host memory I/O
 // round-trips beyond the fixed direct-map budget and across a backend
 // boundary, and the guest observes the same bytes.
 #include "capsule_gtest.h"
@@ -22,7 +21,7 @@ unsigned int backing_entries(struct bpf_object* object) {
     return map ? bpf_map__max_entries(map) : 0;
 }
 
-TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
+TEST(Memory, HeapSizingAndHostIo) {
     CAPSULE_REQUIRE_BPF_PRIVILEGE();
     struct memory* skeleton = memory__open();
     ASSERT_NE(skeleton, nullptr);
@@ -40,7 +39,6 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     struct bpf_capsule_config large_heap = {};
     large_heap.fiber_count = 1;
     large_heap.heap_bytes = memory_bytes;
-    large_heap.reserved_bytes = MEMORY_TEST_PROBE_BYTES;
 
     ASSERT_EQ(bpf_capsule_configure(&capsule, object, zero_heap), 0) << strerror(errno);
     unsigned int zero_entries = backing_entries(object);
@@ -55,20 +53,6 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     ASSERT_EQ(memory__load(skeleton), 0) << strerror(errno);
     ASSERT_EQ(bpf_capsule_initialize(&capsule), 0) << strerror(errno);
 
-    // The host-reserved prefix opens the heap: probe it through the memory
-    // view, then require the guest to see exactly the remaining suffix.
-    unsigned char* bootstrap_address = static_cast<unsigned char*>(bpf_capsule_memory_reserved_start(&capsule));
-    uint64_t bootstrap_reserved = bpf_capsule_memory_reserved_size(&capsule);
-    ASSERT_EQ(bootstrap_reserved, (uint64_t)MEMORY_TEST_PROBE_BYTES);
-    unsigned char bootstrap_expected[MEMORY_TEST_PROBE_BYTES];
-    unsigned char bootstrap_observed[MEMORY_TEST_PROBE_BYTES] = {0};
-    for (unsigned int index = 0; index < sizeof(bootstrap_expected); ++index) {
-        bootstrap_expected[index] = (unsigned char)(index * 19u + 7u);
-    }
-    memcpy(bootstrap_address, bootstrap_expected, sizeof(bootstrap_expected));
-    memcpy(bootstrap_observed, bootstrap_address, sizeof(bootstrap_observed));
-    EXPECT_EQ(memcmp(bootstrap_expected, bootstrap_observed, sizeof(bootstrap_expected)), 0);
-
     size_t result_size = 0;
     volatile struct memory_test_result* result = (volatile struct memory_test_result*)capsule_test_global(object, "memory_test_output", &result_size);
     ASSERT_NE(result, nullptr);
@@ -76,8 +60,7 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
 
     ASSERT_EQ(capsule_test_run_program(object, "memory_prepare"), 0) << strerror(errno);
     ASSERT_EQ(result->capsule.status, (unsigned)CAPSULE_OK);
-    EXPECT_EQ(result->capacity, memory_bytes - bootstrap_reserved);
-    EXPECT_EQ(result->address, bootstrap_address + bootstrap_reserved);
+    EXPECT_EQ(result->capacity, memory_bytes);
     // The guest-observed pointer carries the same upper half the host sees.
     // Both backends expose the same full pointer representation.
     EXPECT_EQ(result->pointer_high, (uint32_t)((uintptr_t)bpf_capsule_memory_start(&capsule) >> 32));

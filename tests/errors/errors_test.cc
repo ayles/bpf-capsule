@@ -8,6 +8,7 @@
 
 #include "bpf_capsule_host.h"
 #include "bpf_capsule_abi.h"
+#include "bpf_capsule_alloc.h"
 
 #include <string.h>
 
@@ -17,6 +18,7 @@ extern "C" int __bpf_capsule_plan(
     struct __bpf_capsule_object_config* config, size_t config_size, struct bpf_capsule_config requested, uint32_t* backend_entries);
 extern "C" int __bpf_capsule_copy_plan(
     const void* config_data, size_t config_size, struct bpf_capsule_config requested, struct __bpf_capsule_object_config* planned, uint32_t* backend_entries);
+extern "C" int __bpf_capsule_alloc_run(int fd, struct __bpf_capsule_alloc_request* request);
 
 namespace {
 
@@ -25,12 +27,16 @@ struct scripted_step {
     int64_t code;
     int syscall_errno;
     int retval;
+    uint64_t continuation;
+    int allocation_errno;
 };
 
 volatile struct capsule_result g_result;
 const scripted_step* g_script;
 size_t g_script_size;
 size_t g_script_index;
+bool g_allocation;
+uint64_t g_operations[8];
 
 } // namespace
 
@@ -43,6 +49,18 @@ extern "C" int bpf_prog_test_run_opts(int program_fd, struct bpf_test_run_opts* 
         return -1;
     }
     const scripted_step* step = &g_script[g_script_index++];
+    if (g_allocation) {
+        auto* request = static_cast<struct __bpf_capsule_alloc_request*>(const_cast<void*>(options->ctx_in));
+        EXPECT_NE(request, nullptr);
+        EXPECT_EQ(options->ctx_size_in, sizeof(*request));
+        EXPECT_EQ(options->ctx_out, nullptr);
+        g_operations[g_script_index - 1] = request->operation;
+        if (!step->syscall_errno && !step->retval) {
+            request->result = {static_cast<int32_t>(step->code), step->status, step->continuation};
+            request->output.error = step->allocation_errno;
+            request->output.pointer = reinterpret_cast<void*>(0x10000);
+        }
+    }
     g_result.status = step->status;
     g_result.code = step->code;
     options->retval = (unsigned int)step->retval;
@@ -54,6 +72,49 @@ extern "C" int bpf_prog_test_run_opts(int program_fd, struct bpf_test_run_opts* 
 }
 
 namespace {
+
+TEST(HostAllocator, ContinuationsAndErrors) {
+    auto run = [](const scripted_step* steps, size_t count, int expected, int expected_errno) {
+        g_allocation = true;
+        g_script = steps;
+        g_script_size = count;
+        g_script_index = 0;
+        struct __bpf_capsule_alloc_request request = {
+            .operation = BPF_CAPSULE_ALLOC_MALLOC, .size = 16, .result = {.continuation = BPF_CAPSULE_NO_CONTINUATION}};
+        errno = 0;
+        EXPECT_EQ(__bpf_capsule_alloc_run(42, &request), expected);
+        EXPECT_EQ(errno, expected_errno);
+        EXPECT_EQ(g_script_index, count);
+        EXPECT_EQ(g_operations[0], BPF_CAPSULE_ALLOC_MALLOC);
+        g_allocation = false;
+        return request;
+    };
+    const scripted_step continued[] = {{CAPSULE_PENDING, 0, 0, 0, 1}, {CAPSULE_YIELD, 0, 0, 0, 2}, {CAPSULE_OK, 0, 0, 0}};
+    auto result = run(continued, 3, 0, 0);
+    EXPECT_EQ(result.output.pointer, reinterpret_cast<void*>(0x10000));
+    EXPECT_EQ(g_operations[1], BPF_CAPSULE_ALLOC_CONTINUE);
+    EXPECT_EQ(g_operations[2], BPF_CAPSULE_ALLOC_CONTINUE);
+
+    const scripted_step full[] = {{CAPSULE_EXITED, CAPSULE_ERROR_POOL_EXHAUSTED, 0, 0}};
+    run(full, 1, -1, EAGAIN);
+    const scripted_step oom[] = {{CAPSULE_OK, 0, 0, 0, 0, ENOMEM}};
+    run(oom, 1, -1, ENOMEM);
+    const scripted_step fault[] = {{CAPSULE_EXITED, CAPSULE_ERROR_ALLOCATOR_CORRUPT, 0, 0}};
+    run(fault, 1, -1, ECANCELED);
+    const scripted_step retval[] = {{CAPSULE_OK, 0, 0, -EFAULT}};
+    run(retval, 1, -1, EFAULT);
+    const scripted_step failed_resume[] = {{CAPSULE_PENDING, 0, 0, 0, 1}, {CAPSULE_OK, 0, EIO, 0}, {CAPSULE_OK, 0, 0, 0}};
+    run(failed_resume, 3, -1, EIO);
+    EXPECT_EQ(g_operations[2], BPF_CAPSULE_ALLOC_RESET);
+}
+
+TEST(HostAllocator, InvalidLifetime) {
+    EXPECT_EQ(bpf_capsule_malloc(nullptr, 1), nullptr);
+    EXPECT_EQ(errno, EINVAL);
+    EXPECT_EQ(bpf_capsule_free(nullptr, reinterpret_cast<void*>(0x10000)), -1);
+    EXPECT_EQ(errno, EINVAL);
+    EXPECT_EQ(bpf_capsule_free(nullptr, nullptr), 0);
+}
 
 void check_run(const char* name, const scripted_step* steps, size_t count, unsigned long max_drains, int expected_return, int expected_errno,
     unsigned long expected_entries, unsigned long expected_drains, unsigned int expected_status, int64_t expected_code) {
@@ -197,7 +258,6 @@ TEST(HostAbi, ConfigurationPlanner) {
     struct bpf_capsule_config requested = {};
     requested.fiber_count = 2;
     requested.heap_bytes = 0x200000;
-    requested.reserved_bytes = 17;
 
     // A short config record must be rejected without touching the output.
     unsigned char short_config[sizeof(config) - 1] = {0};
@@ -223,7 +283,6 @@ TEST(HostAbi, ConfigurationPlanner) {
 
     EXPECT_EQ(__bpf_capsule_plan(&config, sizeof(config), requested, &entries), 0);
     EXPECT_EQ(config.fiber_count, 2u);
-    EXPECT_EQ(config.heap_reserved, 32u) << "reserved bytes are aligned up";
     EXPECT_NE(entries, 0u);
 
     // The exclusive end of data must fit in the 32-bit ABI field. Exactly

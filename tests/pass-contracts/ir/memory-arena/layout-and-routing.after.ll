@@ -2,12 +2,12 @@ source_filename = "memory-arena-contract.c"
 target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
 target triple = "bpfel"
 
-%config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64, i64 }
+%config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64 }
 %arena_control = type { i32, i32, i64 }
 %map = type { ptr }
 %packed_pointer = type <{ i8, ptr }>
 
-@bpf_capsule_config = constant %config { i32 4112, i32 4096, i32 12288, i32 16384, i32 1, i32 4096, i32 1, i32 1, i32 1, i32 0, i32 1112556353, i32 6, i64 0, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 4112, i32 4096, i32 12288, i32 16384, i32 1, i32 4096, i32 1, i32 1, i32 1, i32 0, i32 1112556353, i32 7, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_capsule_arena_control = global %arena_control zeroinitializer, section ".data.bpfctrl", align 8
 @arena = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @initialized = internal addrspace(1) global i32 9, align 4

@@ -115,11 +115,9 @@ int main(int argc, char** argv) {
     }
     fprintf(stderr, "in: %zu bytes -> %lu compressed\n", n, (unsigned long)clen);
 
-    // The whole heap is one host-reserved prefix carved into three buffers;
-    // the in-kernel inflate works out of the staged workspace, not malloc.
-    size_t output_offset = (clen + 15u) & ~(size_t)15u;
-    size_t workspace_offset = (output_offset + n + 15u) & ~(size_t)15u;
-    size_t heap_bytes = workspace_offset + ZLIB_WORKSPACE_BYTES;
+    // Input, output and inflate's workspace share the Capsule allocator.
+    // Leave room for its metadata and allocation alignment.
+    uint64_t heap_bytes = (uint64_t)clen + n + ZLIB_WORKSPACE_BYTES + (64u << 10);
 
     skeleton = zlib__open();
     if (!skeleton) {
@@ -130,7 +128,6 @@ int main(int argc, char** argv) {
             (struct bpf_capsule_config){
                 .fiber_count = 1,
                 .heap_bytes = heap_bytes,
-                .reserved_bytes = heap_bytes,
             }) ||
         bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
         fprintf(stderr, "load failed: %s\n", strerror(errno));
@@ -138,10 +135,13 @@ int main(int argc, char** argv) {
     }
     volatile struct zlib_bpf_ctrl* control = &skeleton->data_zctrl->zctrl;
 
-    unsigned char* reserved = bpf_capsule_memory_reserved_start(&capsule);
-    unsigned char* input = reserved;
-    unsigned char* output = reserved + output_offset;
-    unsigned char* workspace = reserved + workspace_offset;
+    unsigned char* input = bpf_capsule_malloc(&capsule, clen);
+    unsigned char* output = bpf_capsule_malloc(&capsule, n);
+    unsigned char* workspace = bpf_capsule_malloc(&capsule, ZLIB_WORKSPACE_BYTES);
+    if (!input || !output || !workspace) {
+        perror("allocate zlib buffers");
+        goto cleanup;
+    }
     memcpy(input, comp, clen);
     control->input = input;
     control->input_size = clen;

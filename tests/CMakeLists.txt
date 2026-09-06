@@ -237,8 +237,11 @@ capsule_gtest_host(
     INCLUDE_DIRECTORIES ${test_source_dir}/fiber-scale
 )
 
-# Arena memory: heap sizing grows the backing map, the host-reserved
-# prefix, host I/O across region boundaries, invalid-address rejection.
+# Host allocations share the guest allocator and fiber pool, on both tiers.
+capsule_test_object(allocator SOURCES memory/allocator_bpf.c)
+capsule_gtest_host(allocator_test SOURCES memory/allocator_test.cc SKELETONS allocator_skeleton)
+
+# Managed memory: heap sizing and host I/O across region boundaries.
 capsule_test_object(memory SOURCES memory/memory_bpf.c INCLUDE_DIRECTORIES ${test_source_dir}/memory)
 set(alignment_definitions)
 if(test_has_managed_atomics)

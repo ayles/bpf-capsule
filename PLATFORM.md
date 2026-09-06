@@ -70,8 +70,9 @@ ownership with remote handoff is a candidate, not a settled design.
 The host can read and write quiescent data directly on either tier. Live
 mutations need a shared synchronization protocol: compatible hardware atomics
 where supported, or a management BPF entry for guest-only map leases. BPF must
-never wait for a lock held by interrupted userspace. Direct host allocation
-is not implemented yet.
+never wait for a lock held by interrupted userspace. Host allocation currently
+uses `bpf_capsule_malloc`/`bpf_capsule_free` to execute the guest allocator
+through `BPF_PROG_TEST_RUN`; no native host allocator shares its metadata.
 
 stdin is either a fixed buffer or an in-memory pipe. stdout and stderr are
 bounded buffers by default, so the host can read them directly. A program may

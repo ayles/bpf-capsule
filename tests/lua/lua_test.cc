@@ -99,6 +99,12 @@ protected:
 };
 
 TEST_F(LuaTest, ScriptChecksumAndBatchStdin) {
+    // The service must work in an object whose managed roots use freplace,
+    // too, without another fiber or any setup beyond the normal attachments.
+    void* scratch = bpf_capsule_malloc(&capsule_, 64);
+    ASSERT_NE(scratch, nullptr) << strerror(errno);
+    memset(scratch, 0x5a, 64);
+    ASSERT_EQ(bpf_capsule_free(&capsule_, scratch), 0) << strerror(errno);
     std::filesystem::path path = scriptPath();
     std::ifstream file(path);
     ASSERT_TRUE(file) << "missing " << path;

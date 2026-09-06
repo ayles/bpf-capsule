@@ -185,7 +185,6 @@ protected:
         struct bpf_capsule_config config = {};
         config.fiber_count = (unsigned int)cpuCount;
         config.heap_bytes = (4ull << 20) + (uint64_t)cpuCount * (256ull << 10);
-        config.reserved_bytes = source.size();
         if (bpf_capsule_configure(&capsule_, skeleton_->obj, config) || bpf_object__load_skeleton(skeleton_->skeleton) || bpf_capsule_initialize(&capsule_)) {
             return -1;
         }
@@ -206,7 +205,10 @@ protected:
             errno = (int)-ringError;
             return -1;
         }
-        control_->script = static_cast<char*>(bpf_capsule_memory_reserved_start(&capsule_));
+        control_->script = static_cast<char*>(bpf_capsule_malloc(&capsule_, source.size()));
+        if (!control_->script) {
+            return -1;
+        }
         memcpy(control_->script, source.data(), source.size());
         control_->script_size = source.size();
         if (pinCurrentThread(cpu_)) {

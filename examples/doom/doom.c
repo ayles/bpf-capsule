@@ -338,7 +338,6 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
     uint64_t wad_size = (uint64_t)wad_file_size;
-    uint64_t wad_reservation = (wad_size + 15u) & ~15ull;
     const uint64_t engine_heap_size = 20ull << 20;
 
     skeleton = doom__open();
@@ -348,8 +347,7 @@ int main(int argc, char** argv) {
     }
     const struct bpf_capsule_config capsule_config = {
         .fiber_count = 1,
-        .heap_bytes = wad_reservation + engine_heap_size,
-        .reserved_bytes = wad_size,
+        .heap_bytes = wad_size + engine_heap_size,
     };
     if (bpf_capsule_configure(&capsule, skeleton->obj, capsule_config) || bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
         fprintf(stderr, "failed to load BPF object: %s\n", strerror(errno));
@@ -364,7 +362,11 @@ int main(int argc, char** argv) {
     }
     struct bpf_test_run_opts options = {.sz = sizeof(options)};
     stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
-    ctrl->wad = bpf_capsule_memory_reserved_start(&capsule);
+    ctrl->wad = bpf_capsule_malloc(&capsule, wad_size);
+    if (!ctrl->wad) {
+        perror("allocate WAD");
+        goto cleanup;
+    }
     ctrl->wad_size = wad_size;
     if (import_wad(wad, ctrl->wad, (size_t)wad_size)) {
         goto cleanup;

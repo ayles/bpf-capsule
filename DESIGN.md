@@ -72,6 +72,20 @@ and userspace:
 Explicitly sectioned globals retain their native BPF maps instead of moving
 into this window; they can be shared with ordinary BPF code.
 
+The host chooses the heap capacity in `bpf_capsule_configure()`. After
+initialization, `bpf_capsule_malloc()` and `bpf_capsule_free()` invoke the
+runtime's `bpf_capsule_alloc` syscall program through `BPF_PROG_TEST_RUN`.
+This is an additional entry in the application's ELF, not a native host copy
+of the allocator.
+It calls the same managed `malloc`/`free` as guest code, leases a normal fiber,
+and releases it on completion. The host library drives any continuations;
+requests and responses live in each invocation's private context, not a map
+mailbox. Concurrent callers need no host mutex with the default allocator.
+If every fiber is occupied, either operation fails with `EAGAIN` without
+starting; callers can provide more fibers or synchronize requests themselves.
+No fiber is reserved or added implicitly. Blocks can be freed by either side,
+and teardown reclaims all remaining allocations with the memory window.
+
 The two tiers differ only in what backs the window. Availability is a property
 of both the kernel and its JIT: x86-64 gained arena support in Linux 6.9 and
 arm64 in 6.10.
@@ -253,8 +267,8 @@ All atomic accesses require natural alignment. There is no lock-based fallback
 for objects wider than 64 bits. Host/guest interoperability requires matching
 object layouts and compatible hardware atomics, not separate library locks.
 
-The load-time contract is a 64-byte frozen `.rodata` config (magic
-`"BPCA"`, ABI version 6, layout, backend, fiber geometry, the window base,
+The load-time contract is a 56-byte frozen `.rodata` config (magic
+`"BPCA"`, ABI version 7, layout, backend, fiber geometry, the window base,
 and the direct-region count).
 Frozen-map reads constant-fold in the verifier, so config fields are
 load-time constants in the verified program. The active host lifecycle

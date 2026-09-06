@@ -111,7 +111,6 @@ TEST(Atomics, NativeAndManaged) {
     // profiles use the identical logical address.
     const unsigned direct_regions = std::max<uint64_t>(2, skeleton->rodata_bpfconfig->bpf_capsule_config.direct_memory_regions);
     config.heap_bytes = (uint64_t)(direct_regions + 2) * BPF_CAPSULE_MEMORY_REGION_SIZE;
-    config.reserved_bytes = (uint64_t)(direct_regions + 1) * BPF_CAPSULE_MEMORY_REGION_SIZE;
 #else
     config.heap_bytes = 4ull << 20;
 #endif

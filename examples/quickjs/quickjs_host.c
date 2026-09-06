@@ -74,19 +74,6 @@ static char* read_stream(FILE* file, size_t* size) {
     }
 }
 
-static int reserve_buffer(size_t* total, size_t size, size_t* offset) {
-    if (*total > SIZE_MAX - 15u) {
-        return -1;
-    }
-    size_t aligned = (*total + 15u) & ~(size_t)15u;
-    if (size > SIZE_MAX - aligned) {
-        return -1;
-    }
-    *offset = aligned;
-    *total = aligned + size;
-    return 0;
-}
-
 int main(int argc, char** argv) {
     if (argc != 2) {
         fprintf(stderr, "usage: quickjs SCRIPT\n");
@@ -120,11 +107,7 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    size_t script_offset = 0, input_offset = 0, output_offset = 0, error_offset = 0;
-    size_t reserved_bytes = 0;
-    if (script_size == SIZE_MAX || reserve_buffer(&reserved_bytes, script_size + 1, &script_offset) ||
-        reserve_buffer(&reserved_bytes, input_size, &input_offset) || reserve_buffer(&reserved_bytes, QUICKJS_OUTPUT_BYTES, &output_offset) ||
-        reserve_buffer(&reserved_bytes, QUICKJS_ERROR_BYTES, &error_offset) || reserved_bytes > SIZE_MAX - QUICKJS_HEAP_BYTES) {
+    if (script_size >= UINT32_MAX || input_size >= UINT32_MAX) {
         fprintf(stderr, "script and stdin are too large for Capsule memory\n");
         goto cleanup;
     }
@@ -137,8 +120,7 @@ int main(int argc, char** argv) {
     if (bpf_capsule_configure(&capsule, skeleton->obj,
             (struct bpf_capsule_config){
                 .fiber_count = 1,
-                .heap_bytes = reserved_bytes + QUICKJS_HEAP_BYTES,
-                .reserved_bytes = reserved_bytes,
+                .heap_bytes = (uint64_t)script_size + input_size + QUICKJS_OUTPUT_BYTES + QUICKJS_ERROR_BYTES + QUICKJS_HEAP_BYTES,
             }) ||
         bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
         fprintf(stderr, "cannot configure/load Capsule QuickJS: %s\n", strerror(errno));
@@ -146,17 +128,20 @@ int main(int argc, char** argv) {
     }
 
     volatile struct quickjs_bpf_ctrl* control = &skeleton->data_qctrl->qctrl;
-    char* memory = bpf_capsule_memory_reserved_start(&capsule);
-    control->script.address = memory + script_offset;
+    control->script.address = bpf_capsule_malloc(&capsule, script_size + 1);
     control->script.capacity = script_size + 1;
     control->script.size = script_size;
-    control->input.address = memory + input_offset;
+    control->input.address = bpf_capsule_malloc(&capsule, input_size);
     control->input.capacity = input_size;
     control->input.size = input_size;
-    control->output.address = memory + output_offset;
+    control->output.address = bpf_capsule_malloc(&capsule, QUICKJS_OUTPUT_BYTES);
     control->output.capacity = QUICKJS_OUTPUT_BYTES;
-    control->error.address = memory + error_offset;
+    control->error.address = bpf_capsule_malloc(&capsule, QUICKJS_ERROR_BYTES);
     control->error.capacity = QUICKJS_ERROR_BYTES;
+    if (!control->script.address || !control->input.address || !control->output.address || !control->error.address) {
+        perror("allocate quickjs buffers");
+        goto cleanup;
+    }
     memcpy(control->script.address, script, script_size + 1);
     if (input_size) {
         memcpy(control->input.address, input, input_size);

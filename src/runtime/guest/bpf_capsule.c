@@ -26,8 +26,11 @@
 #include "bpf_capsule.h"
 #include "bpf_capsule_abi.h"
 #include "bpf_capsule_arithmetic.h"
+#include "bpf_capsule_alloc.h"
 #include "bpf_capsule_names.h"
 
+#include <errno.h>
+#include <stdlib.h>
 #include <linux/bpf.h>
 #include <linux/errno.h>
 #include <bpf/bpf_helpers.h>
@@ -140,11 +143,10 @@ const volatile struct __bpf_capsule_object_config BPF_CAPSULE_CONFIG_GLOBAL SEC(
     .max_fibers = BPF_CAPSULE_MAX_FIBERS,
     .arena_image_pages = 0,
     .memory_backend = BPF_CAPSULE_FEATURE_ARENA ? BPF_CAPSULE_MEMORY_ARENA : BPF_CAPSULE_MEMORY_FIXED,
-    .heap_reserved = 0,
+    .direct_memory_regions = 0,
     .abi_magic = BPF_CAPSULE_ABI_MAGIC,
     .abi_version = BPF_CAPSULE_ABI_VERSION,
     .memory_view_base = 0,
-    .direct_memory_regions = 0,
 };
 
 static __attribute__((always_inline)) uint32_t __bpf_capsule_fiber_count(void) {
@@ -614,8 +616,8 @@ int __bpf_capsule_plan_broken(void) {
     if (!bpf_capsule_config.fiber_count || bpf_capsule_config.fiber_count > BPF_CAPSULE_MAX_FIBERS || bpf_capsule_config.max_fibers != BPF_CAPSULE_MAX_FIBERS ||
         bpf_capsule_config.memory_backend != (BPF_CAPSULE_FEATURE_ARENA ? BPF_CAPSULE_MEMORY_ARENA : BPF_CAPSULE_MEMORY_FIXED) ||
         !bpf_capsule_config.stack_bytes_per_fiber || heap_end < bpf_capsule_config.heap_base || bpf_capsule_config.stack_base < heap_end ||
-        bpf_capsule_config.memory_end != bpf_capsule_config.stack_base + stack_bytes || bpf_capsule_config.heap_reserved > bpf_capsule_config.heap_bytes ||
-        bpf_capsule_config.abi_magic != BPF_CAPSULE_ABI_MAGIC || bpf_capsule_config.abi_version != BPF_CAPSULE_ABI_VERSION ||
+        bpf_capsule_config.memory_end != bpf_capsule_config.stack_base + stack_bytes || bpf_capsule_config.abi_magic != BPF_CAPSULE_ABI_MAGIC ||
+        bpf_capsule_config.abi_version != BPF_CAPSULE_ABI_VERSION ||
         // bpf_capsule_configure() is mandatory on every tier: it reserves
         // the object's 4GiB-aligned memory window and bakes its base here
         // before the config freezes (on the arena tier the window becomes
@@ -773,6 +775,50 @@ __BPF_CAPSULE_FN_CLASS("capsule.entry-glue") __attribute__((always_inline)) stru
         result.status = CAPSULE_OK;
     }
     return result;
+}
+
+// Host allocations use the same managed malloc/free as application code.
+// Return errno with the pointer before capsule_call releases the fiber: its
+// errno slot may immediately belong to another concurrent call afterwards.
+static struct __bpf_capsule_alloc_output __bpf_capsule_alloc_body(uint64_t operation, size_t size, void* pointer) {
+    struct __bpf_capsule_alloc_output output = {0};
+    if (operation == BPF_CAPSULE_ALLOC_MALLOC) {
+        errno = 0;
+        output.pointer = malloc(size ? size : 1);
+        if (!output.pointer) {
+            output.error = errno ? errno : ENOMEM;
+        }
+    } else {
+        free(pointer);
+    }
+    return output;
+}
+
+SEC("syscall")
+int BPF_CAPSULE_ALLOC_PROGRAM(struct __bpf_capsule_alloc_request* request) {
+    struct __bpf_capsule_alloc_output output = {0};
+    struct capsule_result result;
+    switch (request->operation) {
+        case BPF_CAPSULE_ALLOC_MALLOC:
+        case BPF_CAPSULE_ALLOC_FREE:
+            result = capsule_call(&output, __bpf_capsule_alloc_body, request->operation, request->size, request->pointer);
+            break;
+        case BPF_CAPSULE_ALLOC_CONTINUE:
+            result = capsule_continue(&output, request->result.continuation);
+            break;
+        case BPF_CAPSULE_ALLOC_RESET:
+            result = capsule_reset(request->result.continuation);
+            break;
+        default:
+            return -EINVAL;
+    }
+    request->result = result;
+    if (result.status == CAPSULE_OK) {
+        // Context accesses must keep constant offsets, including on 5.15.
+        request->output.pointer = output.pointer;
+        request->output.error = output.error;
+    }
+    return 0;
 }
 
 // ---------------------------------------------------------------------------

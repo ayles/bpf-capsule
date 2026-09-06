@@ -29,8 +29,8 @@ static tlsf_t fs_tlsf;
 
 // Modern BPF JITs implement compare-exchange. Keep the mutex in native map
 // storage so taking it is one BPF atomic rather than a HASH update followed
-// by a HASH delete for every allocator operation. It cannot live in Capsule
-// memory: managed compare-exchange is deliberately unsupported.
+// by a HASH delete for every allocator operation. Native map storage also
+// avoids managed-memory routing for the lock word.
 #if BPF_CAPSULE_FEATURE_FULL_ATOMICS
 static volatile unsigned int fs_allocator_lock_word SEC(".bss.fsalloc");
 #else

@@ -58,6 +58,8 @@ framebuffer.
   profiles preserve the same address model over ordinary maps. A host can
   read and write memory directly, exchange large buffers, and follow pointers
   returned by BPF without address translation or object serialization.
+  The host can also allocate and free through the guest allocator with
+  `bpf_capsule_malloc()` / `bpf_capsule_free()`.
 - **Resumable fibers.** Fibers have independent control state and stack slices
   while sharing program globals and the heap. If the drive budget ends,
   `capsule_call()` returns `CAPSULE_PENDING` and a generation-checked

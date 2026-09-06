@@ -2,7 +2,7 @@
 // Stock zlib inflate in the kernel.
 //
 // The host deflates a buffer with its own zlib, writes it directly into a
-// heap reservation, and the kernel inflates it with stock zlib sources
+// Capsule allocation, and the kernel inflates it with stock zlib sources
 // compiled through the BPF Capsule pipeline.
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
