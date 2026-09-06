@@ -6,6 +6,7 @@
 #include "bpf_capsule_abi.h"
 
 #include <llvm/ADT/MapVector.h>
+#include <llvm/ADT/StringSet.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/Constants.h>
@@ -38,7 +39,7 @@ using namespace llvm;
 namespace {
 
 cl::opt<unsigned> FixedDirectHeapRegions(
-    "bpf-memory-fixed-direct-regions", cl::desc("Test-only fixed-memory direct-region override"), cl::init(BPF_CAPSULE_DIRECT_MEMORY_REGIONS), cl::Hidden);
+    "direct-map-regions", cl::desc("Fixed-memory direct regions (default: free map slots rounded down to a power of two)"), cl::init(0));
 
 constexpr unsigned ArenaAS = 1;
 constexpr uint64_t BpfMapLookupElemHelperId = 1;
@@ -116,10 +117,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     bool ManagedRmw_ = false;
     uint64_t HeapBase_ = 0;
     static constexpr unsigned HeapShift = BPF_CAPSULE_MEMORY_REGION_SHIFT;
-    // Linux 5.15 permits at most 64 maps in one loaded call graph. Keep the
-    // established 32 data-map budget so runtime maps and application maps
-    // retain deterministic headroom instead of failing later at load time.
-    static constexpr unsigned MaxDirectHeapRegions = BPF_CAPSULE_DIRECT_MEMORY_REGIONS;
+    unsigned DirectRegions_ = 0;
     static constexpr unsigned MaxHeapRegions = unsigned((1ull << 32) >> HeapShift);
     SmallVector<GlobalVariable*> Regions_;
     GlobalVariable* HeapArray_ = nullptr;
@@ -151,6 +149,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     static constexpr unsigned ConfigAbiMagic = BPF_CAPSULE_OBJECT_CONFIG_ABI_MAGIC;
     static constexpr unsigned ConfigAbiVersion = BPF_CAPSULE_OBJECT_CONFIG_ABI_VERSION;
     static constexpr unsigned ConfigMemoryViewBase = BPF_CAPSULE_OBJECT_CONFIG_MEMORY_VIEW_BASE;
+    static constexpr unsigned ConfigDirectMemoryRegions = BPF_CAPSULE_OBJECT_CONFIG_DIRECT_MEMORY_REGIONS;
     static constexpr unsigned ConfigFieldCount = BPF_CAPSULE_OBJECT_CONFIG_FIELD_COUNT;
 
     enum ArenaControlField : unsigned {
@@ -170,8 +169,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             report_fatal_error("bpf-memory: malformed bpf_capsule_config");
         }
         for (unsigned index = 0; index < ConfigFieldCount; ++index) {
-            // The view base is the one 64-bit field: a host virtual address.
-            unsigned width = index == ConfigMemoryViewBase ? 64 : 32;
+            // The final two fields occupy full 64-bit ABI words.
+            unsigned width = index == ConfigMemoryViewBase || index == ConfigDirectMemoryRegions ? 64 : 32;
             if (!type->getElementType(index)->isIntegerTy(width)) {
                 report_fatal_error("bpf-memory: malformed bpf_capsule_config");
             }
@@ -238,7 +237,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             abiVersion != BPF_CAPSULE_ABI_VERSION) {
             report_fatal_error("bpf-memory: linked runtime fiber ABI disagrees with the compiler stack geometry");
         }
-        if (declaredHeapBase || declaredStackBase || declaredMemoryEnd || declaredArenaImagePages || declaredHeapReserved) {
+        if (declaredHeapBase || declaredStackBase || declaredMemoryEnd || declaredArenaImagePages || declaredHeapReserved ||
+            ConfigInteger(initial, ConfigDirectMemoryRegions, "direct regions")) {
             report_fatal_error("bpf-memory: linked runtime object layout is not in its pre-compiler state");
         }
         if (declaredMemoryBackend != memoryBackend) {
@@ -278,6 +278,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 // The host writes the real view base into the frozen
                 // config before load; the compiled default is no view.
                 ConstantInt::get(Type::getInt64Ty(ctx), 0),
+                ConstantInt::get(Type::getInt64Ty(ctx), DirectRegions_),
             }));
         return memoryEnd;
     }
@@ -700,18 +701,15 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         db.finalize();
     }
 
-    // The fixed-map tier has no address space spanning map values. Generate
-    // one directly relocatable data map per logical 2 MiB span after layout,
-    // when the exact amount of program storage is known. Each value carries
-    // an eight-byte shadow of the next span so an unaligned word crossing a
-    // boundary remains one verifier-valid map-value access.
+    // Each map owns one span. Naturally aligned physical accesses cannot
+    // cross a span boundary; unaligned source accesses are split before routing.
     void CreateHeapRegions(Module& module, unsigned count) {
         if (!Regions_.empty()) {
             report_fatal_error("bpf-memory: invalid generated region count");
         }
         LLVMContext& ctx = module.getContext();
         const uint64_t span = uint64_t(1) << HeapShift;
-        auto* type = ArrayType::get(Type::getInt8Ty(ctx), span + 8);
+        auto* type = ArrayType::get(Type::getInt8Ty(ctx), span);
         for (unsigned index = 0; index < count; ++index) {
             std::string name = ("heap" + Twine(index)).str();
             auto* region = new GlobalVariable(module, type, /*isConstant=*/false, GlobalValue::ExternalLinkage, ConstantAggregateZero::get(type), name);
@@ -720,17 +718,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             AttachGlobalDebugInfo(module, *region, name);
             Regions_.push_back(region);
         }
-    }
-
-    // Overlap bytes implement unaligned accesses by valid flat-memory
-    // pointers, not coherence between unrelated map values. Layout keeps
-    // small objects within one region; only a recorded spanning object can
-    // make a boundary observable. Omitting synchronization across gaps is both
-    // semantically exact and avoids duplicating a cold branch in every store
-    // width merely because a stack bank starts in the following map.
-    bool ObjectCrossesBoundary(unsigned nextRegion) const {
-        const uint64_t boundary = uint64_t(nextRegion) << HeapShift;
-        return llvm::any_of(Spanning_, [&](const auto& range) { return range.first < boundary && range.second > boundary; });
     }
 
     Value* CreateHeapArrayLookup(IRBuilder<>& b, Value* index, AllocaInst* key) {
@@ -909,7 +896,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         b.CreateCondBr(b.CreateICmpNE(func->getArg(0), ConstantPointerNull::get(pointer)), bounds, invalid);
 
         b.SetInsertPoint(bounds);
-        Value* low = b.CreateAnd(b.CreateTrunc(func->getArg(1), i32), ConstantInt::get(i32, FiberStackSize_ - 1), "stack.offset");
+        Value* low = b.CreateAnd(b.CreateTrunc(func->getArg(1), i32), ConstantInt::get(i32, FiberStackSize_ - width), "stack.offset");
         low = bpf::BuildVerifierOpaqueIdentity(b, low, "stack.offset.visible");
         b.CreateCondBr(b.CreateICmpULE(low, ConstantInt::get(i32, FiberStackSize_ - width)), access, invalid);
 
@@ -979,7 +966,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         key->setAlignment(Align(4));
         key->setMetadata(bpf::md::NativeAlloca, MDNode::get(ctx, {}));
         Value* offset = func->getArg(0);
-        Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - 1));
+        Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - width));
         low = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.heap.offset.visible");
         // Derive the region index from the low word: capsule pointers carry
         // the 4 GiB-aligned host view base in the upper half, and 32-bit
@@ -1003,53 +990,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             Value* value = b.CreateZExtOrTrunc(func->getArg(1), rawType);
             b.CreateAlignedStore(value, address, accessWidth);
 
-            if (width > 1) {
-                auto* sync = BasicBlock::Create(ctx, "sync.next", func, invalid);
-                auto* after = BasicBlock::Create(ctx, "after.next", func, invalid);
-                Value* crossed = b.CreateICmpUGT(low, ConstantInt::get(i64, span - width));
-                Value* hasNext = b.CreateICmpULT(index, ConstantInt::get(i32, TotalRegions_ - 1));
-                b.CreateCondBr(b.CreateAnd(crossed, hasNext), sync, after);
-
-                IRBuilder<> sb(sync);
-                Value* shadow = sb.CreateGEP(Type::getInt8Ty(ctx), base, {ConstantInt::get(i64, span)});
-                Value* boundary = sb.CreateAlignedLoad(i64, shadow, Align(8));
-                Value* next = CreateHeapArrayLookup(sb, sb.CreateAdd(arrayIndex, ConstantInt::get(i32, 1)), key);
-                auto* write = BasicBlock::Create(ctx, "sync.next.write", func, invalid);
-                sb.CreateCondBr(sb.CreateICmpNE(next, ConstantPointerNull::get(cast<PointerType>(next->getType()))), write, invalid);
-                IRBuilder<> wb(write);
-                wb.CreateAlignedStore(boundary, next, Align(8));
-                wb.CreateBr(after);
-                b.SetInsertPoint(after);
-            }
-
-            auto* sync = BasicBlock::Create(ctx, "sync.previous", func, invalid);
-            auto* done = BasicBlock::Create(ctx, "done", func, invalid);
-            Value* touchedPrefix = b.CreateICmpULT(low, ConstantInt::get(i64, 8));
-            Value* hasPrevious = b.CreateICmpUGT(index, ConstantInt::get(i32, 0));
-            b.CreateCondBr(b.CreateAnd(touchedPrefix, hasPrevious), sync, done);
-
-            IRBuilder<> sb(sync);
-            Value* boundary = sb.CreateAlignedLoad(i64, base, Align(8));
-            if (!Regions_.empty()) {
-                Value* firstArray = sb.CreateICmpEQ(arrayIndex, ConstantInt::get(i32, 0));
-                auto* direct = BasicBlock::Create(ctx, "sync.previous.direct", func, invalid);
-                auto* paged = BasicBlock::Create(ctx, "sync.previous.paged", func, invalid);
-                sb.CreateCondBr(firstArray, direct, paged);
-                IRBuilder<> db(direct);
-                Value* previousShadow = db.CreateGEP(Type::getInt8Ty(ctx), Regions_.back(), {ConstantInt::get(i64, span)});
-                db.CreateAlignedStore(boundary, previousShadow, Align(8));
-                db.CreateBr(done);
-                sb.SetInsertPoint(paged);
-            }
-            Value* previous = CreateHeapArrayLookup(sb, sb.CreateSub(arrayIndex, ConstantInt::get(i32, 1)), key);
-            auto* write = BasicBlock::Create(ctx, "sync.previous.write", func, invalid);
-            sb.CreateCondBr(sb.CreateICmpNE(previous, ConstantPointerNull::get(cast<PointerType>(previous->getType()))), write, invalid);
-            IRBuilder<> wb(write);
-            Value* previousShadow = wb.CreateGEP(Type::getInt8Ty(ctx), previous, {ConstantInt::get(i64, span)});
-            wb.CreateAlignedStore(boundary, previousShadow, Align(8));
-            wb.CreateBr(done);
-
-            b.SetInsertPoint(done);
             b.CreateRet(ConstantInt::get(i32, 0));
         }
 
@@ -1289,25 +1229,14 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
 
         const uint64_t span = uint64_t(1) << HeapShift;
         const uint64_t width = bits / 8;
-        // This is the width of the BPF memory instruction, not a claim that
-        // the virtual C address is aligned. BPF word loads/stores implement
-        // unaligned program accesses; Align(1) makes LLVM scalarize them into
-        // 2/4/8 byte instructions and is both larger and much slower.
         const Align accessWidth(width);
         auto* entry = BasicBlock::Create(ctx, "entry", func);
         auto* invalid = BasicBlock::Create(ctx, "invalid", func);
         IRBuilder<> b(entry);
         const bool hasArray = HeapArray_ && TotalRegions_ > Regions_.size();
         Function* arrayAccessor = hasArray ? CreateHeapArrayAccessor(module, bits, isStore) : nullptr;
-        const bool directArraySync = hasArray && isStore && width > 1 && !Regions_.empty() && ObjectCrossesBoundary(Regions_.size());
-        AllocaInst* key = nullptr;
-        if (directArraySync) {
-            key = b.CreateAlloca(i32, nullptr, "bpf.heap.array.key");
-            key->setAlignment(Align(4));
-            key->setMetadata(bpf::md::NativeAlloca, MDNode::get(ctx, {}));
-        }
         Value* offset = func->getArg(0);
-        Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - 1));
+        Value* low = b.CreateAnd(offset, ConstantInt::get(i64, span - width));
         low = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.heap.offset.visible");
         // Derive the region index from the low word: capsule pointers carry
         // the 4 GiB-aligned host view base in the upper half, and 32-bit
@@ -1337,48 +1266,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             Value* value = rb.CreateZExtOrTrunc(func->getArg(1), rawType);
             rb.CreateAlignedStore(value, address, accessWidth);
 
-            // If the word crossed into this region's shadow, publish the
-            // complete boundary word to the next region's owned prefix. The
-            // untouched shadow bytes already mirror that prefix.
-            if (width > 1 && regionIndex + 1 < TotalRegions_ && ObjectCrossesBoundary(regionIndex + 1)) {
-                auto* sync = BasicBlock::Create(ctx, "region." + Twine(regionIndex) + ".sync.next", func, invalid);
-                auto* after = BasicBlock::Create(ctx, "region." + Twine(regionIndex) + ".after.next", func, invalid);
-                Value* crossed = rb.CreateICmpUGT(low, ConstantInt::get(i64, span - width));
-                rb.CreateCondBr(crossed, sync, after);
-                IRBuilder<> sb(sync);
-                Value* shadow = sb.CreateGEP(Type::getInt8Ty(ctx), Regions_[regionIndex], {ConstantInt::get(i64, span)});
-                Value* boundary = sb.CreateAlignedLoad(i64, shadow, Align(8));
-                if (regionIndex + 1 < Regions_.size()) {
-                    Value* next = sb.CreateGEP(Type::getInt8Ty(ctx), Regions_[regionIndex + 1], {ConstantInt::get(i64, 0)});
-                    sb.CreateAlignedStore(boundary, next, Align(8));
-                    sb.CreateBr(after);
-                } else {
-                    Value* next = CreateHeapArrayLookup(sb, ConstantInt::get(i32, 0), key);
-                    Value* present = sb.CreateICmpNE(next, ConstantPointerNull::get(cast<PointerType>(next->getType())));
-                    auto* write = BasicBlock::Create(ctx, "region." + Twine(regionIndex) + ".sync.next.write", func, invalid);
-                    sb.CreateCondBr(present, write, invalid);
-                    IRBuilder<> wb(write);
-                    wb.CreateAlignedStore(boundary, next, Align(8));
-                    wb.CreateBr(after);
-                }
-                rb.SetInsertPoint(after);
-            }
-
-            // A store into the owned prefix makes the previous region's
-            // shadow stale. Copy all eight bytes back after the real store.
-            if (regionIndex > 0 && ObjectCrossesBoundary(regionIndex)) {
-                auto* sync = BasicBlock::Create(ctx, "region." + Twine(regionIndex) + ".sync.previous", func, invalid);
-                auto* done = BasicBlock::Create(ctx, "region." + Twine(regionIndex) + ".done", func, invalid);
-                Value* touchedPrefix = rb.CreateICmpULT(low, ConstantInt::get(i64, 8));
-                rb.CreateCondBr(touchedPrefix, sync, done);
-                IRBuilder<> sb(sync);
-                Value* current = sb.CreateGEP(Type::getInt8Ty(ctx), Regions_[regionIndex], {ConstantInt::get(i64, 0)});
-                Value* shadow = sb.CreateGEP(Type::getInt8Ty(ctx), Regions_[regionIndex - 1], {ConstantInt::get(i64, span)});
-                Value* boundary = sb.CreateAlignedLoad(i64, current, Align(8));
-                sb.CreateAlignedStore(boundary, shadow, Align(8));
-                sb.CreateBr(done);
-                rb.SetInsertPoint(done);
-            }
             rb.CreateRet(ConstantInt::get(i32, 0));
         }
 
@@ -1584,15 +1471,47 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return false;
     }
 
+    unsigned DirectRegionBudget(Module& module) {
+        // Linux 5.15 allows 64 maps per loaded call graph. Count the whole
+        // linked object conservatively, including native data sections and
+        // the fixup/constant sections which later lowering may introduce.
+        StringSet<> sections;
+        sections.insert(bpf::sym::FixupSection);
+        sections.insert(".rodata");
+        unsigned maps = 0;
+        for (GlobalVariable& global : module.globals()) {
+            if (global.getSection() == ".kconfig") {
+                sections.insert(".kconfig");
+                continue;
+            }
+            if (global.isDeclaration() || global.getName().starts_with("llvm.") || IsMovableGlobal(global)) {
+                continue;
+            }
+            StringRef section = global.getSection();
+            if (section == bpf::sym::MapsSection || section.starts_with(".struct_ops")) {
+                ++maps;
+            } else if (section.starts_with(".data") || section.starts_with(".bss") || section.starts_with(".rodata")) {
+                sections.insert(section);
+            } else if (section.empty()) {
+                sections.insert(global.isConstant() ? ".rodata" : global.getInitializer()->isNullValue() ? ".bss" : ".data");
+            }
+        }
+        maps += sections.size();
+        if (maps >= 64) {
+            report_fatal_error("bpf-memory: no map slots remain for direct memory regions");
+        }
+        unsigned available = 64 - maps;
+        if (FixedDirectHeapRegions.getNumOccurrences() && (!FixedDirectHeapRegions || FixedDirectHeapRegions > available)) {
+            report_fatal_error(Twine("bpf-memory: --direct-map-regions must be in [1, ") + Twine(available) + "] for this object");
+        }
+        return FixedDirectHeapRegions ? unsigned(FixedDirectHeapRegions) : 1u << Log2_32(available);
+    }
+
     PreservedAnalyses runFixedMemory(Module& module) {
         LLVMContext& ctx = module.getContext();
         auto* i64 = Type::getInt64Ty(ctx);
         const DataLayout& dl = module.getDataLayout();
-        const unsigned directRegions = FixedDirectHeapRegions;
-        if (!directRegions || directRegions > MaxDirectHeapRegions) {
-            module.getContext().emitError(Twine("bpf-memory: direct-region count must be in [1, ") + Twine(MaxDirectHeapRegions) + "]");
-            return PreservedAnalyses::none();
-        }
+        const unsigned directRegions = DirectRegions_ = DirectRegionBudget(module);
 
         // Value-range facts are invisible to the verifier. -O2 infers `range`
         // return attributes, and the backend then proves a region mask
@@ -1872,6 +1791,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
         }
         for (Function* function : stackFunctions) {
+            if (!bpf::HasFunctionClass(*function, bpf::cls::HeapAccessor)) {
+                SplitUnalignedAccesses(*function);
+            }
             PromoteSingleRegionSoftwareStack(*function);
         }
         MaterializeSoftwareStackUses(module);
@@ -2144,6 +2066,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         Instruction* Memory;
         int64_t Offset;
         uint64_t Width;
+        Align Alignment;
     };
 
     // Split a compiler frame address into the dynamic frame root stackify
@@ -2217,6 +2140,58 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return nullptr;
     }
 
+    // Split before mapping a pointer: splitting later in the BPF backend
+    // would leave the tail in the wrong map. Only touch the bytes requested,
+    // so a store cannot overwrite an adjacent independently atomic object.
+    void SplitUnalignedAccesses(Function& function) {
+        const DataLayout& dl = function.getParent()->getDataLayout();
+        SmallVector<Instruction*> work;
+        for (Instruction& inst : instructions(function)) {
+            if (isa<LoadInst, StoreInst>(inst)) {
+                work.push_back(&inst);
+            }
+        }
+        for (Instruction* inst : work) {
+            auto* load = dyn_cast<LoadInst>(inst);
+            auto* store = dyn_cast<StoreInst>(inst);
+            Type* type = AccessType(inst);
+            uint64_t width = dl.getTypeStoreSize(type).getFixedValue();
+            Align alignment = load ? load->getAlign() : store->getAlign();
+            if (alignment.value() >= width) {
+                continue;
+            }
+            if (load ? load->isAtomic() : store->isAtomic()) {
+                report_fatal_error("bpf-memory: atomic access requires natural alignment");
+            }
+            if ((!type->isIntegerTy() && !type->isPointerTy()) || !isPowerOf2_64(width) || width > 8) {
+                report_fatal_error("bpf-memory: unsupported unaligned access type");
+            }
+            IRBuilder<> b(inst);
+            b.SetCurrentDebugLocation(inst->getDebugLoc());
+            auto* rawType = b.getIntNTy(width * 8);
+            auto* partType = b.getIntNTy(alignment.value() * 8);
+            Value* pointer = MemoryPointerOperand(inst).first;
+            Value* raw = load ? ConstantInt::get(rawType, 0) : store->getValueOperand();
+            if (!load && type->isPointerTy()) {
+                raw = b.CreatePtrToInt(raw, rawType);
+            }
+            for (uint64_t offset = 0; offset < width; offset += alignment.value()) {
+                Value* address = b.CreateGEP(b.getInt8Ty(), pointer, b.getInt64(offset));
+                unsigned shift = (dl.isLittleEndian() ? offset : width - alignment.value() - offset) * 8;
+                if (load) {
+                    auto* part = b.CreateAlignedLoad(partType, address, alignment, load->isVolatile());
+                    raw = b.CreateOr(raw, b.CreateShl(b.CreateZExt(part, rawType), shift));
+                } else {
+                    b.CreateAlignedStore(b.CreateTrunc(b.CreateLShr(raw, shift), partType), address, alignment, store->isVolatile());
+                }
+            }
+            if (load) {
+                load->replaceAllUsesWith(type->isPointerTy() ? b.CreateIntToPtr(raw, type) : raw);
+            }
+            inst->eraseFromParent();
+        }
+    }
+
     // Use the backing region resolved by the outer drive at the physical
     // function's compiler anchor, then translate each compiler-created frame
     // root relative to the current fiber's stack base.
@@ -2254,7 +2229,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
         uint64_t stackSpan = FiberStackSize_;
         Module& module = *func.getParent();
-        MapVector<Value*, SmallVector<SoftwareStackAccess>> groups;
+        MapVector<std::pair<Value*, uint64_t>, SmallVector<SoftwareStackAccess>> groups;
         for (Instruction& inst : instructions(func)) {
             if (!isa<LoadInst, StoreInst, AtomicRMWInst, AtomicCmpXchgInst>(inst)) {
                 continue;
@@ -2271,7 +2246,17 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 continue;
             }
             uint64_t width = module.getDataLayout().getTypeStoreSize(AccessType(&inst)).getFixedValue();
-            groups[path->first].push_back({&inst, path->second, width});
+            Align alignment = isa<LoadInst>(inst) ? cast<LoadInst>(inst).getAlign()
+                : isa<StoreInst>(inst)            ? cast<StoreInst>(inst).getAlign()
+                : isa<AtomicRMWInst>(inst)        ? cast<AtomicRMWInst>(inst).getAlign()
+                                                  : cast<AtomicCmpXchgInst>(inst).getAlign();
+            // An aligned access on one branch cannot justify rounding a
+            // weaker-aligned access on another. Share the pointer only for
+            // equal root-alignment constraints, or known frame-root offsets.
+            uint64_t residue = -uint64_t(path->second) & (alignment.value() - 1);
+            bool frameAligned = RecoverFiberStackOffset(path->first) && alignment <= Align(16) && !residue;
+            uint64_t constraint = frameAligned ? 0 : alignment.value() + residue;
+            groups[{path->first, constraint}].push_back({&inst, path->second, width, alignment});
         }
 
         LLVMContext& ctx = module.getContext();
@@ -2295,9 +2280,12 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         // cross-pass size contract: terminate those states before they reach
         // the joined verifier CFG.
         const bool terminateInvalidStackPath = func.getMetadata(bpf::md::FlattenUnit) || func.getInstructionCount() >= LargeAllocationUnitInstructions;
-        for (auto&& [root, group] : groups) {
+        for (auto&& [identity, group] : groups) {
+            Value* root = identity.first;
             int64_t minimum = std::numeric_limits<int64_t>::max();
             int64_t maximum = std::numeric_limits<int64_t>::min();
+            Align alignment(1);
+            int64_t alignedOffset = 0;
             for (const SoftwareStackAccess& access : group) {
                 if (access.Width > uint64_t(std::numeric_limits<int64_t>::max()) ||
                     access.Offset > std::numeric_limits<int64_t>::max() - int64_t(access.Width)) {
@@ -2305,6 +2293,10 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 }
                 minimum = std::min(minimum, access.Offset);
                 maximum = std::max(maximum, access.Offset + int64_t(access.Width));
+                if (access.Alignment > alignment) {
+                    alignment = access.Alignment;
+                    alignedOffset = access.Offset;
+                }
             }
             if (minimum == std::numeric_limits<int64_t>::max() || maximum < minimum || uint64_t(maximum - minimum) > stackSpan) {
                 continue;
@@ -2327,19 +2319,21 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (!insertion) {
                 continue;
             }
-            IRBuilder<> b(insertion);
             Value* raw = RecoverFiberStackOffset(root);
+            if (raw && alignment < Align(16)) {
+                // The current frame root is aligned even when its first
+                // accessed field has weaker alignment.
+                alignment = Align(16);
+                alignedOffset = 0;
+            }
+            uint64_t mask = std::min(alignment.value(), stackSpan) - 1;
+            uint64_t residue = (uint64_t(minimum) - uint64_t(alignedOffset)) & mask;
+            if (residue > stackSpan - extent) {
+                continue;
+            }
+            IRBuilder<> b(insertion);
             if (raw) {
                 raw = b.CreateZExtOrTrunc(raw, i64, "bpf.stack.root.offset");
-                if (ManagedRmw_) {
-                    // Stackify rounds every frame to this alignment. Restate
-                    // the low zero bits after the verifier-opaque stack
-                    // arithmetic so native atomics on promoted frame slots
-                    // retain their required alignment on the fixed-map
-                    // backend. Every managed frame is at least 16-byte
-                    // aligned, while the largest BPF atomic is 8 bytes.
-                    raw = b.CreateAnd(raw, ConstantInt::get(i64, ~uint64_t(15)), "bpf.stack.root.aligned");
-                }
             } else {
                 raw = b.CreatePtrToInt(root, i64);
             }
@@ -2347,7 +2341,13 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 raw = b.CreateAdd(raw, ConstantInt::getSigned(i64, minimum));
             }
             Value* visible = bpf::BuildVerifierOpaqueIdentity(b, raw, "bpf.stack.offset.visible");
-            Value* low = b.CreateAnd(b.CreateTrunc(visible, i32), ConstantInt::get(i32, stackSpan - 1));
+            // Indexed locals need the same alignment proof as the frame
+            // itself. Preserve the first field's residue relative to the
+            // most-aligned access, including in the invalid-path fallback.
+            Value* low = b.CreateAnd(b.CreateTrunc(visible, i32), ConstantInt::get(i32, stackSpan - 1 - mask));
+            if (residue) {
+                low = b.CreateOr(low, ConstantInt::get(i32, residue));
+            }
             Value* visibleLow = bpf::BuildVerifierOpaqueIdentity(b, low, "bpf.stack.low.visible");
             Value* inRange = b.CreateICmpULE(visibleLow, ConstantInt::get(i32, stackSpan - extent));
 
@@ -2403,7 +2403,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 ib.CreateRet(fault);
                 b.SetInsertPoint(&*valid->getFirstInsertionPt());
             } else {
-                boundedLow = b.CreateSelect(inRange, visibleLow, ConstantInt::get(i32, 0), "bpf.stack.low.bounded");
+                boundedLow = b.CreateSelect(inRange, visibleLow, ConstantInt::get(i32, residue), "bpf.stack.low.bounded");
             }
             Value* nativeRoot = b.CreateGEP(i8, stackBase, {b.CreateZExt(boundedLow, i64)}, "bpf.stack.native");
 
@@ -2705,10 +2705,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return func;
     }
 
-    // Slice the flat image across the regions that back it. Each region's map
-    // is longer than the range it owns -- the tail shadows the start of the
-    // next one -- so the shadow bytes are filled in here too, exactly as the
-    // store path would maintain them at run time.
+    // Slice the flat image across disjoint backing regions.
     void InstallImage(Module& module, const std::vector<uint8_t>& image) {
         LLVMContext& ctx = module.getContext();
         const uint64_t span = uint64_t(1) << HeapShift;
@@ -2796,12 +2793,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // stays an integer offset. It matters enormously for size: a call
             // at each of ~54,000 accesses is most of the program.
             //
-            // The mask carries no width term and assumes nothing about
-            // alignment: regions overlap by enough that an access anywhere in
-            // [0, region size) is in range whatever its width. Assuming
-            // alignment here was a real bug — LLVM derives it from the struct
-            // type, while packed binary formats can place fields at offsets
-            // aligned only by luck, so the mask quietly cleared offset bits.
+            // Every access is naturally aligned now. The width mask both
+            // bounds the physical access and restates its alignment to BPF.
             if (std::optional<unsigned> region = TraceRegion(ptr)) {
                 // Whether the offset came through a call is not what decides
                 // this. A register that once held a pointer keeps a non-zero
@@ -2835,7 +2828,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 // using a 32-bit subregister makes the zero upper half and the
                 // final map-value bound explicit in BPF ISA semantics.
                 Value* narrowOffset = b.CreateTrunc(visibleOffset, Type::getInt32Ty(ctx));
-                Value* masked32 = b.CreateAnd(narrowOffset, ConstantInt::get(Type::getInt32Ty(ctx), (1u << HeapShift) - 1));
+                Value* masked32 = b.CreateAnd(narrowOffset,
+                    ConstantInt::get(Type::getInt32Ty(ctx), (1u << HeapShift) - module.getDataLayout().getTypeStoreSize(AccessType(inst)).getFixedValue()));
                 Value* bounded32 = masked32;
                 if (callDerivedOffset) {
                     // The empty asm above cannot help here: it emits no
@@ -2915,6 +2909,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     PreservedAnalyses run(Module& module, ModuleAnalysisManager&) {
         if (FixedMemory_) {
             return runFixedMemory(module);
+        }
+        if (FixedDirectHeapRegions.getNumOccurrences()) {
+            report_fatal_error("bpf-memory: --direct-map-regions requires fixed memory");
         }
         LLVMContext& ctx = module.getContext();
         auto* i64 = Type::getInt64Ty(ctx);

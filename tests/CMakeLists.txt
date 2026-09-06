@@ -240,6 +240,13 @@ capsule_gtest_host(
 # Arena memory: heap sizing grows the backing map, the host-reserved
 # prefix, host I/O across region boundaries, invalid-address rejection.
 capsule_test_object(memory SOURCES memory/memory_bpf.c INCLUDE_DIRECTORIES ${test_source_dir}/memory)
+set(alignment_definitions)
+if(test_has_managed_atomics)
+    list(APPEND alignment_definitions BPF_CAPSULE_TEST_MANAGED_RMW=1)
+endif()
+capsule_test_object(alignment SOURCES memory/alignment_bpf.c COMPILE_DEFINITIONS ${alignment_definitions})
+capsule_gtest_host(alignment_test SOURCES memory/alignment_test.cc SKELETONS alignment_skeleton)
+target_compile_definitions(alignment_test PRIVATE ${alignment_definitions})
 capsule_gtest_host(
     memory_test
     SOURCES memory/memory_test.cc

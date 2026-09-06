@@ -86,7 +86,7 @@ TEST_F(YieldTest, Protocol) {
     unsigned char observed[sizeof(replacement)] = {0};
     ASSERT_NE(state_->stack_probe, nullptr);
     memcpy(observed, state_->stack_probe, sizeof(observed));
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule_, state_->stack_probe, replacement, sizeof(replacement)), 0) << strerror(errno);
+    memcpy(state_->stack_probe, replacement, sizeof(replacement));
     EXPECT_NE(memcmp(observed, replacement, sizeof(observed)), 0) << "the original probe bytes differ from the replacement";
 
     ASSERT_EQ(Run("yield_test_first_continue"), 0) << strerror(errno);

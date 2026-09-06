@@ -56,8 +56,8 @@ framebuffer.
   value in BPF and userspace. Globals, heap, and software stacks occupy one
   host-visible window. Arena profiles map it with `bpf_arena`; fixed-memory
   profiles preserve the same address model over ordinary maps. A host can
-  exchange large buffers and follow pointers returned by BPF without address
-  translation or object serialization.
+  read and write memory directly, exchange large buffers, and follow pointers
+  returned by BPF without address translation or object serialization.
 - **Resumable fibers.** Fibers have independent control state and stack slices
   while sharing program globals and the heap. If the drive budget ends,
   `capsule_call()` returns `CAPSULE_PENDING` and a generation-checked
@@ -180,6 +180,11 @@ The Capsule environment has a C library but no operating system:
   from it may not be stored in Capsule state across a region boundary;
 - all program and fiber capacities remain finite compile-time or load-time
   bounds.
+
+Atomics up to 64 bits use hardware operations, with no hidden lock-based
+fallback for larger objects. The linker defaults target Linux 5.15 on both
+supported architectures; the full atomic set requires explicit target
+capabilities, available on arm64 from Linux 5.18.
 
 Unsupported forms are compile errors. BPF Capsule is research software and is
 not a security boundary.

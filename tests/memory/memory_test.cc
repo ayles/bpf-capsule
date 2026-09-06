@@ -2,14 +2,15 @@
 // Managed memory: pre-load heap sizing grows the selected backend, the
 // host-reserved prefix is real memory the guest does not see, host memory I/O
 // round-trips beyond the fixed direct-map budget and across a backend
-// boundary, invalid addresses are rejected, and the guest observes the same
-// bytes.
+// boundary, and the guest observes the same bytes.
 #include "capsule_gtest.h"
 
 #include "bpf_capsule_host.h"
 #include "bpf_capsule_names.h"
 #include "memory_test.h"
 #include "memory.skel.h"
+
+#include <algorithm>
 
 namespace {
 
@@ -27,6 +28,8 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     ASSERT_NE(skeleton, nullptr);
     struct bpf_capsule capsule = {};
     struct bpf_object* object = skeleton->obj;
+    const unsigned direct_regions = std::max<uint64_t>(2, skeleton->rodata_bpfconfig->bpf_capsule_config.direct_memory_regions);
+    const uint64_t memory_bytes = (uint64_t)(direct_regions + 2) * MEMORY_TEST_REGION_SIZE;
 
     // Growing heap requests must grow the backing map monotonically.
     struct bpf_capsule_config zero_heap = {};
@@ -36,7 +39,7 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     small_heap.heap_bytes = 1ull << 20;
     struct bpf_capsule_config large_heap = {};
     large_heap.fiber_count = 1;
-    large_heap.heap_bytes = MEMORY_TEST_BYTES;
+    large_heap.heap_bytes = memory_bytes;
     large_heap.reserved_bytes = MEMORY_TEST_PROBE_BYTES;
 
     ASSERT_EQ(bpf_capsule_configure(&capsule, object, zero_heap), 0) << strerror(errno);
@@ -62,8 +65,8 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     for (unsigned int index = 0; index < sizeof(bootstrap_expected); ++index) {
         bootstrap_expected[index] = (unsigned char)(index * 19u + 7u);
     }
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, bootstrap_address, bootstrap_expected, sizeof(bootstrap_expected)), 0);
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, bootstrap_observed, bootstrap_address, sizeof(bootstrap_observed)), 0);
+    memcpy(bootstrap_address, bootstrap_expected, sizeof(bootstrap_expected));
+    memcpy(bootstrap_observed, bootstrap_address, sizeof(bootstrap_observed));
     EXPECT_EQ(memcmp(bootstrap_expected, bootstrap_observed, sizeof(bootstrap_expected)), 0);
 
     size_t result_size = 0;
@@ -73,7 +76,7 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
 
     ASSERT_EQ(capsule_test_run_program(object, "memory_prepare"), 0) << strerror(errno);
     ASSERT_EQ(result->capsule.status, (unsigned)CAPSULE_OK);
-    EXPECT_EQ(result->capacity, MEMORY_TEST_BYTES - bootstrap_reserved);
+    EXPECT_EQ(result->capacity, memory_bytes - bootstrap_reserved);
     EXPECT_EQ(result->address, bootstrap_address + bootstrap_reserved);
     // The guest-observed pointer carries the same upper half the host sees.
     // Both backends expose the same full pointer representation.
@@ -87,7 +90,7 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     for (unsigned int index = 0; index < sizeof(expected); ++index) {
         expected[index] = (unsigned char)(index * 37u + 11u);
     }
-    uint64_t probe_base = (uint64_t)MEMORY_TEST_DIRECT_REGIONS * MEMORY_TEST_REGION_SIZE;
+    uint64_t probe_base = (uint64_t)direct_regions * MEMORY_TEST_REGION_SIZE;
     unsigned char* probe_address = result->address + probe_base;
     uint64_t distance = MEMORY_TEST_REGION_SIZE - ((uintptr_t)probe_address & (MEMORY_TEST_REGION_SIZE - 1u));
     uint64_t prefix = distance < MEMORY_TEST_PROBE_BYTES / 4u ? distance : MEMORY_TEST_PROBE_BYTES / 4u;
@@ -96,71 +99,17 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     unsigned char* address = result->address + offset;
 
     ASSERT_LE(offset + sizeof(expected), result->capacity);
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, address, expected, sizeof(expected)), 0) << strerror(errno);
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, observed, address, sizeof(observed)), 0) << strerror(errno);
+    memcpy(address, expected, sizeof(expected));
+    memcpy(observed, address, sizeof(observed));
     EXPECT_EQ(memcmp(expected, observed, sizeof(expected)), 0);
 
-    // With both pointers in the window, memcpy selects the write path and
-    // validates both Capsule ranges.
-    unsigned char capsule_observed[MEMORY_TEST_PROBE_BYTES] = {0};
+    // A normal memcpy also copies between two locations in the Capsule.
     unsigned char* capsule_copy = address + sizeof(expected);
+    unsigned char capsule_observed[MEMORY_TEST_PROBE_BYTES] = {};
     ASSERT_LE(offset + 2 * sizeof(expected), result->capacity);
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, capsule_copy, address, sizeof(expected)), 0) << strerror(errno);
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, capsule_observed, capsule_copy, sizeof(capsule_observed)), 0) << strerror(errno);
+    memcpy(capsule_copy, address, sizeof(expected));
+    memcpy(capsule_observed, capsule_copy, sizeof(capsule_observed));
     EXPECT_EQ(memcmp(expected, capsule_observed, sizeof(expected)), 0);
-
-    // Argument validation.
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, address, nullptr, 1), -1);
-    EXPECT_EQ(errno, EINVAL);
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, nullptr, address, 1), -1);
-    EXPECT_EQ(errno, EINVAL);
-    EXPECT_EQ(bpf_capsule_memcpy(nullptr, address, expected, 1), -1);
-    EXPECT_EQ(errno, EINVAL);
-    EXPECT_EQ(bpf_capsule_memcpy(nullptr, observed, address, 1), -1);
-    EXPECT_EQ(errno, EINVAL);
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, observed, expected, 1), -1);
-    EXPECT_EQ(errno, EFAULT) << "one side of the copy must belong to the Capsule";
-
-    // An address whose upper half does not match the object's window must
-    // fault rather than alias a valid low word: on the arena tier pointers
-    // are full user virtual addresses checked at full width. Flipping a
-    // high bit leaves the low word intact but exits the window on every
-    // backend and every placement.
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, (void*)((uintptr_t)address ^ (1ull << 40)), expected, 1), -1);
-    EXPECT_EQ(errno, EFAULT);
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, observed, (const void*)((uintptr_t)address ^ (1ull << 40)), 1), -1);
-    EXPECT_EQ(errno, EFAULT);
-
-    // Out-of-bounds addresses derived from the object's own configuration.
-    struct bpf_map* config_map = bpf_object__find_map_by_name(object, BPF_CAPSULE_SECTION_CONFIG);
-    size_t config_size = 0;
-    const struct __bpf_capsule_object_config* config =
-        config_map ? (const struct __bpf_capsule_object_config*)bpf_map__initial_value(config_map, &config_size) : nullptr;
-    ASSERT_NE(config, nullptr);
-    ASSERT_GE(config_size, sizeof(*config));
-    uintptr_t virtual_base = (uintptr_t)result->address - config->heap_base;
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, (void*)virtual_base, expected, 1), -1);
-    EXPECT_EQ(errno, EFAULT) << "the null page is not Capsule memory";
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, observed, (const void*)virtual_base, 1), -1);
-    EXPECT_EQ(errno, EFAULT) << "the null page is not Capsule memory";
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, (void*)(virtual_base + config->memory_end), expected, 1), -1);
-    EXPECT_EQ(errno, EFAULT);
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, observed, (const void*)(virtual_base + config->memory_end), 1), -1);
-    EXPECT_EQ(errno, EFAULT);
-    if (config->stack_base > config->heap_base + config->heap_bytes) {
-        errno = 0;
-        EXPECT_EQ(bpf_capsule_memcpy(&capsule, (void*)(virtual_base + config->heap_base + config->heap_bytes), expected, 1), -1);
-        EXPECT_EQ(errno, EFAULT);
-    }
 
     // The guest must observe exactly the bytes the host staged.
     uint64_t checksum = 0xcbf29ce484222325ull;
@@ -176,13 +125,8 @@ TEST(Memory, HeapSizingReservedPrefixAndHostIo) {
     memory__destroy(skeleton);
 }
 
-// The prepared view makes capsule pointers host-dereferenceable for
-// reading on every tier: the host reserves a 4 GiB-aligned span before
-// load, the base is baked into the frozen config, and guest pointers are
-// base + object offset program-wide. Reads go straight through the mapping
-// (including across a region boundary, where the contiguous view holds the
-// real next-region bytes rather than the shadow suffix); writes stay in
-// the helper, which accepts the same based addresses.
+// Guest pointers refer directly to shared storage on both tiers, including
+// accesses that cross map boundaries.
 TEST(Memory, DirectViewSharedPointers) {
     CAPSULE_REQUIRE_BPF_PRIVILEGE();
     struct memory* skeleton = memory__open();
@@ -192,7 +136,7 @@ TEST(Memory, DirectViewSharedPointers) {
 
     struct bpf_capsule_config wanted = {};
     wanted.fiber_count = 1;
-    wanted.heap_bytes = MEMORY_TEST_BYTES;
+    wanted.heap_bytes = (uint64_t)(std::max<uint64_t>(2, skeleton->rodata_bpfconfig->bpf_capsule_config.direct_memory_regions) + 2) * MEMORY_TEST_REGION_SIZE;
     ASSERT_EQ(bpf_capsule_configure(&capsule, object, wanted), 0) << strerror(errno);
     ASSERT_EQ(memory__load(skeleton), 0) << strerror(errno);
     ASSERT_EQ(bpf_capsule_initialize(&capsule), 0) << strerror(errno);
@@ -248,7 +192,7 @@ TEST(Memory, DirectViewSharedPointers) {
     uint64_t offset = boundary > MEMORY_TEST_PROBE_BYTES / 2u ? boundary - MEMORY_TEST_PROBE_BYTES / 2u : 0;
     ASSERT_LE(offset + sizeof(expected), result->capacity);
     unsigned char* address = result->address + offset;
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, address, expected, sizeof(expected)), 0) << strerror(errno);
+    memcpy(address, expected, sizeof(expected));
     EXPECT_EQ(memcmp(address, expected, sizeof(expected)), 0);
 
     EXPECT_EQ(bpf_capsule_release(&capsule), 0) << strerror(errno);

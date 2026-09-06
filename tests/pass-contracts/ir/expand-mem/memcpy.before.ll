@@ -8,6 +8,12 @@ entry:
   ret void
 }
 
+define void @copy_aligned(ptr %destination, ptr %source) {
+entry:
+  call void @llvm.memcpy.p0.p0.i32(ptr align 16 %destination, ptr align 4 %source, i32 19, i1 false)
+  ret void
+}
+
 ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
 declare void @llvm.memcpy.p0.p0.i32(ptr noalias writeonly captures(none), ptr noalias readonly captures(none), i32, i1 immarg) #0
 

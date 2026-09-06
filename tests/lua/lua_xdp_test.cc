@@ -207,9 +207,7 @@ protected:
             return -1;
         }
         control_->script = static_cast<char*>(bpf_capsule_memory_reserved_start(&capsule_));
-        if (bpf_capsule_memcpy(&capsule_, control_->script, source.data(), source.size())) {
-            return -1;
-        }
+        memcpy(control_->script, source.data(), source.size());
         control_->script_size = source.size();
         if (pinCurrentThread(cpu_)) {
             return -1;

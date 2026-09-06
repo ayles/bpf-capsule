@@ -4,11 +4,18 @@
 #include "bpf_capsule_abi.h"
 
 #define MEMORY_TEST_REGION_SIZE BPF_CAPSULE_MEMORY_REGION_SIZE
-#define MEMORY_TEST_DIRECT_REGIONS BPF_CAPSULE_DIRECT_MEMORY_REGIONS
-#define MEMORY_TEST_BYTES ((MEMORY_TEST_DIRECT_REGIONS + 1u) * MEMORY_TEST_REGION_SIZE + 64u)
 #define MEMORY_TEST_PROBE_BYTES 64u
 #define MEMORY_TEST_NODE_OFFSET 12288u
 #define MEMORY_TEST_NODE_COUNT 4u
+
+struct alignment_control {
+    struct capsule_result result;
+    unsigned char* address;
+    uint64_t value;
+    uint64_t observed;
+    uint32_t mode;
+    uint32_t counter;
+};
 
 // Built by the guest in capsule heap memory and walked by the host through
 // the stored pointers themselves: with the shared pointer representation

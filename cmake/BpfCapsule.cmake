@@ -6,10 +6,10 @@ set(BPF_CAPSULE_FIBER_STACK_BYTES 262144 CACHE STRING "Bytes in each Capsule fib
 math(EXPR _bpf_capsule_stack_power "${BPF_CAPSULE_FIBER_STACK_BYTES} & (${BPF_CAPSULE_FIBER_STACK_BYTES} - 1)")
 if(
     BPF_CAPSULE_FIBER_STACK_BYTES LESS 1
-    OR BPF_CAPSULE_FIBER_STACK_BYTES GREATER 2097152
+    OR BPF_CAPSULE_FIBER_STACK_BYTES GREATER 4194304
     OR NOT _bpf_capsule_stack_power EQUAL 0
 )
-    message(FATAL_ERROR "BPF_CAPSULE_FIBER_STACK_BYTES must be a power of two from 1 to 2097152")
+    message(FATAL_ERROR "BPF_CAPSULE_FIBER_STACK_BYTES must be a power of two from 1 to 4194304")
 endif()
 
 set(BPF_CAPSULE_MAX_FIBERS "" CACHE STRING "Compiled fiber ceiling; empty uses the runtime default")

@@ -2,7 +2,7 @@
 // Control block shared between lua_bpf.c and its host. The script, batch
 // stdin, stdout and error buffers are guest globals in Capsule memory;
 // lua_prepare publishes each one as an {address, capacity, size} triple and
-// the host moves bytes with bpf_capsule_memcpy.
+// the host accesses the shared bytes directly.
 #pragma once
 
 #include "bpf_capsule_types.h"

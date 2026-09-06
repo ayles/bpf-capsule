@@ -8,6 +8,12 @@ entry:
   ret void
 }
 
+define void @fill_aligned(ptr %destination, i8 %byte) {
+entry:
+  call void @llvm.memset.p0.i64(ptr align 16 %destination, i8 %byte, i64 19, i1 true)
+  ret void
+}
+
 ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: write)
 declare void @llvm.memset.p0.i64(ptr writeonly captures(none), i8, i64, i1 immarg) #0
 

@@ -128,10 +128,17 @@ capsule_ir_pass_contract(
 capsule_ir_pass_contract(lower-sdiv "bpf-lower-sdiv" lower-sdiv/basic)
 capsule_ir_pass_contract(lower-arena-sext "function(bpf-lower-arena-sext)" lower-arena-sext/basic)
 capsule_ir_pass_contract(internalize "bpf-internalize" internalize/basic)
-capsule_ir_pass_contract(
-    finalize-atomic-load-store
-    "function(bpf-finalize-atomic-load-store)"
-    atomics/finalize-load-store
+capsule_ir_pass_contract(finalize-atomics "function(bpf-finalize-atomics)" atomics/finalize-load-store)
+capsule_ir_pass_contract(finalize-atomics-legacy "function(bpf-finalize-atomics-legacy)" atomics/finalize-legacy)
+capsule_ir_pass_diagnostic(
+    finalize-atomics-legacy-fetch
+    "function(bpf-finalize-atomics-legacy)"
+    atomics/rejected-legacy-fetch
+)
+capsule_ir_pass_diagnostic(
+    finalize-atomics-legacy-cas
+    "function(bpf-finalize-atomics-legacy)"
+    atomics/rejected-legacy-cas
 )
 capsule_ir_pass_contract(lower-managed-atomics "function(bpf-lower-managed-atomics)" atomics/lower-managed)
 capsule_ir_pass_contract(
@@ -180,13 +187,13 @@ capsule_ir_pass_contract(
     memory-fixed-general-accessors
     "bpf-memory-fixed"
     memory-fixed/general-accessors
-    "-bpf-memory-fixed-direct-regions=2"
+    "--direct-map-regions=2"
 )
 capsule_ir_pass_contract(
     memory-fixed-stack-backing
     "bpf-memory-fixed"
     memory-fixed/stack-backing
-    "-bpf-memory-fixed-direct-regions=2"
+    "--direct-map-regions=2"
 )
 capsule_ir_pass_contract(stackify "bpf-stackify" stackify/two-region)
 capsule_ir_pass_contract(stackify-managed-calls "bpf-stackify" stackify/managed-calls)
@@ -328,6 +335,11 @@ capsule_ir_pass_diagnostic(validate-atomics-cmpxchg "function(bpf-validate-atomi
 capsule_ir_pass_diagnostic(validate-atomics-fence "function(bpf-validate-atomics)" atomics/rejected-fence)
 capsule_ir_pass_diagnostic(validate-atomics-ordering "function(bpf-validate-atomics)" atomics/rejected-ordering)
 capsule_ir_pass_diagnostic(validate-atomics-alignment "function(bpf-validate-atomics)" atomics/rejected-alignment)
+capsule_ir_pass_diagnostic(
+    validate-managed-atomics-alignment
+    "function(bpf-validate-managed-atomics)"
+    atomics/rejected-managed-alignment
+)
 capsule_ir_pass_diagnostic(validate-no-float-rejected "function(bpf-validate-no-float)" validate-no-float/rejected)
 capsule_ir_pass_diagnostic(target-cpu-mismatch "no-op-module" target-profile/rejected-cpu "-mcpu=v4")
 capsule_ir_pass_diagnostic(
@@ -370,13 +382,13 @@ capsule_ir_pass_diagnostic(
     memory-fixed-image-budget
     "bpf-memory-fixed"
     memory-fixed/rejected-image-budget
-    "-bpf-memory-fixed-direct-regions=1"
+    "--direct-map-regions=1"
 )
 capsule_ir_pass_diagnostic(
     memory-fixed-access-shape
     "bpf-memory-fixed"
     memory-fixed/rejected-access-shape
-    "-bpf-memory-fixed-direct-regions=1"
+    "--direct-map-regions=1"
 )
 capsule_ir_pass_diagnostic(memory-arena-layout-overflow "bpf-memory-arena" memory-arena/rejected-layout-overflow)
 capsule_ir_pass_diagnostic(memory-arena-control-state "bpf-memory-arena" memory-arena/rejected-control-state)

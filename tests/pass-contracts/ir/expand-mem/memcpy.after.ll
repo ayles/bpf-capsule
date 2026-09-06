@@ -42,6 +42,43 @@ copy.after1:                                      ; preds = %copy.cond2
   ret void
 }
 
+define void @copy_aligned(ptr %destination, ptr %source) {
+entry:
+  br label %copy.cond
+
+copy.cond:                                        ; preds = %copy.body, %entry
+  %copy.i = phi i64 [ 0, %entry ], [ %4, %copy.body ]
+  %0 = icmp ult i64 %copy.i, 16
+  br i1 %0, label %copy.body, label %copy.after
+
+copy.body:                                        ; preds = %copy.cond
+  %1 = getelementptr i8, ptr %source, i64 %copy.i
+  %2 = load i64, ptr %1, align 4
+  %3 = getelementptr i8, ptr %destination, i64 %copy.i
+  store i64 %2, ptr %3, align 8
+  %4 = add i64 %copy.i, 8
+  br label %copy.cond
+
+copy.after:                                       ; preds = %copy.cond
+  br label %copy.cond2
+
+copy.cond2:                                       ; preds = %copy.body3, %copy.after
+  %copy.i4 = phi i64 [ 16, %copy.after ], [ %9, %copy.body3 ]
+  %5 = icmp ult i64 %copy.i4, 19
+  br i1 %5, label %copy.body3, label %copy.after1
+
+copy.body3:                                       ; preds = %copy.cond2
+  %6 = getelementptr i8, ptr %source, i64 %copy.i4
+  %7 = load i8, ptr %6, align 1
+  %8 = getelementptr i8, ptr %destination, i64 %copy.i4
+  store i8 %7, ptr %8, align 1
+  %9 = add i64 %copy.i4, 1
+  br label %copy.cond2
+
+copy.after1:                                      ; preds = %copy.cond2
+  ret void
+}
+
 ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
 declare void @llvm.memcpy.p0.p0.i32(ptr noalias writeonly captures(none), ptr noalias readonly captures(none), i32, i1 immarg) #0
 

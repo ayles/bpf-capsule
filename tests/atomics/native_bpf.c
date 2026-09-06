@@ -72,6 +72,20 @@ static void atomic_managed_reader_body(void) {
 #if BPF_CAPSULE_TEST_MANAGED_RMW
 static _Atomic uint64_t atomic_managed_counter;
 
+// A relaxed fetch must return the old value too. LLVM's non-fetching BPF
+// instructions update memory correctly, so checking only the cell misses it.
+#define CHECK_RELAXED_FETCHES(pointer, failure_bit) \
+    do { \
+        atomic_store_explicit(pointer, 0xff00u, memory_order_relaxed); \
+        if (atomic_fetch_sub_explicit(pointer, 0x100u, memory_order_relaxed) != 0xff00u || \
+            atomic_fetch_add_explicit(pointer, 0x23u, memory_order_relaxed) != 0xfe00u || \
+            atomic_fetch_and_explicit(pointer, 0xffu, memory_order_relaxed) != 0xfe23u || \
+            atomic_fetch_or_explicit(pointer, 0x800u, memory_order_relaxed) != 0x23u || \
+            atomic_fetch_xor_explicit(pointer, 0x80u, memory_order_relaxed) != 0x823u || atomic_load_explicit(pointer, memory_order_relaxed) != 0x8a3u) { \
+            failures |= failure_bit; \
+        } \
+    } while (0)
+
 static void atomic_managed_rmw_body(void) {
     struct atomic_managed_cells* cells = atomic_managed_pointer;
     uint64_t failures = 0;
@@ -130,8 +144,22 @@ static void atomic_managed_rmw_body(void) {
     }
     atomic_thread_fence(memory_order_seq_cst);
     atomic_signal_fence(memory_order_acq_rel);
+    CHECK_RELAXED_FETCHES(word, 1024);
+    CHECK_RELAXED_FETCHES(doubleword, 2048);
     atomic_managed_result.rmw_failures = failures;
 }
+
+static struct atomic_managed_cells atomic_native_cells SEC(".data.atomfetch");
+
+SEC("syscall")
+int atomic_runtime_fetch(void) {
+    unsigned failures = 0;
+    CHECK_RELAXED_FETCHES(&atomic_native_cells.word, 1);
+    CHECK_RELAXED_FETCHES(&atomic_native_cells.doubleword, 2);
+    return failures;
+}
+
+#undef CHECK_RELAXED_FETCHES
 
 static void atomic_managed_increment_body(void) {
     (void)atomic_fetch_add_explicit(&atomic_managed_counter, 1, memory_order_seq_cst);

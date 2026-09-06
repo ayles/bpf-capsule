@@ -554,14 +554,42 @@ struct ValidateAtomicsPass : public PassInfoMixin<ValidateAtomicsPass> {
 // exactly one ordinary load/store. Keep the atomic marker through all generic
 // optimization and virtual-memory routing, then remove it here at the last IR
 // stage. No optimizing IR pass runs afterwards.
-struct FinalizeAtomicLoadStorePass : public PassInfoMixin<FinalizeAtomicLoadStorePass> {
+struct FinalizeAtomicsPass : public PassInfoMixin<FinalizeAtomicsPass> {
+    explicit FinalizeAtomicsPass(bool legacy = false)
+        : Legacy_(legacy) {
+    }
+
+    bool Legacy_;
+
     PreservedAnalyses run(Function& func, FunctionAnalysisManager&) {
         SmallVector<Instruction*> work;
+        unsigned fetched = 0;
         for (Instruction& inst : instructions(func)) {
+            auto* rmw = dyn_cast<AtomicRMWInst>(&inst);
+            if (Legacy_ && (rmw || isa<AtomicCmpXchgInst>(inst))) {
+                // Check native code too: the conservative target only has
+                // non-fetching, relaxed 32/64-bit addition (or subtraction).
+                bool supported = rmw && (rmw->getOperation() == AtomicRMWInst::Add || rmw->getOperation() == AtomicRMWInst::Sub) && rmw->use_empty() &&
+                    rmw->getOrdering() == AtomicOrdering::Monotonic && (rmw->getType()->isIntegerTy(32) || rmw->getType()->isIntegerTy(64));
+                if (!supported) {
+                    func.getContext().emitError(
+                        &inst, "bpf-finalize-atomics: operation requires full BPF atomics; select --managed-atomics for a supported target");
+                    return PreservedAnalyses::all();
+                }
+            }
+            if (rmw && !rmw->use_empty() && rmw->getOrdering() == AtomicOrdering::Monotonic) {
+                // LLVM 23 selects non-fetching BPF add/sub and i32 bitwise
+                // instructions for monotonic RMWs even when the result is used.
+                // Strong ordering selects BPF_FETCH. It is a valid strengthening
+                // of relaxed semantics and adds no instruction or retry loop.
+                // Do this after optimization, retaining non-fetching dead results.
+                rmw->setOrdering(AtomicOrdering::SequentiallyConsistent);
+                ++fetched;
+            }
             if ((isa<LoadInst>(inst) && cast<LoadInst>(inst).isAtomic()) || (isa<StoreInst>(inst) && cast<StoreInst>(inst).isAtomic())) {
                 if (!ValidateAtomicsPass::IsPreservedLoadStore(inst)) {
                     func.getContext().emitError(&inst,
-                        "bpf-finalize-atomic-load-store: unsupported atomic "
+                        "bpf-finalize-atomics: unsupported atomic "
                         "survived validation");
                     return PreservedAnalyses::all();
                 }
@@ -588,9 +616,9 @@ struct FinalizeAtomicLoadStorePass : public PassInfoMixin<FinalizeAtomicLoadStor
             inst->eraseFromParent();
         }
         if (!work.empty()) {
-            bpf::stats() << "bpf-finalize-atomic-load-store: " << work.size() << " accesses finalized\n";
+            bpf::stats() << "bpf-finalize-atomics: " << work.size() << " accesses finalized\n";
         }
-        return work.empty() ? PreservedAnalyses::all() : PreservedAnalyses::none();
+        return work.empty() && !fetched ? PreservedAnalyses::all() : PreservedAnalyses::none();
     }
 };
 
@@ -613,8 +641,12 @@ bool RegisterAtomicsPasses(llvm::StringRef name, llvm::FunctionPassManager& mana
         manager.addPass(ValidateAtomicsPass(true));
         return true;
     }
-    if (name == "bpf-finalize-atomic-load-store") {
-        manager.addPass(FinalizeAtomicLoadStorePass());
+    if (name == "bpf-finalize-atomics") {
+        manager.addPass(FinalizeAtomicsPass());
+        return true;
+    }
+    if (name == "bpf-finalize-atomics-legacy") {
+        manager.addPass(FinalizeAtomicsPass(true));
         return true;
     }
     return false;

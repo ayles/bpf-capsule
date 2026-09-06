@@ -104,10 +104,7 @@ int main(int argc, char** argv) {
     volatile struct wasm3_bpf_ctrl* control = &skeleton->data_w3ctrl->w3ctrl;
     unsigned char* staged_input = bpf_capsule_memory_reserved_start(&capsule);
     unsigned char* output = staged_input + output_offset;
-    if (bpf_capsule_memcpy(&capsule, staged_input, compressed, compressed_size)) {
-        fprintf(stderr, "cannot stage wasm3 input: %s\n", strerror(errno));
-        goto cleanup;
-    }
+    memcpy(staged_input, compressed, compressed_size);
     control->input = staged_input;
     control->input_size = compressed_size;
     control->output = output;

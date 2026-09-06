@@ -101,7 +101,7 @@ struct __bpf_capsule_arena_control BPF_CAPSULE_ARENA_CONTROL_GLOBAL SEC(BPF_CAPS
 #endif
 
 struct bpf_heap_array_value {
-    uint8_t bytes[BPF_CAPSULE_MEMORY_REGION_SIZE + BPF_CAPSULE_MEMORY_REGION_PAD];
+    uint8_t bytes[BPF_CAPSULE_MEMORY_REGION_SIZE];
 };
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -144,6 +144,7 @@ const volatile struct __bpf_capsule_object_config BPF_CAPSULE_CONFIG_GLOBAL SEC(
     .abi_magic = BPF_CAPSULE_ABI_MAGIC,
     .abi_version = BPF_CAPSULE_ABI_VERSION,
     .memory_view_base = 0,
+    .direct_memory_regions = 0,
 };
 
 static __attribute__((always_inline)) uint32_t __bpf_capsule_fiber_count(void) {
@@ -626,8 +627,8 @@ int __bpf_capsule_plan_broken(void) {
     }
 #if !BPF_CAPSULE_FEATURE_ARENA
     uint32_t last_region = (bpf_capsule_config.memory_end - 1u) >> BPF_CAPSULE_MEMORY_REGION_SHIFT;
-    if (last_region >= BPF_CAPSULE_DIRECT_MEMORY_REGIONS) {
-        uint32_t key = last_region - BPF_CAPSULE_DIRECT_MEMORY_REGIONS;
+    if (last_region >= bpf_capsule_config.direct_memory_regions) {
+        uint32_t key = last_region - bpf_capsule_config.direct_memory_regions;
         if (!bpf_map_lookup_elem(&bpf_heap_array, &key)) {
             return 1;
         }

@@ -2,10 +2,10 @@ source_filename = "memory-fixed-stack-contract.c"
 target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
 target triple = "bpfel"
 
-%config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64 }
+%config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64, i64 }
 %map = type { ptr }
 
-@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 0, i32 1112556353, i32 5, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 0, i32 1112556353, i32 6, i64 0, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_heap_array = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @bpf_call_stack = internal global [4096 x i8] zeroinitializer, align 8, !bpf.fiber.stack.size !13
 
@@ -37,6 +37,30 @@ entry:
   %field = getelementptr i8, ptr %frame, i64 8
   %value = load i32, ptr %field, align 4
   ret i32 %value
+}
+
+define i64 @read_indexed_fields(i32 %sp, i32 %index, ptr "bpf.capsule.stack.backing" %stack_base) {
+entry:
+  %wide = zext i32 %sp to i64
+  %offset = and i64 %wide, 4095
+  %frame = getelementptr i8, ptr @bpf_call_stack, i64 %offset
+  call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %stack_base)
+  %index64 = zext i32 %index to i64
+  %element = getelementptr i8, ptr %frame, i64 %index64
+  %first = getelementptr i8, ptr %element, i64 1
+  %last = getelementptr i8, ptr %element, i64 8
+  %low = and i32 %index, 7
+  %aligned = icmp eq i32 %low, 0
+  br i1 %aligned, label %word.path, label %byte.path
+
+byte.path:                                        ; preds = %entry
+  %byte = load i8, ptr %first, align 1
+  %byte64 = zext i8 %byte to i64
+  ret i64 %byte64
+
+word.path:                                        ; preds = %entry
+  %word = load i64, ptr %last, align 8
+  ret i64 %word
 }
 
 !llvm.dbg.cu = !{!2}

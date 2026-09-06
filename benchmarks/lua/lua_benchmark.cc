@@ -79,11 +79,12 @@ void BM_LuaScript(benchmark::State& state) {
     volatile struct lua_runner_ctrl* control = &skeleton->data_lua_runner->lua_runner_control;
     uint64_t preparation_drains = 0;
     if (drive(skeleton, control, bpf_program__fd(skeleton->progs.lua_prepare), &preparation_drains) || control->capsule.status != CAPSULE_OK ||
-        script.size() > control->script.capacity || bpf_capsule_memcpy(&capsule, control->script.address, script.data(), script.size())) {
+        script.size() > control->script.capacity) {
         state.SkipWithError("cannot stage the script");
         destroy_lua(skeleton, &capsule);
         return;
     }
+    memcpy(control->script.address, script.data(), script.size());
     control->script.size = script.size();
     control->input.size = 0;
     uint64_t run_drains = 0;

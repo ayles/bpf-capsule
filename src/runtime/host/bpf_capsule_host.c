@@ -75,20 +75,7 @@ const char* bpf_capsule_error_string(int64_t code) {
 struct bpf_capsule_state {
     void* window;
     const struct __bpf_capsule_object_config* config;
-    void* arena_base;
-    size_t arena_size;
     const volatile struct __bpf_capsule_arena_control* arena_control;
-    struct {
-        void* base;
-        size_t size;
-        int fd;
-    } regions[BPF_CAPSULE_DIRECT_MEMORY_REGIONS];
-    uint32_t region_count;
-    void* view;
-    size_t view_size;
-    int overflow_fd;
-    size_t overflow_value_size;
-    uint32_t overflow_entries;
     struct bpf_capsule_extension* extensions;
     int freplace_required;
     int freplace_attached;
@@ -115,6 +102,9 @@ static inline int __bpf_capsule_layout_header_valid(const struct __bpf_capsule_o
     return config->stack_bytes_per_fiber && !(config->stack_bytes_per_fiber & (config->stack_bytes_per_fiber - 1u)) &&
         config->stack_bytes_per_fiber <= BPF_CAPSULE_MEMORY_REGION_SIZE && config->max_fibers && config->max_fibers <= BPF_CAPSULE_MAX_FIBERS_LIMIT &&
         config->heap_base >= BPF_CAPSULE_ARENA_PAGE_SIZE && config->heap_base <= UINT32_MAX && config->memory_backend <= BPF_CAPSULE_MEMORY_ARENA &&
+        (config->memory_backend == BPF_CAPSULE_MEMORY_ARENA
+                ? config->direct_memory_regions == 0
+                : config->direct_memory_regions > 0 && config->direct_memory_regions <= BPF_CAPSULE_MAX_DIRECT_MEMORY_REGIONS) &&
         config->abi_magic == BPF_CAPSULE_ABI_MAGIC && config->abi_version == BPF_CAPSULE_ABI_VERSION;
 }
 
@@ -157,7 +147,7 @@ int __bpf_capsule_plan(struct __bpf_capsule_object_config* config, size_t config
         return -1;
     }
     int has_arena = config->memory_backend == BPF_CAPSULE_MEMORY_ARENA;
-    uint32_t direct_region_maps = has_arena ? 0 : BPF_CAPSULE_DIRECT_MEMORY_REGIONS;
+    uint32_t direct_region_maps = config->direct_memory_regions;
 
     const uint64_t address_limit = 1ull << 32;
     if (requested.heap_bytes > address_limit - config->heap_base) {
@@ -319,6 +309,7 @@ int bpf_capsule_configure(struct bpf_capsule* capsule, struct bpf_object* object
     int freplace_required = 0;
     struct bpf_program* program;
     bpf_object__for_each_program(program, object) {
+        bpf_program__set_flags(program, (bpf_program__flags(program) & ~BPF_F_ANY_ALIGNMENT) | BPF_F_STRICT_ALIGNMENT);
         if (!__bpf_capsule_is_freplace_program(program)) {
             continue;
         }
@@ -382,7 +373,6 @@ int bpf_capsule_configure(struct bpf_capsule* capsule, struct bpf_object* object
             (void)munmap((void*)window, (size_t)BPF_CAPSULE_MEMORY_WINDOW_SIZE);
             return -1;
         }
-        state->overflow_fd = -1;
     }
 
     size_t changed = 0;
@@ -580,6 +570,7 @@ static int __bpf_capsule_load_freplace(
     size_t program_count = 0;
     struct bpf_program* program;
     bpf_object__for_each_program(program, extension->object) {
+        bpf_program__set_flags(program, (bpf_program__flags(program) & ~BPF_F_ANY_ALIGNMENT) | BPF_F_STRICT_ALIGNMENT);
         if (!__bpf_capsule_is_freplace_program(program)) {
             int disable_error = bpf_program__set_autoload(program, false);
             if (disable_error) {
@@ -768,16 +759,12 @@ static int __bpf_capsule_prepare_memory(struct bpf_capsule* capsule) {
         return 0;
     }
     struct bpf_object* object = capsule->object;
-    state->arena_base = NULL;
-    state->arena_size = 0;
     state->arena_control = NULL;
-    memset(state->regions, 0, sizeof(state->regions));
-    state->region_count = 0;
-    state->view = NULL;
-    state->view_size = 0;
-    state->overflow_fd = -1;
-    state->overflow_value_size = 0;
-    state->overflow_entries = 0;
+    int region_fds[BPF_CAPSULE_MAX_DIRECT_MEMORY_REGIONS];
+    uint32_t region_count = 0;
+    int overflow_fd = -1;
+    size_t overflow_value_size = 0;
+    uint32_t overflow_entries = 0;
 
     struct bpf_map* config_map = bpf_object__find_map_by_name(object, BPF_CAPSULE_SECTION_CONFIG);
     size_t config_size = 0;
@@ -821,8 +808,6 @@ static int __bpf_capsule_prepare_memory(struct bpf_capsule* capsule) {
             errno = EFAULT;
             return -1;
         }
-        state->arena_base = base;
-        state->arena_size = (size_t)bpf_map__max_entries(arena) * page_size;
         state->arena_control = (const volatile struct __bpf_capsule_arena_control*)control;
         state->config = config;
         return 0;
@@ -832,37 +817,28 @@ static int __bpf_capsule_prepare_memory(struct bpf_capsule* capsule) {
         return -1;
     }
 
-    while (state->region_count < BPF_CAPSULE_DIRECT_MEMORY_REGIONS) {
-        struct bpf_map* map = __bpf_capsule_memory_region(object, state->region_count);
+    while (region_count < config->direct_memory_regions) {
+        struct bpf_map* map = __bpf_capsule_memory_region(object, region_count);
         if (!map) {
-            break;
+            errno = ENOENT;
+            return -1;
         }
-        size_t map_size = 0;
-        uint8_t* base = (uint8_t*)bpf_map__initial_value(map, &map_size);
-        if (!base) {
+        if (bpf_map__value_size(map) != BPF_CAPSULE_MEMORY_REGION_SIZE) {
             errno = EFAULT;
             return -1;
         }
-        state->regions[state->region_count].base = base;
-        state->regions[state->region_count].size = map_size;
-        state->regions[state->region_count].fd = bpf_map__fd(map);
-        ++state->region_count;
+        region_fds[region_count] = bpf_map__fd(map);
+        ++region_count;
     }
     struct bpf_map* overflow = bpf_object__find_map_by_name(object, BPF_CAPSULE_MAP_HEAP_ARRAY);
     if (overflow) {
-        state->overflow_fd = bpf_map__fd(overflow);
-        state->overflow_value_size = bpf_map__value_size(overflow);
-        state->overflow_entries = bpf_map__max_entries(overflow);
+        overflow_fd = bpf_map__fd(overflow);
+        overflow_value_size = bpf_map__value_size(overflow);
+        overflow_entries = bpf_map__max_entries(overflow);
     }
 
-    // Assemble the contiguous read view over the reservation the host baked
-    // into the config before load: every region map lands at base +
-    // region * REGION_SIZE, so a guest pointer is directly
-    // dereferenceable for reading. The mapping is PROT_READ — host writes
-    // must go through the copy helper, which maintains the cross-region
-    // shadow suffix; a stray direct write faults instead of corrupting.
-    // Direct pointer reads are part of this API, so failure at any step fails
-    // the view instead of leaving a write-only partial interface.
+    // Map each region once into the shared address window. Without shadow
+    // copies, host and guest read and write the very same bytes.
     uintptr_t view_base = config->memory_view_base;
     if (!view_base) {
         // A zero base means bpf_capsule_configure() never ran; the object
@@ -874,23 +850,24 @@ static int __bpf_capsule_prepare_memory(struct bpf_capsule* capsule) {
     {
         long view_page_result = sysconf(_SC_PAGESIZE);
         size_t view_page = view_page_result > 0 ? (size_t)view_page_result : 0;
-        size_t overflow_stride = (state->overflow_value_size + 7u) & ~(size_t)7u;
-        uint64_t total_regions = (uint64_t)state->region_count + state->overflow_entries;
-        int usable = view_page && !(view_base & (view_page - 1u)) && !(overflow_stride & (view_page - 1u)) &&
-            total_regions * BPF_CAPSULE_MEMORY_REGION_SIZE >= config->memory_end && view_base <= UINTPTR_MAX - total_regions * BPF_CAPSULE_MEMORY_REGION_SIZE;
+        const size_t overflow_stride = BPF_CAPSULE_MEMORY_REGION_SIZE;
+        uint64_t total_regions = (uint64_t)region_count + overflow_entries;
+        int usable = overflow_value_size == overflow_stride && view_page && !(view_base & (view_page - 1u)) && !(overflow_stride & (view_page - 1u)) &&
+            total_regions <= (1ull << 32) / BPF_CAPSULE_MEMORY_REGION_SIZE && total_regions * BPF_CAPSULE_MEMORY_REGION_SIZE >= config->memory_end &&
+            view_base <= UINTPTR_MAX - total_regions * BPF_CAPSULE_MEMORY_REGION_SIZE;
         if (!usable) {
             errno = EFAULT;
         }
         uint8_t* view_at = (uint8_t*)view_base;
         uint64_t mapped_regions = 0;
         for (uint64_t region = 0; usable && region < total_regions; ++region) {
-            int fd = region < state->region_count ? state->regions[region].fd : state->overflow_fd;
-            off_t file_offset = region < state->region_count ? 0 : (off_t)((region - state->region_count) * overflow_stride);
+            int fd = region < region_count ? region_fds[region] : overflow_fd;
+            off_t file_offset = region < region_count ? 0 : (off_t)((region - region_count) * overflow_stride);
             if (fd < 0) {
                 errno = EFAULT;
                 usable = 0;
-            } else if (mmap(view_at + region * BPF_CAPSULE_MEMORY_REGION_SIZE, BPF_CAPSULE_MEMORY_REGION_SIZE, PROT_READ, MAP_SHARED | MAP_FIXED, fd,
-                           file_offset) == MAP_FAILED) {
+            } else if (mmap(view_at + region * BPF_CAPSULE_MEMORY_REGION_SIZE, BPF_CAPSULE_MEMORY_REGION_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED,
+                           fd, file_offset) == MAP_FAILED) {
                 usable = 0;
             } else {
                 ++mapped_regions;
@@ -899,12 +876,7 @@ static int __bpf_capsule_prepare_memory(struct bpf_capsule* capsule) {
         if (usable && mprotect(view_at, view_page, PROT_NONE)) {
             usable = 0;
         }
-        if (usable) {
-            // Logical page zero holds no object; make null-plus-offset
-            // dereferences fault like they should.
-            state->view = view_at;
-            state->view_size = (size_t)total_regions * BPF_CAPSULE_MEMORY_REGION_SIZE;
-        } else {
+        if (!usable) {
             int saved_errno = errno;
             if (mapped_regions && __bpf_capsule_restore_reservation(view_at, (size_t)mapped_regions * BPF_CAPSULE_MEMORY_REGION_SIZE)) {
                 return -1;
@@ -915,194 +887,6 @@ static int __bpf_capsule_prepare_memory(struct bpf_capsule* capsule) {
     }
     state->config = config;
     return 0;
-}
-
-// Copy through a Capsule pointer without exposing whether this object uses a
-// BPF arena or fixed-region maps. Direct reads are also valid. Copies into a
-// Capsule pass here because the fixed backend maintains cross-region shadows.
-static inline uint8_t* __bpf_capsule_fixed_region(
-    const struct bpf_capsule_state* state, uint8_t* overflow_base, size_t overflow_stride, uint32_t region, size_t* size) {
-    if (region < state->region_count) {
-        *size = state->regions[region].size;
-        return (uint8_t*)state->regions[region].base;
-    }
-    uint32_t overflow_region = region - state->region_count;
-    if (overflow_base && overflow_region < state->overflow_entries) {
-        *size = state->overflow_value_size;
-        return overflow_base + (size_t)overflow_region * overflow_stride;
-    }
-    *size = 0;
-    return NULL;
-}
-
-static int __bpf_capsule_memory_range(const struct bpf_capsule_state* state, const void* address, size_t size, uintptr_t* backing_offset) {
-    const struct __bpf_capsule_object_config* config = state->config;
-    uintptr_t pointer = (uintptr_t)address;
-    uintptr_t offset;
-    if (state->arena_base) {
-        if (!state->arena_control || state->arena_control->ready != 2) {
-            errno = EFAULT;
-            return -1;
-        }
-        offset = pointer - state->arena_control->virtual_base;
-    } else {
-        offset = pointer - config->memory_view_base;
-        if (offset > UINT32_MAX) {
-            errno = EFAULT;
-            return -1;
-        }
-    }
-
-    uint64_t heap_end = config->heap_base + config->heap_bytes;
-    if (heap_end < config->heap_base || config->stack_base < heap_end || config->memory_end < config->stack_base || offset < BPF_CAPSULE_ARENA_PAGE_SIZE ||
-        offset >= config->memory_end || size > config->memory_end - offset ||
-        (offset < config->stack_base && size > heap_end - (offset < heap_end ? offset : heap_end))) {
-        errno = EFAULT;
-        return -1;
-    }
-
-    if (state->arena_base) {
-        offset = pointer - (uintptr_t)state->arena_base;
-        if (offset >= state->arena_size || size > state->arena_size - offset) {
-            errno = EFAULT;
-            return -1;
-        }
-    }
-    if (backing_offset) {
-        *backing_offset = offset;
-    }
-    return 0;
-}
-
-static int __bpf_capsule_memory_copy(const struct bpf_capsule* capsule, void* destination, const void* source, size_t size, int write_to_capsule) {
-    if (!size) {
-        return 0;
-    }
-    const struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
-    const void* capsule_address = write_to_capsule ? destination : source;
-    const void* host_buffer = write_to_capsule ? source : destination;
-    if (!state || !state->config || !host_buffer) {
-        errno = EINVAL;
-        return -1;
-    }
-    uintptr_t offset;
-    if (__bpf_capsule_memory_range(state, capsule_address, size, &offset)) {
-        return -1;
-    }
-
-    if (state->arena_base) {
-        uint8_t* base = (uint8_t*)state->arena_base;
-        if (write_to_capsule) {
-            memcpy(base + offset, source, size);
-        } else {
-            memcpy(destination, base + offset, size);
-        }
-        return 0;
-    }
-
-    // Fixed-map objects expose their prefix as direct region mappings.
-    // Capacity beyond that prefix is one BPF_F_MMAPABLE ARRAY map. Map it
-    // once for the complete copy: a syscall lookup would otherwise copy an
-    // entire 2 MiB value for every small host access.
-    uint8_t* overflow_base = NULL;
-    size_t overflow_size = 0;
-    size_t overflow_stride = 0;
-    if (state->overflow_fd >= 0 && state->overflow_entries) {
-        long page_size_result = sysconf(_SC_PAGESIZE);
-        size_t page_size = page_size_result > 0 ? (size_t)page_size_result : 0;
-        overflow_stride = (state->overflow_value_size + 7u) & ~(size_t)7u;
-        if (!page_size || overflow_stride < state->overflow_value_size || overflow_stride > SIZE_MAX / state->overflow_entries) {
-            errno = EOVERFLOW;
-            return -1;
-        }
-        size_t values_size = overflow_stride * state->overflow_entries;
-        if (values_size > SIZE_MAX - (page_size - 1u)) {
-            errno = EOVERFLOW;
-            return -1;
-        }
-        overflow_size = (values_size + page_size - 1u) & ~(page_size - 1u);
-        overflow_base = (uint8_t*)mmap(NULL, overflow_size, PROT_READ | PROT_WRITE, MAP_SHARED, state->overflow_fd, 0);
-        if (overflow_base == MAP_FAILED) {
-            return -1;
-        }
-    }
-
-    uint64_t fixed_offset = offset;
-    size_t remaining = size;
-    size_t copied = 0;
-    int error = 0;
-    while (remaining) {
-        uint32_t region = (uint32_t)(fixed_offset >> BPF_CAPSULE_MEMORY_REGION_SHIFT);
-        size_t in_region = (size_t)fixed_offset & (BPF_CAPSULE_MEMORY_REGION_SIZE - 1);
-        size_t part = BPF_CAPSULE_MEMORY_REGION_SIZE - in_region;
-        if (part > remaining) {
-            part = remaining;
-        }
-        size_t map_size = 0;
-        uint8_t* base = __bpf_capsule_fixed_region(state, overflow_base, overflow_stride, region, &map_size);
-        if (!base || in_region + part > map_size) {
-            errno = EFAULT;
-            error = -1;
-            break;
-        }
-        if (write_to_capsule) {
-            memcpy(base + in_region, (const uint8_t*)source + copied, part);
-        } else {
-            memcpy((uint8_t*)destination + copied, base + in_region, part);
-        }
-
-        // Old-kernel regions carry an eight-byte suffix mirroring the next
-        // region so unaligned scalar loads can cross a verifier map boundary.
-        // Refresh it whenever this write touches that next region's prefix.
-        if (write_to_capsule && region && in_region < 8) {
-            uint32_t previous_region = region - 1;
-            size_t previous_size = 0;
-            uint8_t* previous_base = __bpf_capsule_fixed_region(state, overflow_base, overflow_stride, previous_region, &previous_size);
-            if (!previous_base || previous_size < BPF_CAPSULE_MEMORY_REGION_SIZE + 8 || map_size < 8) {
-                errno = EFAULT;
-                error = -1;
-                break;
-            }
-            memcpy(previous_base + BPF_CAPSULE_MEMORY_REGION_SIZE, base, 8);
-        }
-        copied += part;
-        fixed_offset += part;
-        remaining -= part;
-    }
-    if (overflow_base) {
-        munmap(overflow_base, overflow_size);
-    }
-    return error;
-}
-
-// Copy across a Capsule boundary. A destination in this Capsule's reserved
-// window selects the write path; otherwise the source must be in the window
-// and the copy reads out. Both pointers may belong to the same Capsule. Such a
-// copy has memcpy's ordinary non-overlap requirement. The Capsule address may
-// refer to the fiber-stack bank, so touching a live fiber's stack remains the
-// caller's responsibility.
-int bpf_capsule_memcpy(const struct bpf_capsule* capsule, void* destination, const void* source, size_t size) {
-    if (!size) {
-        return 0;
-    }
-    const struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
-    if (!state || !state->config || !destination || !source) {
-        errno = EINVAL;
-        return -1;
-    }
-    uintptr_t window = (uintptr_t)state->window;
-    int destination_is_capsule = (uintptr_t)destination - window < BPF_CAPSULE_MEMORY_WINDOW_SIZE;
-    int source_is_capsule = (uintptr_t)source - window < BPF_CAPSULE_MEMORY_WINDOW_SIZE;
-    if (!destination_is_capsule && !source_is_capsule) {
-        errno = EFAULT;
-        return -1;
-    }
-    if (destination_is_capsule && source_is_capsule) {
-        if (__bpf_capsule_memory_range(state, source, size, NULL)) {
-            return -1;
-        }
-    }
-    return __bpf_capsule_memory_copy(capsule, destination, source, size, destination_is_capsule);
 }
 
 int bpf_capsule_initialize(struct bpf_capsule* capsule) {
@@ -1168,12 +952,14 @@ int bpf_capsule_initialize(struct bpf_capsule* capsule) {
             return -1;
         }
         for (size_t i = 0; i < table_bytes / sizeof(uint64_t); ++i) {
+            if (slots[i] < BPF_CAPSULE_ARENA_PAGE_SIZE || slots[i] > state->config->heap_base - sizeof(uintptr_t)) {
+                errno = EFAULT;
+                return -1;
+            }
             uintptr_t value = 0;
             memcpy(&value, (const void*)(window + slots[i]), sizeof(value));
             value += window;
-            if (bpf_capsule_memcpy(capsule, (void*)(window + slots[i]), &value, sizeof(value))) {
-                return -1;
-            }
+            memcpy((void*)(window + slots[i]), &value, sizeof(value));
         }
     }
     *ready = 1;
@@ -1191,7 +977,7 @@ uint64_t bpf_capsule_memory_size(const struct bpf_capsule* capsule) {
     return state && state->config ? state->config->memory_end : 0;
 }
 
-const void* bpf_capsule_memory_start(const struct bpf_capsule* capsule) {
+void* bpf_capsule_memory_start(const struct bpf_capsule* capsule) {
     const struct bpf_capsule_state* state = __bpf_capsule_state(capsule);
     if (!state || !state->config) {
         return 0;
@@ -1201,11 +987,11 @@ const void* bpf_capsule_memory_start(const struct bpf_capsule* capsule) {
     // would hold, and (once the object is initialized) a pointer the host
     // can dereference through its own arena mapping.
     if (state->arena_control) {
-        return (const void*)state->arena_control->virtual_base;
+        return (void*)state->arena_control->virtual_base;
     }
     // Fixed tier: capsule pointers are base + offset and this is that base
     // (the window bpf_capsule_configure() reserved and baked).
-    return (const void*)state->config->memory_view_base;
+    return (void*)state->config->memory_view_base;
 }
 
 // The reserved prefix opens the heap: staging input there keeps it out of

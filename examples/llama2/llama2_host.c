@@ -283,10 +283,7 @@ int main(int argc, char** argv) {
 
     volatile struct llama2_bpf_ctrl* control = LLAMA_CONTROL(skeleton);
     unsigned char* model_address = bpf_capsule_memory_reserved_start(&capsule);
-    if (bpf_capsule_memcpy(&capsule, model_address, model, model_size)) {
-        fprintf(stderr, "cannot stage model: %s\n", strerror(errno));
-        goto cleanup;
-    }
+    memcpy(model_address, model, model_size);
     control->model = model_address;
     control->model_size = model_size;
     control->requested_tokens = tokens;

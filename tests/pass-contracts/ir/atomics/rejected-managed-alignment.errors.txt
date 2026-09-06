@@ -1,0 +1,1 @@
+bpf-validate-atomics: Capsule atomic add i64 in managed has no exact lowering for this target

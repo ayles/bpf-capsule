@@ -214,7 +214,8 @@ int main(int argc, char** argv) {
     }
     control->script = bpf_capsule_memory_reserved_start(&capsule);
     control->script_size = source_size;
-    if (bpf_capsule_memcpy(&capsule, control->script, source, source_size) || initialize_states(object, control, &initialization_drains)) {
+    memcpy(control->script, source, source_size);
+    if (initialize_states(object, control, &initialization_drains)) {
         fprintf(stderr, "cannot stage Lua XDP observer: %s\n", strerror(errno));
         goto cleanup;
     }

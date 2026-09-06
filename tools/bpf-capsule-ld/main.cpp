@@ -78,7 +78,7 @@ cl::list<std::string> InputFilenames(cl::Positional, cl::desc("<input .bc/.ll/.m
 cl::opt<std::string> OutputFilename("o", cl::desc("Output BPF object"), cl::value_desc("file"), cl::Required, cl::cat(LinkerCategory));
 cl::opt<bool> Freplace("freplace", cl::desc("Embed physical managed step roots as freplace programs"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<bool> ManagedAtomics(
-    "managed-atomics", cl::desc("Target supports scalar C atomics in Capsule-managed memory"), cl::init(false), cl::cat(LinkerCategory));
+    "managed-atomics", cl::desc("Enable full BPF atomics and scalar C atomics in Capsule memory"), cl::init(false), cl::cat(LinkerCategory));
 // FiberStack registers and validates the public option. Its value is read by
 // the pre-scan below because it determines flags injected into LLVM's parse.
 cl::opt<unsigned> FiberStack(
@@ -176,7 +176,7 @@ std::string capsuleFinalPipeline() {
     if (arena && !NativeArenaSignedLoads) {
         pipeline += "function(bpf-lower-arena-sext),";
     }
-    pipeline += "function(bpf-finalize-atomic-load-store),";
+    pipeline += ManagedAtomics || AllocatorLock == AllocatorLockMode::Atomic ? "function(bpf-finalize-atomics)," : "function(bpf-finalize-atomics-legacy),";
     if (!NativeShift63) {
         pipeline += "function(bpf-split-shift63),";
     }

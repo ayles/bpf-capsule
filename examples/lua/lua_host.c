@@ -156,10 +156,11 @@ int main(int argc, char** argv) {
     control->output.capacity = LUA_OUTPUT_BYTES;
     control->error.address = memory + error_offset;
     control->error.capacity = LUA_ERROR_BYTES;
-    if ((script_size && bpf_capsule_memcpy(&capsule, control->script.address, script, script_size)) ||
-        (input_size && bpf_capsule_memcpy(&capsule, control->input.address, input, input_size))) {
-        fprintf(stderr, "cannot stage script and stdin: %s\n", strerror(errno));
-        goto cleanup;
+    if (script_size) {
+        memcpy(control->script.address, script, script_size);
+    }
+    if (input_size) {
+        memcpy(control->input.address, input, input_size);
     }
 
     int run_fd = bpf_program__fd(skeleton->progs.lua_run);

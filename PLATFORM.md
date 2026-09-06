@@ -74,8 +74,8 @@ overlay, choose and test a bounded allocation strategy on both memory tiers;
 per-fiber ownership with remote handoff and sharded storage are candidates,
 not decisions already made.
 
-The host and guest see the same pointers, and `bpf_capsule_memcpy()` can stage
-data on either memory tier, but the host never participates in guest locking.
+The host and guest see the same pointers, and ordinary host stores or `memcpy`
+can stage data on either memory tier, but the host never participates in guest locking.
 It may prepare the initial image or inspect it while the Capsule is quiescent;
 live mutations go through a management BPF entry.
 

@@ -142,10 +142,7 @@ int main(int argc, char** argv) {
     unsigned char* input = reserved;
     unsigned char* output = reserved + output_offset;
     unsigned char* workspace = reserved + workspace_offset;
-    if (bpf_capsule_memcpy(&capsule, input, comp, clen)) {
-        fprintf(stderr, "cannot write zlib input: %s\n", strerror(errno));
-        goto cleanup;
-    }
+    memcpy(input, comp, clen);
     control->input = input;
     control->input_size = clen;
     control->output = output;

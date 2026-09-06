@@ -4,6 +4,6 @@
 #include <llvm/ADT/StringRef.h>
 #include <llvm/IR/PassManager.h>
 
-// Two passes share one file because bpf-finalize-atomic-load-store re-checks
-// LowerAtomicsPass::IsPreservedLoadStore before stripping atomic markers.
+// These passes share one file because bpf-finalize-atomics re-checks
+// ValidateAtomicsPass::IsPreservedLoadStore before stripping atomic markers.
 bool RegisterAtomicsPasses(llvm::StringRef name, llvm::FunctionPassManager& manager);

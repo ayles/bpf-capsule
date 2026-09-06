@@ -107,16 +107,29 @@ no kernel-version table.
   MAP_FIXED at load). Guest accesses are single instructions; host access
   is plain memcpy through the same addresses.
 - **Fixed tier**: on targets without arena support, memory is stitched from
-  2MiB map-value regions: direct `.data` maps carry an 8-byte shadow suffix,
-  while each overflow ARRAY entry carries a 64KiB pad whose first 8 bytes are
-  the shadow. Unaligned loads may therefore cross a region boundary, and the
-  ARRAY stride stays page-aligned on 4KiB, 16KiB, and 64KiB hosts. Regions are
-  accessed through generated accessor subprograms that recover the offset by
-  truncation and switch on `offset >> 21`. `bpf_capsule_initialize()`
-  assembles a PROT_READ view of the regions inside the window, so
-  guest-published pointers dereference on the host as-is (writes go
-  through a helper that maintains the shadow suffix; a stray direct write
-  faults).
+  disjoint 4MiB map values. Direct `.data`/`.bss` maps hold the initialized
+  image and the start of memory; one overflow ARRAY holds the remaining
+  regions. Generated accessors recover the offset by truncation and select
+  the region with `offset >> 22`. Before routing, loads and stores whose LLVM
+  alignment is smaller than their width are split into naturally aligned
+  fragments. Each fragment selects its own map, so crossing a boundary needs
+  neither padding nor duplicated bytes. Atomics require natural alignment.
+  `bpf_capsule_configure()` requests `BPF_F_STRICT_ALIGNMENT`, including for
+  freplace extensions; the kernel exempts arena pointers from this check.
+  `bpf_capsule_initialize()` maps the regions read/write into the common
+  window. Both tiers support ordinary host dereferences and `memcpy`; the
+  caller must synchronize concurrent access to shared data.
+
+The fixed-tier linker reserves slots for the object's native maps and data
+sections, including potential fixup and constant sections, then rounds the
+remaining 64-map budget down to a power of two for direct regions.
+`--direct-map-regions=N` overrides the count within the available budget;
+explicit counts need not be powers of two.
+This is a link-time choice: the region dispatch and initialized ELF image
+depend on it. The frozen config records the count for the host and runtime;
+heap capacity is still selected at load time.
+Direct map values are allocated at load time, so using more slots also raises
+the baseline memory consumption of small fixed-tier programs.
 
 Pointer-valued initializers (a Lua function table, a static string
 pointer) cannot bake the load-time window base, so the compiler bakes bare
@@ -250,13 +263,28 @@ JITs cannot recover faults from a loop hidden inside one BPF instruction.
 Eight- and 16-bit objects update their containing word without disturbing
 neighbouring bytes. Strong loads, stores, and thread fences use an exact native
 RMW; signal fences remain compiler barriers and emit no BPF instruction.
+The final atomic pass also preserves the returned old value of relaxed RMWs:
+LLVM 23 otherwise selects some non-fetching instructions even when that value
+is used. It strengthens their IR ordering after optimization to select the
+fetching instruction.
 Sectioned map globals remain verifier-native. Target profiles add the option
 when the matching JIT supports it; a manual link must select it deliberately
 because it changes generated code and the required kernel capability. Without
 it, unsupported managed RMWs remain compile errors.
 
-The load-time contract is a 56-byte frozen `.rodata` config (magic
-`"BPCA"`, version, layout, backend, fiber geometry, the window base).
+The default linker target is conservative: fixed memory, BPF v3, a map-based
+allocator lease, and no optional JIT capabilities. Its final atomic check
+also covers native BPF functions: only relaxed, non-fetching 32/64-bit
+addition/subtraction survives without full atomic support. Selecting
+`--managed-atomics` or the atomic allocator lock explicitly requires that
+support (arm64 JITs gained it in Linux 5.18). There is no implicit lock-based
+fallback for larger objects. Host/guest atomic interoperability requires
+compatible object layout, alignment, and hardware atomic operations; private
+library locks would not synchronize the two sides.
+
+The load-time contract is a 64-byte frozen `.rodata` config (magic
+`"BPCA"`, ABI version 6, layout, backend, fiber geometry, the window base,
+and the direct-region count).
 Frozen-map reads constant-fold in the verifier, so config fields are
 load-time constants in the verified program. The active host lifecycle
 brackets libbpf's own load: `bpf_capsule_configure()` (capacities + the window)

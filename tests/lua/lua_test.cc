@@ -69,7 +69,7 @@ protected:
         Drive("lua_prepare");
         ASSERT_EQ(control_->capsule.status, (unsigned)CAPSULE_OK) << "buffer publication failed, code " << control_->capsule.code;
         ASSERT_LE(script.size(), control_->script.capacity);
-        ASSERT_EQ(bpf_capsule_memcpy(&capsule_, control_->script.address, script.data(), script.size()), 0) << strerror(errno);
+        memcpy(control_->script.address, script.data(), script.size());
         control_->script.size = script.size();
         control_->input.size = 0;
         Drive("lua_run");

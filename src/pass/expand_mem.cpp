@@ -29,7 +29,10 @@ namespace {
 
 // Emits one copy loop over [begin, end) with the given element type, in
 // ascending or descending address order. Insertion continues after the loop.
-void EmitCopyRange(IRBuilder<>& b, Type* elemType, Value* dst, Value* src, Value* begin, Value* end, uint64_t step, bool isVolatile, bool descending) {
+// Word offsets are multiples of eight in both directions; preserve the original
+// pointer alignment, capped by the step. Byte tails have only byte alignment.
+void EmitCopyRange(IRBuilder<>& b, Type* elemType, Value* dst, Value* src, Value* begin, Value* end, uint64_t step, bool isVolatile, bool descending,
+    Align dstAlign, Align srcAlign) {
     LLVMContext& ctx = b.getContext();
     Function* func = b.GetInsertBlock()->getParent();
     auto* i64 = Type::getInt64Ty(ctx);
@@ -51,8 +54,8 @@ void EmitCopyRange(IRBuilder<>& b, Type* elemType, Value* dst, Value* src, Value
 
     b.SetInsertPoint(body);
     Value* off = descending ? b.CreateSub(i, ConstantInt::get(i64, step)) : static_cast<Value*>(i);
-    auto* ld = b.CreateAlignedLoad(elemType, b.CreatePtrAdd(src, off), MaybeAlign(1), isVolatile);
-    b.CreateAlignedStore(ld, b.CreatePtrAdd(dst, off), MaybeAlign(1), isVolatile);
+    auto* ld = b.CreateAlignedLoad(elemType, b.CreatePtrAdd(src, off), std::min(srcAlign, Align(step)), isVolatile);
+    b.CreateAlignedStore(ld, b.CreatePtrAdd(dst, off), std::min(dstAlign, Align(step)), isVolatile);
     Value* next = descending ? off : b.CreateAdd(i, ConstantInt::get(i64, step));
     b.CreateBr(cond);
     i->addIncoming(descending ? end : begin, pre);
@@ -61,7 +64,7 @@ void EmitCopyRange(IRBuilder<>& b, Type* elemType, Value* dst, Value* src, Value
     b.SetInsertPoint(after, after->begin());
 }
 
-void EmitCopy(IRBuilder<>& b, Value* dst, Value* src, Value* len, bool isVolatile, bool backward) {
+void EmitCopy(IRBuilder<>& b, Value* dst, Value* src, Value* len, bool isVolatile, bool backward, Align dstAlign = Align(1), Align srcAlign = Align(1)) {
     LLVMContext& ctx = b.getContext();
     auto* i64 = Type::getInt64Ty(ctx);
     auto* i8 = Type::getInt8Ty(ctx);
@@ -71,16 +74,16 @@ void EmitCopy(IRBuilder<>& b, Value* dst, Value* src, Value* len, bool isVolatil
 
     if (backward) {
         // Highest addresses first: byte tail [wordsEnd, len) desc, then words desc.
-        EmitCopyRange(b, i8, dst, src, wordsEnd, len, 1, isVolatile, /*descending=*/true);
-        EmitCopyRange(b, i64, dst, src, zero, wordsEnd, 8, isVolatile, /*descending=*/true);
+        EmitCopyRange(b, i8, dst, src, wordsEnd, len, 1, isVolatile, /*descending=*/true, dstAlign, srcAlign);
+        EmitCopyRange(b, i64, dst, src, zero, wordsEnd, 8, isVolatile, /*descending=*/true, dstAlign, srcAlign);
     } else {
-        EmitCopyRange(b, i64, dst, src, zero, wordsEnd, 8, isVolatile, /*descending=*/false);
-        EmitCopyRange(b, i8, dst, src, wordsEnd, len, 1, isVolatile, /*descending=*/false);
+        EmitCopyRange(b, i64, dst, src, zero, wordsEnd, 8, isVolatile, /*descending=*/false, dstAlign, srcAlign);
+        EmitCopyRange(b, i8, dst, src, wordsEnd, len, 1, isVolatile, /*descending=*/false, dstAlign, srcAlign);
     }
 }
 
 // The memset twin of EmitCopyRange: one store loop over [begin, end).
-void EmitSetRange(IRBuilder<>& b, Value* dst, Value* value, Value* begin, Value* end, uint64_t step, bool isVolatile) {
+void EmitSetRange(IRBuilder<>& b, Value* dst, Value* value, Value* begin, Value* end, uint64_t step, bool isVolatile, Align dstAlign) {
     LLVMContext& ctx = b.getContext();
     Function* func = b.GetInsertBlock()->getParent();
     auto* i64 = Type::getInt64Ty(ctx);
@@ -100,7 +103,7 @@ void EmitSetRange(IRBuilder<>& b, Value* dst, Value* value, Value* begin, Value*
     b.CreateCondBr(b.CreateICmpULT(i, end), body, after);
 
     b.SetInsertPoint(body);
-    b.CreateAlignedStore(value, b.CreatePtrAdd(dst, i), MaybeAlign(1), isVolatile);
+    b.CreateAlignedStore(value, b.CreatePtrAdd(dst, i), std::min(dstAlign, Align(step)), isVolatile);
     auto* next = b.CreateAdd(i, ConstantInt::get(i64, step));
     b.CreateBr(cond);
     i->addIncoming(begin, pre);
@@ -109,13 +112,13 @@ void EmitSetRange(IRBuilder<>& b, Value* dst, Value* value, Value* begin, Value*
     b.SetInsertPoint(after, after->begin());
 }
 
-void EmitSet(IRBuilder<>& b, Value* dst, Value* value, Value* length, bool isVolatile) {
+void EmitSet(IRBuilder<>& b, Value* dst, Value* value, Value* length, bool isVolatile, Align dstAlign = Align(1)) {
     auto* i64 = Type::getInt64Ty(b.getContext());
     auto* byte = b.CreateZExtOrTrunc(value, Type::getInt8Ty(b.getContext()));
     auto* word = b.CreateMul(b.CreateZExt(byte, i64), ConstantInt::get(i64, 0x0101010101010101ull));
     auto* wordsEnd = b.CreateMul(b.CreateUDiv(length, ConstantInt::get(i64, 8)), ConstantInt::get(i64, 8));
-    EmitSetRange(b, dst, word, ConstantInt::get(i64, 0), wordsEnd, 8, isVolatile);
-    EmitSetRange(b, dst, byte, wordsEnd, length, 1, isVolatile);
+    EmitSetRange(b, dst, word, ConstantInt::get(i64, 0), wordsEnd, 8, isVolatile, dstAlign);
+    EmitSetRange(b, dst, byte, wordsEnd, length, 1, isVolatile, dstAlign);
 }
 
 class ExpandMemPass : public PassInfoMixin<ExpandMemPass> {
@@ -224,15 +227,18 @@ public:
                     Instruction* elseTerm = nullptr;
                     SplitBlockAndInsertIfThenElse(isBackward, inst->getIterator(), &thenTerm, &elseTerm);
                     IRBuilder<> bt(thenTerm);
-                    EmitCopy(bt, mt->getRawDest(), mt->getRawSource(), len, mt->isVolatile(), /*backward=*/true);
+                    EmitCopy(bt, mt->getRawDest(), mt->getRawSource(), len, mt->isVolatile(), /*backward=*/true, mt->getDestAlign().valueOrOne(),
+                        mt->getSourceAlign().valueOrOne());
                     IRBuilder<> be(elseTerm);
-                    EmitCopy(be, mt->getRawDest(), mt->getRawSource(), len, mt->isVolatile(), /*backward=*/false);
+                    EmitCopy(be, mt->getRawDest(), mt->getRawSource(), len, mt->isVolatile(), /*backward=*/false, mt->getDestAlign().valueOrOne(),
+                        mt->getSourceAlign().valueOrOne());
                 } else {
-                    EmitCopy(b, mt->getRawDest(), mt->getRawSource(), len, mt->isVolatile(), /*backward=*/false);
+                    EmitCopy(b, mt->getRawDest(), mt->getRawSource(), len, mt->isVolatile(), /*backward=*/false, mt->getDestAlign().valueOrOne(),
+                        mt->getSourceAlign().valueOrOne());
                 }
             } else if (auto* ms = dyn_cast<MemSetInst>(inst)) {
                 Value* len = b.CreateZExtOrTrunc(ms->getLength(), i64);
-                EmitSet(b, ms->getRawDest(), ms->getValue(), len, ms->isVolatile());
+                EmitSet(b, ms->getRawDest(), ms->getValue(), len, ms->isVolatile(), ms->getDestAlign().valueOrOne());
             } else if (auto* call = dyn_cast<CallInst>(inst)) {
                 Function* callee = call->getCalledFunction();
                 Value* dst = call->getArgOperand(0);

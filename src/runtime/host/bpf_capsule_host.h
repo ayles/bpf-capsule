@@ -38,10 +38,9 @@ int bpf_capsule_initialize(struct bpf_capsule* capsule);
 int bpf_capsule_attach_freplace(struct bpf_capsule* capsule, const void* object_data, size_t object_size);
 int bpf_capsule_release(struct bpf_capsule* capsule);
 
-// Checked copies across a Capsule boundary. The Capsule side is inferred from
-// the pointers; writes also maintain the fixed backend's boundary shadows.
-int bpf_capsule_memcpy(const struct bpf_capsule* capsule, void* destination, const void* source, size_t size);
-const void* bpf_capsule_memory_start(const struct bpf_capsule* capsule);
+// After initialization, Capsule pointers can be read and written directly on
+// either memory tier. Synchronize access to data shared with running BPF code.
+void* bpf_capsule_memory_start(const struct bpf_capsule* capsule);
 uint64_t bpf_capsule_memory_size(const struct bpf_capsule* capsule);
 void* bpf_capsule_memory_reserved_start(const struct bpf_capsule* capsule);
 uint64_t bpf_capsule_memory_reserved_size(const struct bpf_capsule* capsule);

@@ -177,10 +177,6 @@ TEST(HostLifetime, EmptyAndRepeatedRelease) {
     errno = 0;
     EXPECT_EQ(bpf_capsule_initialize(&capsule), -1);
     EXPECT_EQ(errno, EINVAL);
-    unsigned char byte = 0;
-    errno = 0;
-    EXPECT_EQ(bpf_capsule_memcpy(&capsule, &byte, &byte, 1), -1);
-    EXPECT_EQ(errno, EINVAL);
     EXPECT_EQ(bpf_capsule_memory_start(&capsule), nullptr);
     EXPECT_EQ(bpf_capsule_memory_size(&capsule), 0u);
 }
@@ -193,6 +189,7 @@ TEST(HostAbi, ConfigurationPlanner) {
     config.stack_bytes_per_fiber = 0x40000;
     config.max_fibers = 4;
     config.arena_image_pages = 1;
+    config.direct_memory_regions = 32;
     config.abi_magic = BPF_CAPSULE_ABI_MAGIC;
     config.abi_version = BPF_CAPSULE_ABI_VERSION;
 
@@ -238,6 +235,7 @@ TEST(HostAbi, ConfigurationPlanner) {
     full.stack_bytes_per_fiber = 0x40000;
     full.max_fibers = 8;
     full.arena_image_pages = 1;
+    full.direct_memory_regions = 32;
     full.abi_magic = BPF_CAPSULE_ABI_MAGIC;
     full.abi_version = BPF_CAPSULE_ABI_VERSION;
     struct bpf_capsule_config fills_address_space = {};

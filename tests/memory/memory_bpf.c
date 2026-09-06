@@ -45,9 +45,8 @@ static void memory_verify_body(void) {
     };
     unsigned char* heap = capsule_heap_start();
     volatile struct memory_unaligned_word* word = (void*)(heap + offset + 1);
-    // Preserve an unaligned word in place. Besides checking behavior, this
-    // retains the dynamic u64 load/store accessors whose emitted instruction
-    // width is enforced by verify-width.cmake.
+    // Preserve an unaligned word in place; fixed memory must split this into
+    // naturally aligned fragments before choosing their backing maps.
     uint64_t preserved = word->value;
     word->value = preserved;
     for (unsigned int index = 0; index < MEMORY_TEST_PROBE_BYTES; ++index) {

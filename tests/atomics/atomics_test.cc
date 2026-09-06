@@ -4,6 +4,8 @@
 // stays tearing-free across widths under a concurrent writer/reader pair.
 #include "capsule_gtest.h"
 
+#include <algorithm>
+
 #include "bpf_capsule_host.h"
 #include "native.h"
 #include "atomics.skel.h"
@@ -104,11 +106,12 @@ TEST(Atomics, NativeAndManaged) {
     struct bpf_capsule_config config = {};
     config.fiber_count = kThreads;
 #if BPF_CAPSULE_TEST_MANAGED_RMW
-    // Put one target beyond the 32 directly addressed fixed-map regions so
+    // Put one target beyond the directly addressed fixed-map regions so
     // the same test executes the overflow ARRAY atomic accessors. Arena
     // profiles use the identical logical address.
-    config.heap_bytes = 68ull << 20;
-    config.reserved_bytes = 66ull << 20;
+    const unsigned direct_regions = std::max<uint64_t>(2, skeleton->rodata_bpfconfig->bpf_capsule_config.direct_memory_regions);
+    config.heap_bytes = (uint64_t)(direct_regions + 2) * BPF_CAPSULE_MEMORY_REGION_SIZE;
+    config.reserved_bytes = (uint64_t)(direct_regions + 1) * BPF_CAPSULE_MEMORY_REGION_SIZE;
 #else
     config.heap_bytes = 4ull << 20;
 #endif
@@ -156,6 +159,11 @@ TEST(Atomics, NativeAndManaged) {
     EXPECT_EQ(managed->reader_failures, 0u) << "torn managed atomic observed: 0x" << std::hex << managed->reader_failures;
 
 #if BPF_CAPSULE_TEST_MANAGED_RMW
+    struct bpf_test_run_opts fetched = {};
+    fetched.sz = sizeof(fetched);
+    ASSERT_EQ(capsule_test_run(bpf_program__fd(skeleton->progs.atomic_runtime_fetch), &fetched), 0);
+    EXPECT_EQ(fetched.retval, 0u) << "relaxed native fetch returned the operand instead of the old value";
+
     ASSERT_EQ(capsule_test_run_program(skeleton->obj, "atomic_managed_rmw"), 0) << strerror(errno);
     EXPECT_EQ(managed->rmw_status, (unsigned)CAPSULE_OK);
     EXPECT_EQ(managed->rmw_code, 0);
@@ -171,9 +179,9 @@ TEST(Atomics, NativeAndManaged) {
     EXPECT_EQ(managed->counter_code, 0);
     EXPECT_EQ(managed->counter_value, (uint64_t)kThreads * kIterations);
 
-    unsigned char* overflow = (unsigned char*)bpf_capsule_memory_start(&capsule) + (64ull << 20);
+    unsigned char* overflow = (unsigned char*)bpf_capsule_memory_start(&capsule) + (uint64_t)direct_regions * BPF_CAPSULE_MEMORY_REGION_SIZE;
     unsigned char initial[16] = {};
-    ASSERT_EQ(bpf_capsule_memcpy(&capsule, overflow, &initial, sizeof(initial)), 0) << strerror(errno);
+    memcpy(overflow, &initial, sizeof(initial));
     managed->overflow_address = (uintptr_t)overflow;
     ASSERT_EQ(capsule_test_run_program(skeleton->obj, "atomic_managed_overflow"), 0) << strerror(errno);
     EXPECT_EQ(managed->overflow_status, (unsigned)CAPSULE_OK);

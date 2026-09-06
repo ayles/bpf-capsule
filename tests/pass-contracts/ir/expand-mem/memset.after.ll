@@ -39,6 +39,41 @@ set.after1:                                       ; preds = %set.cond2
   ret void
 }
 
+define void @fill_aligned(ptr %destination, i8 %byte) {
+entry:
+  %0 = zext i8 %byte to i64
+  %1 = mul i64 %0, 72340172838076673
+  br label %set.cond
+
+set.cond:                                         ; preds = %set.body, %entry
+  %set.i = phi i64 [ 0, %entry ], [ %4, %set.body ]
+  %2 = icmp ult i64 %set.i, 16
+  br i1 %2, label %set.body, label %set.after
+
+set.body:                                         ; preds = %set.cond
+  %3 = getelementptr i8, ptr %destination, i64 %set.i
+  store volatile i64 %1, ptr %3, align 8
+  %4 = add i64 %set.i, 8
+  br label %set.cond
+
+set.after:                                        ; preds = %set.cond
+  br label %set.cond2
+
+set.cond2:                                        ; preds = %set.body3, %set.after
+  %set.i4 = phi i64 [ 16, %set.after ], [ %7, %set.body3 ]
+  %5 = icmp ult i64 %set.i4, 19
+  br i1 %5, label %set.body3, label %set.after1
+
+set.body3:                                        ; preds = %set.cond2
+  %6 = getelementptr i8, ptr %destination, i64 %set.i4
+  store volatile i8 %byte, ptr %6, align 1
+  %7 = add i64 %set.i4, 1
+  br label %set.cond2
+
+set.after1:                                       ; preds = %set.cond2
+  ret void
+}
+
 ; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: write)
 declare void @llvm.memset.p0.i64(ptr writeonly captures(none), i8, i64, i1 immarg) #0
 

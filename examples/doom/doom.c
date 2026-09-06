@@ -198,35 +198,16 @@ static void print_frame_stats(struct frame_samples* samples) {
         samples->ns[last] / 1e6);
 }
 
-static int import_wad(FILE* file, const struct bpf_capsule* capsule, unsigned char* destination, size_t size) {
-    unsigned char* buffer = malloc(1u << 20);
-    if (!buffer) {
-        perror("WAD import");
-        return -1;
+static int import_wad(FILE* file, unsigned char* destination, size_t size) {
+    if (fread(destination, 1, size, file) == size) {
+        return 0;
     }
-    for (size_t offset = 0; offset < size;) {
-        size_t part = size - offset;
-        if (part > (1u << 20)) {
-            part = 1u << 20;
-        }
-        if (fread(buffer, 1, part, file) != part) {
-            if (ferror(file)) {
-                perror("WAD read");
-            } else {
-                fprintf(stderr, "WAD changed while it was being read\n");
-            }
-            free(buffer);
-            return -1;
-        }
-        if (bpf_capsule_memcpy(capsule, destination + offset, buffer, part)) {
-            perror("WAD import");
-            free(buffer);
-            return -1;
-        }
-        offset += part;
+    if (ferror(file)) {
+        perror("WAD read");
+    } else {
+        fprintf(stderr, "WAD changed while it was being read\n");
     }
-    free(buffer);
-    return 0;
+    return -1;
 }
 
 // doom_key_t values, from DOOM.h. Enter is accepted as both CR and LF: the
@@ -385,7 +366,7 @@ int main(int argc, char** argv) {
     stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
     ctrl->wad = bpf_capsule_memory_reserved_start(&capsule);
     ctrl->wad_size = wad_size;
-    if (import_wad(wad, &capsule, ctrl->wad, (size_t)wad_size)) {
+    if (import_wad(wad, ctrl->wad, (size_t)wad_size)) {
         goto cleanup;
     }
     int wad_close_error = fclose(wad);

@@ -9,7 +9,7 @@
 // Application code includes bpf_capsule.h or bpf_capsule_host.h instead.
 
 #define BPF_CAPSULE_ABI_MAGIC 0x42504341u /* "BPCA" */
-#define BPF_CAPSULE_ABI_VERSION 5u
+#define BPF_CAPSULE_ABI_VERSION 6u
 
 // This discriminator makes mismatched objects and loaders fail explicitly;
 // it is not a pre-1.0 stability promise. An incompatible layout change bumps
@@ -39,14 +39,9 @@
 
 // ------------------------------------------------------------- object layout
 
-#define BPF_CAPSULE_MEMORY_REGION_SHIFT 21u
+#define BPF_CAPSULE_MEMORY_REGION_SHIFT 22u
 #define BPF_CAPSULE_MEMORY_REGION_SIZE (1u << BPF_CAPSULE_MEMORY_REGION_SHIFT)
-// Fixed-tier overflow ARRAY values carry the region plus this pad so the
-// per-entry stride is page-aligned on 4K/16K/64K hosts and each entry can
-// be mapped individually into the contiguous host view. The first eight pad
-// bytes are the cross-region shadow suffix; the rest is dead space (~3%).
-#define BPF_CAPSULE_MEMORY_REGION_PAD 65536u
-#define BPF_CAPSULE_DIRECT_MEMORY_REGIONS 32u
+#define BPF_CAPSULE_MAX_DIRECT_MEMORY_REGIONS 63u
 #define BPF_CAPSULE_ARENA_PAGE_SHIFT 12u
 #define BPF_CAPSULE_ARENA_PAGE_SIZE (1u << BPF_CAPSULE_ARENA_PAGE_SHIFT)
 #define BPF_CAPSULE_MAX_ARENA_PAGES (1u << (32u - BPF_CAPSULE_ARENA_PAGE_SHIFT))
@@ -152,6 +147,9 @@ struct __bpf_capsule_object_config {
     // pointers are memory_view_base + displacement on both tiers; the
     // verifier folds the frozen read, so the guest pays no runtime lookup.
     uintptr_t memory_view_base;
+    // Link-time choice: each direct region consumes one verifier map slot.
+    // Zero on the arena tier; the remaining fixed regions share one ARRAY.
+    uint64_t direct_memory_regions;
 };
 
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_object_config, heap_base) == 0, "object config heap_base ABI");
@@ -167,6 +165,7 @@ __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_object_config, 
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_object_config, abi_magic) == 40, "object config abi_magic ABI");
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_object_config, abi_version) == 44, "object config abi_version ABI");
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_object_config, memory_view_base) == 48, "object config memory_view_base ABI");
-__BPF_CAPSULE_ABI_ASSERT(sizeof(struct __bpf_capsule_object_config) == 56, "object config size ABI");
+__BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_object_config, direct_memory_regions) == 56, "direct region count ABI");
+__BPF_CAPSULE_ABI_ASSERT(sizeof(struct __bpf_capsule_object_config) == 64, "object config size ABI");
 
 #undef __BPF_CAPSULE_ABI_ASSERT
