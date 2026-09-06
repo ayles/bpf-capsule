@@ -366,14 +366,12 @@ __BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((used, always_inline)
 // generated physical-step argument, not durable global state. Stackify removes
 // every call before BPF emission. Native wrappers inspect a chosen fiber with
 // the explicit accessors below.
-// Internal users have already established ownership. Keep the fallback only
-// to give old verifiers an obviously bounded data-map index; no public
-// operation reaches it with an invalid ID.
+// Internal users have already established ownership. Normalize arithmetically
+// so old verifiers see the bound on the very register used for indexing;
+// a compare/select can bound a different copy after instruction selection.
+// This is identity for valid IDs, like Stackify's NormalizeFiber.
 static __attribute__((always_inline)) struct __bpf_capsule_fiber_control* __bpf_capsule_fiber_control(uint32_t fiber) {
-    if (fiber >= BPF_CAPSULE_MAX_FIBERS) {
-        fiber = 0;
-    }
-    return &bpf_capsule_fibers[fiber];
+    return &bpf_capsule_fibers[fiber % BPF_CAPSULE_MAX_FIBERS];
 }
 
 // --------------------------------------------------------------- fiber pool
