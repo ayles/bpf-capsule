@@ -5,27 +5,18 @@ For a reader who knows x86-64 and eBPF but nothing about Capsule.
 ## The problem, and the one idea
 
 The eBPF verifier admits a program only if it can statically prove termination
-and memory safety: ~1M verified instructions of exploration budget, an
-8192-jump bound per explored path, 512 bytes of stack for the whole call
-chain, 8 call frames, 256 subprograms per object, no unbounded loops, and
-every pointer typed and bounds-proven. Programs such as Lua, SQLite, zlib,
-and Doom exceed several of these limits at once.
+and memory safety. Capsule targets the limits of its oldest supported kernels:
+~1M instructions of exploration budget, an 8192-jump bound per explored path,
+512 bytes of stack for the whole call chain, 8 call frames, 256 subprograms per
+loaded program, no unbounded loops, and every pointer typed and bounds-proven.
+Programs such as Lua, SQLite, zlib, and Doom exceed several limits at once.
 
-Capsule applies the idea an OS uses to run indefinite processes on finite
-hardware: don't make the artifact unbounded — make a bounded step, and
-repeat it. The compiler transforms the whole program into bounded regions
-plus persistent state that records "where was I". Execution runs one region,
-stores the resume point, and returns; a driver re-enters for the next region.
-The verifier sees only bounded paths through this machinery. Unboundedness
-lives in repetition — inside one BPF invocation through constant-bound driver
-loops, and across invocations through host-resumable continuations. In compiler
-terms it is a
-whole-program continuation-passing/coroutine transform with the
-continuation stored in memory instead of on a call stack.
-
-Everything else — the ABI, fibers, the software stack, the memory model —
-is the machinery that makes this transform correct, fast, and loadable
-through ordinary libbpf.
+The compiler transforms the whole program into bounded regions and persistent
+state. Each region stores its resume point and returns to a bounded driver,
+which enters the next region. Repetition happens inside one BPF invocation
+through constant-bound driver loops and, when those end, across invocations
+through continuations. Source-level call depth and loop counts therefore do
+not become verifier call depth or unbounded BPF loops.
 
 ## Two worlds and the boundary
 
@@ -61,29 +52,25 @@ computation such as llama2 outlives one invocation.
 
 ## One window, one pointer representation
 
-Before load, `bpf_capsule_configure()` — mandatory on every tier —
-reserves the object's **memory window**: one PROT_NONE, 4GiB-aligned span
-of address space covering a full 32-bit offset domain plus a small code
-tail above it. Its base is baked into the object's frozen config, where
-the guest's first-entry check demands it (loading without a capsule-aware
-host does not run), and where the verifier constant-folds every read of
-it.
+Before load, `bpf_capsule_configure()` reserves a 4GiB-aligned **memory
+window**, initially PROT_NONE, with a small code-identity tail above the data
+span. Its base becomes a frozen config value that the verifier constant-folds.
+Every Capsule pointer is `window + displacement`, with the same value in BPF
+and userspace:
 
-Every capsule pointer on both tiers is `window + displacement` — the same
-bits in the guest, in the verifier's constant tracking, and in the host
-process:
-
-- data lives in the window's first 4GiB: heap at `heap_base`, then the
-  per-fiber stack bank, slice-aligned so frame math can mask;
+- data lives in the first 4GiB: relocated globals, the heap at `heap_base`,
+  then the per-fiber stack bank, slice-aligned so frame math can mask;
 - code lives just above it: a managed function's address is
   `window + 4GiB + entry-pc`, non-managed function identities follow in
   the next 1MiB. Code and data cannot collide as 64-bit values, and since
   the window is 4GiB-aligned, an indirect call recovers the entry pc by
   truncating the token to its low word — free in BPF, whose 32-bit ALU
   zero-extends;
-- `NULL` is 0, far outside the window; the window's first page and its
-  entire unbacked remainder are PROT_NONE, so a stray dereference of any
-  capsule-shaped pointer faults instead of aliasing unrelated memory.
+- `NULL` is 0, outside the window. The first page and unbacked remainder stay
+  PROT_NONE, so host accesses to those addresses fault.
+
+Explicitly sectioned globals retain their native BPF maps instead of moving
+into this window; they can be shared with ordinary BPF code.
 
 The two tiers differ only in what backs the window. Availability is a property
 of both the kernel and its JIT: x86-64 gained arena support in Linux 6.9 and
@@ -102,42 +89,39 @@ Nix maps these kernel/JIT profiles to explicit linker capabilities in
 [`nix/target-profile.nix`](nix/target-profile.nix); the compiler drivers contain
 no kernel-version table.
 
-- **Arena tier**: the window becomes the arena's
-  kernel-pinned `user_vm_start` (libbpf maps the arena into it with
-  MAP_FIXED at load). Guest accesses are single instructions; host access
-  is plain memcpy through the same addresses.
+- **Arena tier**: libbpf maps the arena at the window base with MAP_FIXED;
+  the kernel records it as `user_vm_start`. Guest memory accesses use arena
+  instructions.
 - **Fixed tier**: on targets without arena support, memory is stitched from
   disjoint 4MiB map values. Direct `.data`/`.bss` maps hold the initialized
   image and the start of memory; one overflow ARRAY holds the remaining
   regions. Generated accessors recover the offset by truncation and select
   the region with `offset >> 22`. Before routing, loads and stores whose LLVM
   alignment is smaller than their width are split into naturally aligned
-  fragments. Each fragment selects its own map, so crossing a boundary needs
-  neither padding nor duplicated bytes. Atomics require natural alignment.
-  `bpf_capsule_configure()` requests `BPF_F_STRICT_ALIGNMENT`, including for
-  freplace extensions; the kernel exempts arena pointers from this check.
-  `bpf_capsule_initialize()` maps the regions read/write into the common
-  window. Both tiers support ordinary host dereferences and `memcpy`; the
-  caller must synchronize concurrent access to shared data.
+  fragments, each routed to its own map. These transformations trust LLVM's
+  alignment claims; falsely claiming a stronger alignment is undefined
+  behavior, not a runtime-checked error.
 
-The fixed-tier linker reserves slots for the object's native maps and data
-sections, including potential fixup and constant sections, then rounds the
-remaining 64-map budget down to a power of two for direct regions.
-`--direct-map-regions=N` overrides the count within the available budget;
-explicit counts need not be powers of two.
-This is a link-time choice: the region dispatch and initialized ELF image
-depend on it. The frozen config records the count for the host and runtime;
-heap capacity is still selected at load time.
-Direct map values are allocated at load time, so using more slots also raises
-the baseline memory consumption of small fixed-tier programs.
+Both tiers expose the same writable pages to host and guest after
+`bpf_capsule_initialize()`. Ordinary dereferences and `memcpy` work on either
+side; concurrent access needs synchronization. The loader requests
+`BPF_F_STRICT_ALIGNMENT` for every program, including native entry code and
+freplace extensions. The verifier must prove alignment for non-arena accesses;
+arena pointers are exempt. Atomics still require natural alignment.
 
-Pointer-valued initializers (a Lua function table, a static string
-pointer) cannot bake the load-time window base, so the compiler bakes bare
-displacements and the mandatory post-load verb rebases them: the arena's
-generated init program applies its fixup list in-kernel, and the fixed
-tier ships a `.rodata.bpffix` slot table that `bpf_capsule_initialize()`
-applies from the host before publishing a ready word — entries fail
-closed on both tiers until initialization has run.
+The direct-map count is fixed at link time and recorded in the config.
+After reserving slots for other maps and data sections, the linker rounds the
+remaining 64-map budget down to a power of two. Usually this selects 32 direct
+maps, allocating **128MiB at load even for a small heap**; overflow ARRAY
+storage scales with the configured heap and fiber stacks.
+`--direct-map-regions=N` can reduce that baseline or choose any count within
+the available budget. More direct memory avoids ARRAY lookups for accesses
+in that range; heap capacity remains a separate load-time choice.
+
+Pointer initializers are stored as displacements until initialization rebases
+them. The arena initializer applies fixups in BPF; on fixed memory the host
+uses the `.rodata.bpffix` table. Neither tier runs application code before
+initialization publishes readiness.
 
 ## The machine model: a fiber is the CPU you don't have
 
@@ -157,19 +141,12 @@ struct __bpf_capsule_fiber_control {
 };
 ```
 
-The execution register file is `pc`, `sp`, and `fp`; the remaining fields
-belong to lifecycle and continuation handling. The PC is a dense
-compiler-assigned resume-point index, never an address, and doubles as the
-lifecycle word. `pc == 0` means that a fiber is idle, so a fresh zero-filled
-map is already a valid pool, while `BPF_CAPSULE_PC_DONE` marks a computation
-complete but not yet reaped. `sp` and `fp` hold full based pointers — the same
-representation everything else uses; the frame anchor on the arena tier is one
-`inttoptr` of the loaded `fp`. `{status, code}` is the terminal event:
-exits and yields publish both fields with one 64-bit store, and every
-legal reader is ordered behind that store by program order or by the
-continuation claim. Each fiber owns a fixed power-of-two slice of the
-stack bank; multiple fibers are concurrent computations over one shared
-heap, recycled through a pool.
+`pc` is a dense compiler-assigned resume-point index, not an instruction
+address. It also records lifecycle: 0 means idle, `BPF_CAPSULE_PC_DONE` means
+complete but not yet reaped. `sp` and `fp` are full pointers into the fiber's
+power-of-two stack slice. Exits and yields publish `{status, code}` with one
+64-bit store; readers follow it through program order or the continuation
+claim. Fibers have separate stacks but share globals and the heap.
 
 ## The managed ABI
 
@@ -253,34 +230,28 @@ other libc APIs with implicit process-global state retain Picolibc's
 single-threaded contract and cannot be shared concurrently across fibers. The
 default platform has no environment or timezone database, so local time is UTC.
 
-On profiles whose kernel JIT supports the complete v3 atomic set,
-`--managed-atomics` extends this model to supported scalar C11 atomics in
-managed memory. Naturally aligned 32- and 64-bit add, exchange,
-compare-exchange, and fixed-memory bitwise operations become native BPF
-atomics after address routing; subtraction becomes addition. Fetched bitwise
-operations in arena memory use explicit compare-exchange loops because some
-JITs cannot recover faults from a loop hidden inside one BPF instruction.
-Eight- and 16-bit objects update their containing word without disturbing
-neighbouring bytes. Strong loads, stores, and thread fences use an exact native
-RMW; signal fences remain compiler barriers and emit no BPF instruction.
-The final atomic pass also preserves the returned old value of relaxed RMWs:
-LLVM 23 otherwise selects some non-fetching instructions even when that value
-is used. It strengthens their IR ordering after optimization to select the
-fetching instruction.
-Sectioned map globals remain verifier-native. Target profiles add the option
-when the matching JIT supports it; a manual link must select it deliberately
-because it changes generated code and the required kernel capability. Without
-it, unsupported managed RMWs remain compile errors.
+The bare linker defaults are fixed memory, BPF v3, and a map-based allocator
+lease. Native read-modify-write operations are limited to relaxed,
+non-fetching 32/64-bit add/subtract. `--managed-atomics` enables full BPF atomics
+and supported scalar C11 atomics in Capsule memory; Nix selects it for x86-64
+and for arm64 from Linux 5.18. Selecting `--allocator-lock=atomic` also requires
+a JIT with compare-exchange support.
 
-The default linker target is conservative: fixed memory, BPF v3, a map-based
-allocator lease, and no optional JIT capabilities. Its final atomic check
-also covers native BPF functions: only relaxed, non-fetching 32/64-bit
-addition/subtraction survives without full atomic support. Selecting
-`--managed-atomics` or the atomic allocator lock explicitly requires that
-support (arm64 JITs gained it in Linux 5.18). There is no implicit lock-based
-fallback for larger objects. Host/guest atomic interoperability requires
-compatible object layout, alignment, and hardware atomic operations; private
-library locks would not synchronize the two sides.
+Managed 32/64-bit add, exchange, compare-exchange, and fixed-tier AND/OR/XOR
+operations use BPF atomics after address routing; subtraction becomes addition.
+NAND and arena bitwise operations use explicit compare-exchange loops; arena
+loops avoid JIT fault-recovery restrictions on fetched bitwise instructions.
+Eight- and 16-bit RMWs use the containing word while preserving neighbouring
+bytes. Sectioned globals reject sub-word RMWs and loads/stores stronger than
+relaxed.
+Acquire/release and sequentially consistent accesses, plus thread fences, use
+native RMWs; signal fences emit no instruction.
+The final pass preserves fetch results by strengthening used relaxed RMWs
+after optimization, avoiding LLVM 23's non-fetching instruction selection.
+
+All atomic accesses require natural alignment. There is no lock-based fallback
+for objects wider than 64 bits. Host/guest interoperability requires matching
+object layouts and compatible hardware atomics, not separate library locks.
 
 The load-time contract is a 64-byte frozen `.rodata` config (magic
 `"BPCA"`, ABI version 6, layout, backend, fiber geometry, the window base,
@@ -300,19 +271,18 @@ immediately before libbpf destroys the object.
 `bpf-capsule-ld` resolves the complete application, runtime, and referenced
 Picolibc archive members, then performs six logical phases:
 
-1. **Normalize the source ABI.** Variadics and aggregate returns become
-   explicit memory operations. `capsule_call`, exits, atomics, unsupported
-   i128 operations, and floating point are lowered or validated before LLVM
-   can optimize across their boundaries.
+1. **Normalize the source ABI.** Aggregate returns, `capsule_call`, exits,
+   unsupported i128 operations, and floating point are lowered. Supported
+   atomics retain their original semantics through whole-program optimization.
 2. **Optimize the whole program.** The native and managed domains are checked,
    suspension barriers bracket ordinary LLVM O2, and the call graph is checked
    again after optimization has reshaped it. If O2 introduces another library
    call, the required archive member is resolved and this preparation is
    repeated from the untouched linked module before region formation.
 3. **Expose verifier-scale work.** Large memory operations become bounded
-   loops, irreducible control flow is normalized, and Stackify turns managed
-   calls, returns, yields, and unsuitable loop backedges into regions with
-   persistent resume state.
+   loops and managed atomics receive their target lowering. Stackify lays out
+   arguments (including variadics) and turns calls, returns, yields, and
+   unsuitable loop backedges into regions with persistent resume state.
 4. **Clean the generated machine.** A narrow cleanup pass removes redundant
    state traffic introduced by Stackify, repairs irreducible control flow, and
    gives every otherwise undefined terminal value a deterministic form.

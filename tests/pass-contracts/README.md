@@ -26,6 +26,5 @@ MIR cases are parsed, transformed, and printed by `bpf-capsule-ld` with the
 same `-run-pass` and `-simplify-mir` interface as LLVM's `llc`. There is no
 test-only pass module or duplicated registration path.
 
-`machine-pipeline` fixtures use the linker's static relocation model. It lets
-LLVM reuse the loaded jump-table address in `jump-table-locality` and
-`hierarchy-rehash`; an expectation containing a second address load is stale.
+`machine-pipeline` fixtures use the same static relocation model as normal
+output; `jump-table-locality` and `hierarchy-rehash` pin jump-table address reuse.

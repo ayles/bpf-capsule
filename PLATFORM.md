@@ -6,15 +6,10 @@ planned, not part of the public API yet.
 
 ## Goal
 
-Capsule should optionally provide enough of a small Unix-like environment to
-run existing libraries without a custom adapter for every program. The useful
-part is not POSIX conformance; it is ordinary C interfaces backed by resources
-that make sense inside BPF.
-
-The local implementation must neither delegate work to userspace nor
-explicitly suspend the current fiber. A separate proxy may suspend a fiber
-while userspace performs genuinely external work, but linking the local
-platform must never introduce such a transition.
+Provide optional Unix-like services so existing libraries need fewer custom
+adapters. This is not a promise of POSIX conformance. Local operations must
+neither delegate work to userspace nor explicitly suspend the fiber; external
+work belongs to a separately selected proxy.
 
 WASI is a useful guide to the boundaries: filesystem, descriptors and streams,
 arguments and environment, clocks, random data, and sockets are independent
@@ -68,16 +63,15 @@ untouched files therefore require neither an initialization copy nor a trip to
 userspace. The same mechanism can hold a Python standard library, scripts,
 models, or application data.
 
-The VFS must not assume that the current shared TLSF heap is a suitable
-concurrent block allocator for packet-path mutations. Before implementing the
-overlay, choose and test a bounded allocation strategy on both memory tiers;
-per-fiber ownership with remote handoff and sharded storage are candidates,
-not decisions already made.
+Before implementing the overlay, choose and test a bounded allocation strategy
+on both tiers. The current TLSF wrapper may suspend on contention; per-fiber
+ownership with remote handoff is a candidate, not a settled design.
 
-The host and guest see the same pointers, and ordinary host stores or `memcpy`
-can stage data on either memory tier, but the host never participates in guest locking.
-It may prepare the initial image or inspect it while the Capsule is quiescent;
-live mutations go through a management BPF entry.
+The host can read and write quiescent data directly on either tier. Live
+mutations need a shared synchronization protocol: compatible hardware atomics
+where supported, or a management BPF entry for guest-only map leases. BPF must
+never wait for a lock held by interrupted userspace. Direct host allocation
+is not implemented yet.
 
 stdin is either a fixed buffer or an in-memory pipe. stdout and stderr are
 bounded buffers by default, so the host can read them directly. A program may
@@ -86,11 +80,9 @@ assume that one exists.
 
 ## Selection and initialization
 
-Components are selected by linking them, not by compiler defines, linker
-feature switches, or an indirect runtime vtable. CMake should expose imported
-targets such as `BpfCapsule::vfs`; direct users pass the corresponding bitcode
-archives to `bpf-capsule-ld`. Archive extraction and whole-program DCE ensure
-that unused functions add no code.
+Select components by linking their bitcode archives, with CMake targets such
+as `BpfCapsule::vfs` for convenience. Archive extraction and whole-program DCE
+discard unused functions; no runtime vtable is needed.
 
 The current weak syscall definitions cannot stay in an always-linked module:
 they make symbols look resolved before an optional archive can provide the

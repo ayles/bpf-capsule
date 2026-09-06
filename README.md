@@ -122,15 +122,13 @@ cmake -S examples/fib -B build/fib -DCMAKE_PREFIX_PATH="$PWD/build/prefix"
 cmake --build build/fib
 ```
 
-The tools also work directly. `bpf-capsule-cc` compiles application, guest
-runtime, compiler-runtime, and platform translation units to ordinary bitcode;
-`bpf-capsule-ld` accepts those `.bc` files and the installed Picolibc `libc.a`.
-The compiler finds the installed Capsule headers and guest sysroot relative to
-its own executable. The platform's TLSF wrapper only needs the installed TLSF
-directory on its include path. Runtime feature defines must match the selected
-linker capabilities: the linker reads build markers and rejects a mismatched
-memory backend or allocator lock instead of producing a subtly wrong object.
-The public CMake helper performs this wiring automatically.
+Without CMake, compile application, guest runtime, compiler-runtime, and
+platform sources with `bpf-capsule-cc`, then pass their `.bc` files and the
+installed Picolibc `libc.a` to `bpf-capsule-ld`. The compiler locates its guest
+headers and sysroot automatically; the TLSF wrapper also needs the installed
+TLSF include directory. Runtime feature defines must match the linker's memory
+and allocator capabilities, which it checks at link time. The CMake helper
+supplies these sources, includes, and defines automatically.
 
 ## Use from CMake
 
@@ -181,10 +179,15 @@ The Capsule environment has a C library but no operating system:
 - all program and fiber capacities remain finite compile-time or load-time
   bounds.
 
-Atomics up to 64 bits use hardware operations, with no hidden lock-based
-fallback for larger objects. The linker defaults target Linux 5.15 on both
-supported architectures; the full atomic set requires explicit target
-capabilities, available on arm64 from Linux 5.18.
+The loader requests strict alignment for all BPF programs in the object,
+including native entry code and extensions. Non-arena memory accesses must
+have verifier-provable alignment; Capsule splits underaligned fixed-tier
+accesses using LLVM's alignment information.
+
+Supported scalar atomics use hardware operations, with no lock-based fallback
+for objects wider than 64 bits. Bare linker defaults target Linux 5.15 on both
+architectures; full atomic support requires explicit target capabilities,
+available on arm64 from Linux 5.18.
 
 Unsupported forms are compile errors. BPF Capsule is research software and is
 not a security boundary.
