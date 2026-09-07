@@ -104,11 +104,6 @@ inline constexpr llvm::StringLiteral AllocationUnitPrefix{"bpf.unit."};
 inline constexpr llvm::StringLiteral DispatchRouterPrefix{"bpf.dispatch."};
 inline constexpr llvm::StringLiteral StagePrefix{"bpf.stage."};
 
-// The old-kernel PC-to-allocation-unit table has its own section so the BPF
-// backend cannot alias its name in libbpf skeletons.
-inline constexpr llvm::StringLiteral PcUnitTable{"bpf_pc_unit"};
-inline constexpr llvm::StringLiteral PcUnitSection{BPF_CAPSULE_SECTION_PC_TABLE};
-
 // The empty inline-asm marker pinning (stack base, SP, outcome word) at one
 // dominance point for the post-RA spill mover; stackify emits it with a
 // leading "# ", the machine pass matches the bare name.

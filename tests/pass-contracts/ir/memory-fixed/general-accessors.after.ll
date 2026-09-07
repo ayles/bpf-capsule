@@ -5,7 +5,7 @@ target triple = "bpfel"
 %config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64 }
 %map = type { ptr }
 
-@bpf_capsule_config = constant %config { i32 4096, i32 4096, i32 8388608, i32 8392704, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 2, i32 1112556353, i32 7, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 4096, i32 4096, i32 8388608, i32 8392704, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 2, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_heap_array = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @heap0 = global [4194304 x i8] zeroinitializer, section ".bss.heap0", align 8, !dbg !5
 @heap1 = global [4194304 x i8] zeroinitializer, section ".bss.heap1", align 8, !dbg !11

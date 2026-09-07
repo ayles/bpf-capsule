@@ -9,7 +9,7 @@
 // Application code includes bpf_capsule.h or bpf_capsule_host.h instead.
 
 #define BPF_CAPSULE_ABI_MAGIC 0x42504341u /* "BPCA" */
-#define BPF_CAPSULE_ABI_VERSION 7u
+#define BPF_CAPSULE_ABI_VERSION 8u
 
 // This discriminator makes mismatched objects and loaders fail explicitly;
 // it is not a pre-1.0 stability promise. An incompatible layout change bumps
@@ -19,16 +19,20 @@
 // 4GiB-aligned span bpf_capsule_configure() reserves (on the arena tier it
 // is the arena's kernel-pinned user_vm_start). Data lives in the window's
 // first 4GiB. Code lives just above it: a managed function's address is
-// window + TOKEN_DISPLACEMENT + entry-pc, and non-managed function
-// identities follow in the next 1MiB — so code and data can never collide
+// window + TOKEN_DISPLACEMENT + entry counter, and non-managed function
+// identities follow the managed-token span — so code and data can never collide
 // as 64-bit values, and because the window is 4GiB-aligned an indirect
-// call recovers the entry pc by truncating the token to its low word (free
-// in BPF: 32-bit ALU zero-extends). The token span is part of the
+// call recovers that counter by truncating the token to its low word (free in
+// BPF: 32-bit ALU zero-extends). The token span is part of the
 // PROT_NONE reservation, so dereferencing a function pointer faults on the
 // host and falls outside every map on the guest.
 #define BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT (1ull << 32)
-#define BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT 0x00100000u
-#define BPF_CAPSULE_FUNCTION_TOKEN_SPAN (2ull * BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT)
+#define BPF_CAPSULE_REGION_COUNTER_STEP_BITS 8u
+#define BPF_CAPSULE_REGION_COUNTER_STEP_MASK ((1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) - 1u)
+#define BPF_CAPSULE_REGION_COUNTER_INDEX_MASK 0x00ffff00u
+#define BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN 0x01000000u
+#define BPF_CAPSULE_NATIVE_FUNCTION_TOKEN_SPAN 0x00100000u
+#define BPF_CAPSULE_FUNCTION_TOKEN_SPAN ((uint64_t)BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN + BPF_CAPSULE_NATIVE_FUNCTION_TOKEN_SPAN)
 #define BPF_CAPSULE_MEMORY_WINDOW_SIZE (BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + BPF_CAPSULE_FUNCTION_TOKEN_SPAN)
 
 #ifdef __cplusplus
@@ -69,15 +73,17 @@
 // legal reader is ordered after that store by program order or by the
 // continuation claim, so the fields read independently.
 //
-// The virtualized machine registers. pc is a resume-point index, never an
+// The virtualized machine registers. pc is a packed region counter, never an
 // address, and doubles as the lifecycle word: 0 = idle (an all-zero record
 // is a free fiber, which is what makes a fresh zero-filled map a valid
 // pool), BPF_CAPSULE_PC_DONE = computation complete and unconsumed,
-// anything else = a live entry/resume PC. sp is the allocation frontier and
+// anything else = a live entry/resume region. Its low 8 bits select the
+// physical step and its next 16 bits select a region within that step. sp is
+// the allocation frontier and
 // fp the running frame's x86-shaped anchor; both are full based pointers into
 // capsule memory, the same representation the guest and host dereference.
-// fp points at the saved caller fp, the 32-bit return pc occupies fp+8, and
-// the caller-owned result and actual arguments follow at positive offsets.
+// fp points at the saved caller fp, the 32-bit return counter occupies fp+8,
+// and the caller-owned result and actual arguments follow at positive offsets.
 // Locals and dynamic allocations grow toward lower addresses. There is no
 // result register. return_size is the erased return type's byte-count witness,
 // checked when a type-blind continuation reap copies the root result.

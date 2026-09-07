@@ -48,6 +48,8 @@ body:             |
     liveins: $r1, $r2
   
     STD $r1, $r10, -24
+    $r1 = LDD $r1, 24
+    $r1 = AND_ri $r1, -1024
     $r1 = ADDR_SPACE_CAST $r1, 0, 1
     STD $r1, $r10, -16
     $r1 = LDD $r10, -24

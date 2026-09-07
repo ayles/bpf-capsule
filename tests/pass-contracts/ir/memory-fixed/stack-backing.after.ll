@@ -5,7 +5,7 @@ target triple = "bpfel"
 %config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64 }
 %map = type { ptr }
 
-@bpf_capsule_config = constant %config { i32 4096, i32 4096, i32 8388608, i32 8392704, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 2, i32 1112556353, i32 7, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 4096, i32 4096, i32 8388608, i32 8392704, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 2, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_heap_array = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @heap0 = global [4194304 x i8] zeroinitializer, section ".bss.heap0", align 8, !dbg !5
 @heap1 = global [4194304 x i8] zeroinitializer, section ".bss.heap1", align 8, !dbg !11
@@ -29,9 +29,9 @@ entry:
 
 define i32 @read_frame(i32 %sp, ptr "bpf.capsule.stack.backing" %stack_base) {
 entry:
+  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8
   %bpf.stack.base.offset32 = load volatile i32, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 2), align 4
   %bpf.stack.base.offset = zext i32 %bpf.stack.base.offset32 to i64
-  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8
   %bpf.stack.address = add i64 %bpf.view.base, %bpf.stack.base.offset
   %bpf.stack.base.pointer = inttoptr i64 %bpf.stack.address to ptr
   %wide = zext i32 %sp to i64
@@ -55,9 +55,9 @@ entry:
 
 define i32 @read_flattened_frame(i32 %sp, ptr "bpf.capsule.control" %fiber_control, ptr "bpf.capsule.stack.backing" %stack_base) !bpf.capsule.flatten.unit !23 {
 entry:
+  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8
   %bpf.stack.base.offset32 = load volatile i32, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 2), align 4
   %bpf.stack.base.offset = zext i32 %bpf.stack.base.offset32 to i64
-  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8
   %bpf.stack.address = add i64 %bpf.view.base, %bpf.stack.base.offset
   %bpf.stack.base.pointer = inttoptr i64 %bpf.stack.address to ptr
   %wide = zext i32 %sp to i64
@@ -87,9 +87,9 @@ bpf.stack.valid:                                  ; preds = %entry
 
 define i64 @read_indexed_fields(i32 %sp, i32 %index, ptr "bpf.capsule.stack.backing" %stack_base) {
 entry:
+  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8
   %bpf.stack.base.offset32 = load volatile i32, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 2), align 4
   %bpf.stack.base.offset = zext i32 %bpf.stack.base.offset32 to i64
-  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8
   %bpf.stack.address = add i64 %bpf.view.base, %bpf.stack.base.offset
   %bpf.stack.base.pointer = inttoptr i64 %bpf.stack.address to ptr
   %wide = zext i32 %sp to i64

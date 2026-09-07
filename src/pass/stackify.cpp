@@ -33,6 +33,7 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/IntrinsicsBPF.h>
 #include <llvm/IR/MDBuilder.h>
+#include <llvm/IR/ValueHandle.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/TargetParser/Triple.h>
@@ -51,12 +52,12 @@ using namespace llvm;
 
 namespace {
 
-// The continuation PC lives in the fiber's pc register, not in the frame:
+// The region counter lives in the fiber's pc register, not in the frame:
 // every suspension writes its resume target there, calls write the callee's
-// entry PC there and park the caller's resume PC in the linkage. Managed
-// function addresses are based tokens whose low word is the entry PC.
-// Physical placement is deliberately absent from the continuation ABI: an
-// ordinary scalar object has one application step.
+// entry counter there and park the caller's resume counter in the linkage.
+// Its low 8 bits select a physical step and the next 16 bits select the local
+// region. Managed function addresses are based tokens whose low word is that
+// entry counter.
 
 static cl::opt<unsigned> FiberStackBytes(
     "bpf-fiber-stack-size", cl::init(256u * 1024u), cl::desc("Bytes of unified program memory reserved for each Capsule fiber stack"));
@@ -87,10 +88,6 @@ constexpr uint64_t NoSuspendFunctionIrLimit = 1024;
 constexpr uint64_t NoSuspendExpandedLoopLimit = 4096;
 constexpr uint64_t NoSuspendAllocaLimit = 256;
 constexpr unsigned NoSuspendLoopTripLimit = 64;
-
-// CPU v3's dispatch hierarchy uses power-of-two local key spaces so selecting
-// one costs a single shift. Keys remain private compiler data.
-constexpr unsigned V3DispatchShardUnits = 64;
 
 // Linux rejects a loaded program with more than 256 BPF functions. Temporary
 // allocation units disappear in MachineFlatten, but native functions and the
@@ -351,21 +348,19 @@ struct AllocationUnit {
     Value* Frame = nullptr;
     SmallVector<ManagedFunction::State> States;
     bool BorrowedContext = false;
-    uint32_t DispatchKey = 0;
     unsigned OutputRoot = 0;
 };
 
 class StackifyImpl {
 public:
-    explicit StackifyImpl(Module& module, bool fixedMemory, bool directDispatch, bool boundedDispatch)
+    explicit StackifyImpl(Module& module, bool fixedMemory, bool indirectDispatch)
         : Module_(module)
         , Ctx_(module.getContext())
         , I8_(Type::getInt8Ty(Ctx_))
         , I32_(Type::getInt32Ty(Ctx_))
         , I64_(Type::getInt64Ty(Ctx_))
         , FixedMemory_(fixedMemory)
-        , DirectDispatch_(directDispatch)
-        , BoundedDispatch_(boundedDispatch)
+        , IndirectDispatch_(indirectDispatch)
         , FreplaceRoots_(module.getModuleFlag(bpf::md::FreplaceRoots) != nullptr) {
     }
 
@@ -499,7 +494,7 @@ public:
 
         // O2's module inliner leaves call-site cycle-prevention history which
         // refers to the functions it traversed. No inliner runs after
-        // Stackify, and managed functions are about to become integer PCs;
+        // Stackify, and managed functions are about to become integer tokens;
         // retaining the metadata would RAUW its required Function operands
         // into invalid inttoptr constants.
         for (Function& function : Module_) {
@@ -527,7 +522,7 @@ public:
                     report_fatal_error(Twine("stackify: leftover call to ") + func->getName());
                 }
             }
-            if (info->EntryPc >= BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT) {
+            if (info->EntryPc >= BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN) {
                 report_fatal_error("stackify: managed function-token range exhausted");
             }
             // The compile-time token is the bare displacement; MemoryPass
@@ -545,7 +540,7 @@ private:
     // ---------------------------------------------------------------- policy
 
     void ValidateGeneratedNamespace() {
-        for (StringRef name : {bpf::sym::CallStack, bpf::sym::PcUnitTable, bpf::sym::SetOutcome}) {
+        for (StringRef name : {bpf::sym::CallStack, bpf::sym::SetOutcome}) {
             if (Module_.getNamedValue(name)) {
                 report_fatal_error(Twine("stackify: reserved generated symbol already exists: ") + name);
             }
@@ -712,6 +707,12 @@ private:
         return b.CreateStructGEP(FiberControlType_, FiberControlPtr(b, fiber), BPF_CAPSULE_FIBER_CONTROL_PC, "fiber.pc");
     }
 
+    StoreInst* StoreProvisionalRegionCounter(IRBuilder<>& b, uint32_t counter, Value* pointer) {
+        StoreInst* store = b.CreateStore(ConstantInt::get(I32_, counter), pointer);
+        PendingRegionCounterStores_.push_back({WeakTrackingVH(store), counter});
+        return store;
+    }
+
     Value* SpPtr(IRBuilder<>& b, Value* fiber = nullptr) {
         return b.CreateStructGEP(FiberControlType_, FiberControlPtr(b, fiber), BPF_CAPSULE_FIBER_CONTROL_SP, "fiber.sp");
     }
@@ -839,7 +840,7 @@ private:
     // supplied it. Reject every statically visible scalar-to-context path;
     // optimizers remain free to prove and delete an unreachable context branch
     // first. Computed managed calls are checked dynamically by the scalar
-    // step's deliberately incomplete unit switch: a context PC cannot be
+    // step's deliberately incomplete root switch: a context region cannot be
     // dispatched without the typed driver and becomes INVALID_DISPATCH.
     void ValidateScalarRootsDoNotReachBorrowedContext() {
         if (!BorrowedContext_) {
@@ -1230,15 +1231,16 @@ private:
             if (!IsStackifiable(func) || func.getMetadata(bpf::md::NoSuspend) || func.getMetadata(bpf::md::NativeScalar)) {
                 continue;
             }
-            // Entry PCs are handed out after the managed set is fixed.  The
-            // physical step unit is deliberately not encoded in them.
+            // Provisional entry counters are handed out after the managed set
+            // is fixed. Physical steps and local regions are packed later,
+            // once allocation units and merge roots are known.
             CheckSignature(func);
             auto info = std::make_unique<ManagedFunction>();
             info->Original = &func;
             Managed_.emplace_back(&func, std::move(info));
         }
         // llvm-link preserves input-module order, and archive member order is
-        // not a semantic property of the whole program.  PCs and physical
+        // not a semantic property of the whole program. Counters and physical
         // packing must not depend on that incidental order.
         llvm::stable_sort(Managed_, [](const auto& left, const auto& right) { return left.first->getName() < right.first->getName(); });
         for (auto&& [func, info] : Managed_) {
@@ -1839,7 +1841,7 @@ private:
             // A class with a single unit takes over the dispatcher's step
             // symbol outright: it has the step's exact signature, so the
             // driver loop calls it directly — one call level, one BPF
-            // frame, and the routing table less per dispatch. Its lifecycle
+            // frame, and one routing layer less per dispatch. Its lifecycle
             // preamble is added when the dispatch is finished.
             // Merging is legal only when the merged unit is the sole
             // unit its driver can dispatch. The scalar step never
@@ -1864,7 +1866,10 @@ private:
             // allocation. MachineFlatten consumes its MachineFunction before
             // object emission, so this symbol and its BTF record never spend
             // a kernel subprogram slot.
-            SmallVector<Type*, 4> parameters = StepParameterTypes(unit.BorrowedContext);
+            SmallVector<Type*, 5> parameters = StepParameterTypes(unit.BorrowedContext);
+            if (!unit.Merged) {
+                parameters.push_back(I32_);
+            }
             unit.Func = Function::Create(FunctionType::get(I32_, parameters, false), Function::ExternalLinkage, unitName, Module_);
             unit.Func->setCallingConv(CallingConv::C);
             unit.Func->addFnAttr(Attribute::NoInline);
@@ -1893,6 +1898,9 @@ private:
                     backingDebugType = BtfGetByteArrayPointer(db, FiberStackSize_);
                     signature.push_back(backingDebugType);
                 }
+                if (!unit.Merged) {
+                    signature.push_back(BtfGetInt(db, 32, false));
+                }
                 auto* type = db.createSubroutineType(db.getOrCreateTypeArray(signature));
                 DISubprogram::DISPFlags subprogramFlags = DISubprogram::SPFlagDefinition;
                 if (FreplaceRoots_) {
@@ -1914,17 +1922,24 @@ private:
                 if (backingDebugType) {
                     db.createParameterVariable(unit.Subprogram, "stack_base", unit.BorrowedContext ? 4 : 3, cu->getFile(), 0, backingDebugType, true);
                 }
+                if (!unit.Merged) {
+                    db.createParameterVariable(unit.Subprogram, "region", unit.Func->arg_size(), cu->getFile(), 0, BtfGetInt(db, 32, false), true);
+                }
                 db.finalize();
             }
 
             auto* entry = BasicBlock::Create(Ctx_, "unit.entry", unit.Func);
-            unit.Dispatch = entry;
+            auto* dispatch = BasicBlock::Create(Ctx_, "unit.dispatch", unit.Func);
+            unit.Dispatch = dispatch;
             IRBuilder<> b(entry);
             // MemoryPass runs after Stackify. The ABI attributes preserve the
             // verifier-owned context/control/stack pointers after the source
             // root has been dissolved into physical units.
             StepAbi abi = ConfigureStepAbi(*unit.Func, unit.BorrowedContext);
             Value* fiberControl = abi.Control;
+            if (!unit.Merged) {
+                unit.Func->getArg(unit.Func->arg_size() - 1)->setName("region");
+            }
             if (unit.Merged) {
                 // A merged unit is the public step and must validate its own
                 // ABI. Every other unit is reachable only through BuildStep,
@@ -1937,7 +1952,6 @@ private:
                 IRBuilder<> cmb(controlMissing);
                 cmb.CreateRet(ConstantInt::get(I32_, 1));
                 b.SetInsertPoint(controlReady);
-                unit.Dispatch = controlReady;
             }
             if (FixedMemory_ && unit.Merged) {
                 Value* stackBacking = unit.Func->getArg(StackBackingArgumentIndex(unit.BorrowedContext));
@@ -1948,20 +1962,21 @@ private:
                 EmitAbort(smb, CAPSULE_ERROR_MEMORY_FAULT, unit.Func->getArg(FiberArgumentIndex(unit.BorrowedContext)));
                 smb.CreateRet(ConstantInt::get(I32_, 1));
                 b.SetInsertPoint(stackReady);
-                unit.Dispatch = stackReady;
             }
             LoadFrameAnchor(b, unit.Func->getArg(FiberArgumentIndex(unit.BorrowedContext)), unit.Fp, unit.Frame);
-            // Keep the backing pointer needed by the post-RA spill mover
-            // visible at one dominance point without emitting an instruction.
-            // If this unit has no relocated spills the marker assembles to
-            // nothing.
-            Value* stackBase = FixedMemory_ ? unit.Func->getArg(StackBackingArgumentIndex(unit.BorrowedContext))
-                                            : StackPtr(b, ConstantInt::get(I64_, 0), unit.Func->getArg(FiberArgumentIndex(unit.BorrowedContext)));
+            // Give the post-RA spill mover the native pointer from which it
+            // can recover the fiber slice. On the fixed tier that is the
+            // backing-map argument. On arena it is the control record: the
+            // spill mover loads and masks fp only in a unit that actually
+            // relocates spills. Anchoring fp itself would keep that load live
+            // even in a unit which has no relocated spill.
+            Value* stackBase = FixedMemory_ ? unit.Func->getArg(StackBackingArgumentIndex(unit.BorrowedContext)) : fiberControl;
             {
                 auto* anchor = InlineAsm::get(FunctionType::get(Type::getVoidTy(Ctx_), {stackBase->getType()}, false), ("# " + bpf::sym::StackAnchor).str(),
                     "r", /*hasSideEffects=*/true);
                 b.CreateCall(anchor, {stackBase});
             }
+            b.CreateBr(dispatch);
             if (stepDecl) {
                 stepDecl->replaceAllUsesWith(unit.Func);
                 stepDecl->eraseFromParent();
@@ -1979,6 +1994,18 @@ private:
 
     unsigned StackBackingArgumentIndex(bool borrowed) const {
         return ControlArgumentIndex(borrowed) + 1;
+    }
+
+    uint32_t DispatchRegionKey(uint32_t counter) const {
+        uint32_t index = counter & BPF_CAPSULE_REGION_COUNTER_INDEX_MASK;
+        return IndirectDispatch_ ? index >> BPF_CAPSULE_REGION_COUNTER_STEP_BITS : index;
+    }
+
+    Value* DispatchRegionKey(IRBuilder<>& b, Value* counter) const {
+        if (IndirectDispatch_) {
+            return b.CreateLShr(counter, ConstantInt::get(I32_, BPF_CAPSULE_REGION_COUNTER_STEP_BITS), "region");
+        }
+        return b.CreateAnd(counter, ConstantInt::get(I32_, BPF_CAPSULE_REGION_COUNTER_INDEX_MASK), "region");
     }
 
     bool FunctionBorrowsContext(const Function* function) const {
@@ -2145,6 +2172,89 @@ private:
         }
         BorrowedCurrent_->eraseFromParent();
         BorrowedCurrent_ = nullptr;
+    }
+
+    unsigned StepForUnit(unsigned unitIndex, unsigned scalarUnitCount) const {
+        const AllocationUnit& unit = Units_[unitIndex];
+        if (unitIndex < scalarUnitCount) {
+            return PhysicalScalarRoots_ ? unit.OutputRoot : 0;
+        }
+        return ScalarStepCount_ + (PhysicalBorrowedRoots_ ? unit.OutputRoot : 0);
+    }
+
+    void PackRegionCounters(unsigned scalarUnitCount) {
+        const unsigned borrowedUnitCount = Units_.size() - scalarUnitCount;
+        ScalarStepCount_ = scalarUnitCount ? std::max(1u, PhysicalScalarRoots_) : 0;
+        const unsigned borrowedStepCount = borrowedUnitCount ? std::max(1u, PhysicalBorrowedRoots_) : 0;
+        const unsigned stepCount = ScalarStepCount_ + borrowedStepCount;
+        if (!stepCount || stepCount > BPF_CAPSULE_REGION_COUNTER_STEP_MASK + 1u) {
+            report_fatal_error("stackify: physical step count exceeds the packed region-counter ABI");
+        }
+        DenseMap<uint32_t, uint32_t> packed;
+        SmallVector<uint32_t, 32> nextRegion(stepCount, 1);
+        for (unsigned unitIndex = 0; unitIndex < Units_.size(); ++unitIndex) {
+            AllocationUnit& unit = Units_[unitIndex];
+            unsigned step = StepForUnit(unitIndex, scalarUnitCount);
+            llvm::stable_sort(unit.States, [](const auto& a, const auto& b) {
+                bool aEntry = a.Kind == ManagedFunction::StateKind::Entry;
+                bool bEntry = b.Kind == ManagedFunction::StateKind::Entry;
+                return aEntry != bEntry ? aEntry : a.Pc < b.Pc;
+            });
+            const uint32_t first = nextRegion[step];
+            for (const ManagedFunction::State& state : unit.States) {
+                uint32_t local = nextRegion[step]++;
+                if (local >= 1u << 16) {
+                    report_fatal_error("stackify: local region count exceeds the packed region-counter ABI");
+                }
+                uint32_t value = (local << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) | step;
+                if (!packed.try_emplace(state.Pc, value).second) {
+                    report_fatal_error("stackify: duplicate provisional region counter");
+                }
+            }
+            if (nextRegion[step] - first != unit.States.size()) {
+                report_fatal_error("stackify: allocation-unit region counters are not contiguous");
+            }
+        }
+
+        auto rewriteState = [&](ManagedFunction::State& state) {
+            auto found = packed.find(state.Pc);
+            if (found == packed.end()) {
+                report_fatal_error("stackify: continuation state was not assigned a packed region counter");
+            }
+            state.Pc = found->second;
+        };
+        for (auto&& [function, info] : Managed_) {
+            uint32_t provisionalEntry = info->EntryPc;
+            auto found = packed.find(provisionalEntry);
+            if (found == packed.end()) {
+                report_fatal_error(Twine("stackify: managed entry has no packed region counter: ") + function->getName());
+            }
+            info->EntryPc = found->second;
+            for (ManagedFunction::State& state : info->States) {
+                rewriteState(state);
+            }
+        }
+        for (auto& region : Regions_) {
+            for (ManagedFunction::State& state : region->States) {
+                rewriteState(state);
+            }
+        }
+        for (AllocationUnit& unit : Units_) {
+            for (ManagedFunction::State& state : unit.States) {
+                rewriteState(state);
+            }
+        }
+        for (auto& [handle, provisional] : PendingRegionCounterStores_) {
+            auto* store = dyn_cast_or_null<StoreInst>(handle);
+            auto found = packed.find(provisional);
+            if (store && found == packed.end()) {
+                report_fatal_error("stackify: live region-counter store has no packed value");
+            }
+            if (store) {
+                store->setOperand(0, ConstantInt::get(I32_, found->second));
+            }
+        }
+        PendingRegionCounterStores_.clear();
     }
 
     // Cut transformed staging CFGs at their suspension returns, then balance
@@ -2318,9 +2428,9 @@ private:
         // to a step well past that. The regions are disconnected CFG
         // components that exchange state only through the fiber stack (proved
         // above: no value crosses a region), so an oversized source splits
-        // into several units. Each becomes its own dispatch root, and the PC
-        // table routes every region to its owning root unchanged. Sources
-        // under the cap stay whole, preserving the source-function unit.
+        // into several allocation units. Packed counters keep each unit's
+        // regions contiguous inside its eventual merge root. Sources under
+        // the cap stay whole, preserving the source-function unit.
         {
             SmallVector<SourceUnit> partitioned;
             partitioned.reserve(sourceUnits.size());
@@ -2354,6 +2464,17 @@ private:
             sourceUnits = std::move(partitioned);
         }
 
+        const bool scalarDriver = NeedsScalarDriver();
+        if (!scalarDriver) {
+            // Without a scalar native boundary every reachable region executes
+            // under the borrowed-context step. Giving those context-independent
+            // regions the same physical ABI avoids constructing an otherwise
+            // unreachable parallel step hierarchy.
+            for (SourceUnit& source : sourceUnits) {
+                source.BorrowedContext = true;
+            }
+        }
+
         SmallVector<SourceUnit*> scalarSources;
         SmallVector<SourceUnit*> borrowedSources;
         for (SourceUnit& source : sourceUnits) {
@@ -2378,7 +2499,6 @@ private:
         // Count every definition that can conservatively survive emission;
         // managed originals are declarations after their bodies move into
         // staging functions, and staging functions disappear below.
-        const bool scalarDriver = NeedsScalarDriver();
         unsigned reservedFunctions = 0;
         for (Function& function : Module_) {
             const bool removedScalarDriver = !scalarDriver && (function.getName() == bpf::sym::Trampoline || function.getName() == bpf::sym::TrampolineL1);
@@ -2414,14 +2534,11 @@ private:
         for (auto&& [index, source] : enumerate(borrowedSources)) {
             placeSource(*source, scalarUnitCount + index);
         }
-        for (unsigned index = 0; index < unitCount; ++index) {
-            Units_[index].DispatchKey = index;
-        }
         // Keep source functions as independent register-allocation units, but
         // do not join all of them into one verifier function. The kernel's
         // liveness pass fixed-points over the complete containing subprogram;
         // a very large root therefore has poor load time. Extra roots are not
-        // free, however: their routers and prologues add static and verifier
+        // free, however: their dispatch and prologues add static and verifier
         // work. The policy below uses only enough roots to bound root size,
         // within the slots left by the kernel ABI.
         unsigned rootBudget = MaxBpfFunctions - reservedFunctions - laterFunctions;
@@ -2452,7 +2569,7 @@ private:
             // for one verifier-checked function pays for output roots — and
             // a mixed object always does: the borrowed step routes into the
             // scalar class, and two merged (physical) frames cannot nest, so
-            // both classes keep thin routers over roots.
+            // both classes keep thin public steps over roots.
             bool aloneInObject = begin == 0 ? borrowedUnitCount == 0 : scalarUnitCount == 0;
             if (total <= RootLoadTarget && aloneInObject) {
                 return;
@@ -2527,51 +2644,7 @@ private:
         };
         assignRoots(0, scalarUnitCount, PhysicalScalarRoots_);
         assignRoots(scalarUnitCount, borrowedUnitCount, PhysicalBorrowedRoots_);
-        if (BoundedDispatch_) {
-            // Units arrive largest-first. Greedily distribute them over the
-            // local v3 dispatchers, then encode (shard, local slot) in the
-            // private PC table value. A contiguous largest-first assignment
-            // makes the first local tree exceed the branch span on QuickJS;
-            // balancing estimated IR load keeps every local tree/body window
-            // near the global average without adding a runtime table lookup.
-            struct DispatchShard {
-                uint64_t Load = 0;
-                unsigned Count = 0;
-            };
-            unsigned shardCount = divideCeil(unitCount, V3DispatchShardUnits);
-            SmallVector<DispatchShard, 16> shards(shardCount);
-            for (unsigned index = 0; index < unitCount; ++index) {
-                unsigned best = 0;
-                for (unsigned shard = 1; shard < shardCount; ++shard) {
-                    bool bestFull = shards[best].Count == V3DispatchShardUnits;
-                    bool shardAvailable = shards[shard].Count != V3DispatchShardUnits;
-                    if (shardAvailable && (bestFull || shards[shard].Load < shards[best].Load)) {
-                        best = shard;
-                    }
-                }
-                Units_[index].DispatchKey = best * V3DispatchShardUnits + shards[best].Count++;
-                shards[best].Load += load[index];
-            }
-        }
-
-        // Kernels without BPF_JMP32_JA cannot encode a dense instruction
-        // array.  Keep their verifier state bounded by loading the allocation
-        // unit from a read-only table before the sparse comparison tree.
-        // Newer targets route the PC directly and have no such data access.
-        if (!DirectDispatch_ && llvm::any_of(Units_, [](const AllocationUnit& unit) { return !unit.Merged; })) {
-            SmallVector<uint32_t> pcUnits(NextPc_, uint32_t(-1));
-            for (auto&& region : Regions_) {
-                for (auto state : region->States) {
-                    pcUnits[state.Pc] = Units_[region->Unit].DispatchKey;
-                }
-            }
-            auto* pcUnitType = ArrayType::get(I32_, pcUnits.size());
-            PcUnitTable_ =
-                new GlobalVariable(Module_, pcUnitType, true, GlobalValue::ExternalLinkage, ConstantDataArray::get(Ctx_, pcUnits), bpf::sym::PcUnitTable);
-            PcUnitTable_->setSection(bpf::sym::PcUnitSection);
-            PcUnitTable_->setAlignment(Align(4));
-            PcUnitTable_->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-        }
+        PackRegionCounters(scalarUnitCount);
 
         // Move complete regions into their physical unit.
         for (auto&& regionPtr : Regions_) {
@@ -2669,8 +2742,7 @@ private:
                 // The merged unit performs the dispatcher's lifecycle
                 // checks itself: idle, completed (sweeping the sentinel to
                 // idle), or a published exit stops the driver loop; any
-                // other pc dispatches. No pc range check is needed — the
-                // dispatch tree's default edge already rejects unknown pcs.
+                // other counter dispatches.
                 auto* lifecycle = BasicBlock::Create(Ctx_, "step.lifecycle", unit.Func, entry);
                 auto* terminal = BasicBlock::Create(Ctx_, "step.terminal", unit.Func, entry);
                 auto* completed = BasicBlock::Create(Ctx_, "step.completed", unit.Func, entry);
@@ -2700,19 +2772,31 @@ private:
                 slb.CreateRet(ConstantInt::get(I32_, 1));
             }
             IRBuilder<> b(entry);
-            auto* pc = b.CreateLoad(I32_, PcPtr(b), "pc");
-
-            BasicBlock* unknown = nullptr;
+            Value* region = nullptr;
             if (unit.Merged) {
-                // A directly emitted step has no outer ownership table and
-                // must validate its own sparse PC space.
-                unknown = BasicBlock::Create(Ctx_, "unit.unknown", unit.Func);
-                IRBuilder<> ub(unknown);
-                PublishExit(ub, unit.Func->getArg(FiberArgumentIndex(unit.BorrowedContext)), CAPSULE_ERROR_INVALID_DISPATCH);
-                ub.CreateRet(ConstantInt::get(I32_, ActionContinue));
+                Value* regionCounter = b.CreateLoad(I32_, PcPtr(b), "region.counter");
+                region = DispatchRegionKey(b, regionCounter);
+            } else {
+                region = unit.Func->getArg(unit.Func->arg_size() - 1);
             }
 
-            llvm::stable_sort(unit.States, [](const auto& a, const auto& b) { return a.Pc < b.Pc; });
+            Value* regionIndex = region;
+            uint32_t firstIndex = UINT32_MAX;
+            uint32_t lastIndex = 0;
+            for (const ManagedFunction::State& state : unit.States) {
+                uint32_t index = DispatchRegionKey(state.Pc);
+                firstIndex = std::min(firstIndex, index);
+                lastIndex = std::max(lastIndex, index);
+            }
+            uint32_t stride = IndirectDispatch_ ? 1u : 1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS;
+            if ((lastIndex - firstIndex) / stride + 1 != unit.States.size()) {
+                report_fatal_error("stackify: allocation-unit region indexes are not contiguous");
+            }
+            BasicBlock* selected = BasicBlock::Create(Ctx_, "unit.dispatch", unit.Func);
+            b.CreateBr(selected);
+            entry = selected;
+
+            llvm::stable_sort(unit.States, [&](const auto& a, const auto& b) { return DispatchRegionKey(a.Pc) < DispatchRegionKey(b.Pc); });
             struct TestRange {
                 BasicBlock* Block;
                 unsigned Begin;
@@ -2728,34 +2812,21 @@ private:
                 IRBuilder<> tb(range.Block);
                 if (range.End - range.Begin == 1) {
                     auto state = unit.States[range.Begin];
-                    if (unknown) {
-                        tb.CreateCondBr(tb.CreateICmpEQ(pc, ConstantInt::get(I32_, state.Pc)), state.Root, unknown);
-                    } else {
-                        // The root's PC table selected this unit, so reaching
-                        // a leaf proves exact membership without another
-                        // comparison or error path.
-                        tb.CreateBr(state.Root);
-                    }
+                    tb.CreateBr(state.Root);
                     continue;
                 }
 
                 unsigned middle = range.Begin + (range.End - range.Begin) / 2;
-                auto* left = BasicBlock::Create(Ctx_, "unit.test.left", unit.Func, unknown);
-                auto* right = BasicBlock::Create(Ctx_, "unit.test.right", unit.Func, unknown);
-                tb.CreateCondBr(tb.CreateICmpULT(pc, ConstantInt::get(I32_, unit.States[middle].Pc)), left, right);
+                auto* left = BasicBlock::Create(Ctx_, "unit.test.left", unit.Func);
+                auto* right = BasicBlock::Create(Ctx_, "unit.test.right", unit.Func);
+                tb.CreateCondBr(tb.CreateICmpULT(regionIndex, ConstantInt::get(I32_, DispatchRegionKey(unit.States[middle].Pc))), left, right);
                 pending.push_back({right, middle, range.End});
                 pending.push_back({left, range.Begin, middle});
             }
 
             if (unit.Subprogram) {
-                SmallVector<BasicBlock*, 2> debugBlocks{entry};
-                if (unknown) {
-                    debugBlocks.push_back(unknown);
-                }
-                for (BasicBlock* block : debugBlocks) {
-                    for (auto&& inst : *block) {
-                        inst.setDebugLoc(DILocation::get(Ctx_, 0, 0, unit.Subprogram));
-                    }
+                for (auto&& inst : *entry) {
+                    inst.setDebugLoc(DILocation::get(Ctx_, 0, 0, unit.Subprogram));
                 }
             }
         }
@@ -2789,7 +2860,8 @@ private:
     // Build the bounded native cycle before frame layout.  Loop-carried PHIs
     // remain SSA on the hot edge; only the cold suspension edge serializes
     // their next values.  The temporary boundary->resume edge keeps the CFG
-    // analyzable until TransformFunction replaces it by store-PC-and-return.
+    // analyzable until TransformFunction replaces it by
+    // store-region-counter-and-return.
     void PrepareChunkedLoop(const ChunkCandidate& chunk) {
         Function& func = *chunk.Header->getParent();
         DebugLoc debugLoc;
@@ -3069,7 +3141,7 @@ private:
                     // codecs.  Running one managed dispatch per traversal is
                     // correct but catastrophically expensive.  A bounded
                     // native chunk retains exact suspension semantics while
-                    // amortizing dispatch and PC selection.
+                    // amortizing dispatch and region selection.
                     // A managed call cannot carry a chunk counter across its
                     // suspension. Ordinary subprograms are also excluded:
                     // nesting a bounded callee loop inside a large chunk has
@@ -3519,8 +3591,8 @@ private:
         }
     }
 
-    // FinishAllocationUnits eventually adds a direct dispatch edge to every resume
-    // root.  That edge does not exist while demotion runs, so an ordinary
+    // FinishAllocationUnits eventually adds a direct dispatch edge to every
+    // resume root. That edge does not exist while demotion runs, so an ordinary
     // DominatorTree incorrectly says that reloads above the loop dominate the
     // resumed execution.  Model the future edge explicitly: if a use is
     // reachable from a chunk resume without visiting the reload's block, put
@@ -4425,8 +4497,8 @@ private:
 
     // Split the block at `call`. The caller reserves one exact outgoing area
     // below its live sp, writes the x86-shaped linkage and actual arguments at
-    // positive offsets from the new callee fp, then names the callee in pc.
-    // The callee prologue claims only its own locals below that fp.
+    // positive offsets from the new callee fp, then publishes the callee's
+    // region counter. The callee prologue claims only its own locals below fp.
     BasicBlock* SuspendAtCall(CallBase* call, uint32_t resumePc, ManagedFunction& info, DebugLoc debugLoc) {
         ManagedCallLayout layout = LayoutCall(*call);
         if (InputError_) {
@@ -4440,22 +4512,6 @@ private:
         IRBuilder<> b(br);
 
         Value* calleePc = CalleePc(b, call);
-        if (!call->getCalledFunction()) {
-            // A computed callee must name a function entry. Entry PCs are
-            // the contiguous low range starting at 1, so validity is one
-            // compare, checked before any state changes.
-            Value* valid =
-                b.CreateICmpULT(b.CreateSub(calleePc, ConstantInt::get(I32_, 1)), ConstantInt::get(I32_, uint32_t(Managed_.size())), "callee.pc.valid");
-            auto* push = BasicBlock::Create(Ctx_, block->getName() + ".push", block->getParent(), resume);
-            auto* invalid = BasicBlock::Create(Ctx_, block->getName() + ".bad.callee", block->getParent(), resume);
-            b.CreateCondBr(valid, push, invalid);
-            br->eraseFromParent();
-            br = nullptr;
-            IRBuilder<> ib(invalid);
-            EmitAbort(ib, CAPSULE_ERROR_INVALID_DISPATCH);
-            ib.CreateRet(ConstantInt::get(I32_, ActionContinue));
-            b.SetInsertPoint(push);
-        }
 
         // A function without dynamic carving can derive its live sp from fp;
         // otherwise use the saved frontier. ReserveFloor_ already includes
@@ -4475,9 +4531,12 @@ private:
             out = b.CreateGEP(I8_, info.Frame, ConstantInt::getSigned(I64_, -int64_t(info.FrameSize + layout.Size)), "callee.frame");
         }
         b.CreateStore(info.Fp, b.CreateGEP(I8_, out, ConstantInt::get(I64_, SavedFpOffset), "saved.fp.slot"));
-        b.CreateStore(ConstantInt::get(I32_, resumePc), b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnPcOffset), "return.pc.slot"));
+        StoreProvisionalRegionCounter(b, resumePc, b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnPcOffset), "return.pc.slot"));
         StoreCallArguments(b, out, *call, layout);
-        b.CreateStore(calleePc, PcPtr(b));
+        StoreInst* calleeStore = b.CreateStore(calleePc, PcPtr(b));
+        if (Function* callee = ResolveDirectCallee(*call)) {
+            PendingRegionCounterStores_.push_back({WeakTrackingVH(calleeStore), ManagedByFunction_.lookup(callee)->EntryPc});
+        }
         b.CreateStore(calleeFp, FpPtr(b));
         b.CreateRet(ConstantInt::get(I32_, ActionContinue));
         if (br) {
@@ -4529,7 +4588,7 @@ private:
         Instruction* branch = block->getTerminator();
 
         IRBuilder<> b(branch);
-        b.CreateStore(ConstantInt::get(I32_, resumePc), PcPtr(b))->setDebugLoc(debugLoc);
+        StoreProvisionalRegionCounter(b, resumePc, PcPtr(b))->setDebugLoc(debugLoc);
         b.CreateStore(ConstantInt::get(I64_, CAPSULE_YIELD), OutcomePtr(b))->setDebugLoc(debugLoc);
         b.CreateRet(ConstantInt::get(I32_, ActionYield))->setDebugLoc(debugLoc);
         branch->eraseFromParent();
@@ -4550,7 +4609,7 @@ private:
         Value* env = call->getArgOperand(0);
         auto field = [&](int64_t offset) { return b.CreateGEP(I8_, env, ConstantInt::get(I64_, offset)); };
         b.CreateStore(ConstantInt::get(I32_, 0), slot);
-        b.CreateStore(ConstantInt::get(I32_, resumePc), field(JumpPcOffset));
+        StoreProvisionalRegionCounter(b, resumePc, field(JumpPcOffset));
         Value* sp = b.CreateLoad(I64_, SpPtr(b));
         Value* spField = field(JumpSpOffset);
         b.CreateStore(sp, spField);
@@ -4603,7 +4662,7 @@ private:
         }
         Value* token = b.CreatePtrToInt(call->getCalledOperand(), I64_, "callee.token");
         // The window is 4GiB-aligned and the token displacement is an exact
-        // multiple of 4GiB, so the token's low word IS the entry pc.
+        // multiple of 4GiB, so the token's low word is the entry counter.
         return b.CreateTrunc(token, I32_, "callee.pc");
     }
 
@@ -4616,17 +4675,17 @@ private:
 
         IRBuilder<> b(term);
         // An unconditional latch is already the suspension edge; replace its
-        // branch in place. For a conditional latch, put both the PC store and
-        // return in an edge-local block so the loop-exit path publishes no
+        // branch in place. For a conditional latch, put both the counter store
+        // and return in an edge-local block so the loop-exit path publishes no
         // spurious continuation.
         if (term->getNumSuccessors() == 1) {
-            b.CreateStore(ConstantInt::get(I32_, resumePc), PcPtr(b))->setDebugLoc(debugLoc);
+            StoreProvisionalRegionCounter(b, resumePc, PcPtr(b))->setDebugLoc(debugLoc);
             b.CreateRet(ConstantInt::get(I32_, ActionContinue))->setDebugLoc(debugLoc);
             term->eraseFromParent();
         } else {
             auto* suspend = BasicBlock::Create(Ctx_, edge.Latch->getName() + ".suspend", edge.Latch->getParent());
             IRBuilder<> sb(suspend);
-            sb.CreateStore(ConstantInt::get(I32_, resumePc), PcPtr(sb))->setDebugLoc(debugLoc);
+            StoreProvisionalRegionCounter(sb, resumePc, PcPtr(sb))->setDebugLoc(debugLoc);
             sb.CreateRet(ConstantInt::get(I32_, ActionContinue))->setDebugLoc(debugLoc);
             term->replaceSuccessorWith(edge.Header, suspend);
         }
@@ -4639,7 +4698,7 @@ private:
     BasicBlock* SuspendAtChunkedBackedge(const Backedge& edge, uint32_t resumePc, DebugLoc debugLoc) {
         Instruction* term = edge.Latch->getTerminator();
         IRBuilder<> builder(term);
-        builder.CreateStore(ConstantInt::get(I32_, resumePc), PcPtr(builder))->setDebugLoc(debugLoc);
+        StoreProvisionalRegionCounter(builder, resumePc, PcPtr(builder))->setDebugLoc(debugLoc);
         auto* ret = builder.CreateRet(ConstantInt::get(I32_, ActionContinue));
         ret->setDebugLoc(debugLoc);
         term->eraseFromParent();
@@ -4718,7 +4777,6 @@ private:
         auto* entry = BasicBlock::Create(Ctx_, "entry", step);
         auto* iterate = BasicBlock::Create(Ctx_, "iterate", step);
         auto* route = BasicBlock::Create(Ctx_, "route", step);
-        auto* lookup = DirectDispatch_ ? nullptr : BasicBlock::Create(Ctx_, "route.lookup", step);
         auto* dispatch = BasicBlock::Create(Ctx_, "dispatch", step);
         auto* terminal = BasicBlock::Create(Ctx_, "terminal", step);
         auto* completed = BasicBlock::Create(Ctx_, "completed", step);
@@ -4741,7 +4799,7 @@ private:
             smb.CreateRet(ConstantInt::get(I32_, 1));
             b.SetInsertPoint(stackReady);
         }
-        // One dispatch per router entry: a loop that cannot iterate must not
+        // One dispatch per root entry: a loop that cannot iterate must not
         // be built (its counter and carried action pin callee-saved
         // registers).
         b.CreateBr(iterate);
@@ -4768,42 +4826,33 @@ private:
         b.CreateRet(ConstantInt::get(I32_, 1)); // stop iterating
 
         b.SetInsertPoint(route);
-        b.CreateBr(DirectDispatch_ ? dispatch : lookup);
-
-        Value* dispatchKey = pc;
-        if (!DirectDispatch_) {
-            b.SetInsertPoint(lookup);
-            if (!PcUnitTable_) {
-                report_fatal_error("stackify: routed step has no PC ownership table");
-            }
-            auto* pcReady = BasicBlock::Create(Ctx_, "route.pc.ready", step, dispatch);
-            b.CreateCondBr(b.CreateICmpULT(pc, ConstantInt::get(I32_, NextPc_)), pcReady, trap);
-            b.SetInsertPoint(pcReady);
-            auto* unitSlot = b.CreateInBoundsGEP(PcUnitTable_->getValueType(), PcUnitTable_, {ConstantInt::get(I64_, 0), b.CreateZExt(pc, I64_)});
-            dispatchKey = b.CreateLoad(I32_, unitSlot, "allocation.unit");
-            b.CreateBr(dispatch);
-        }
+        b.CreateBr(dispatch);
 
         b.SetInsertPoint(dispatch);
-        // The continuation PC already is the complete dispatch key. Mapping
-        // it through a PC->allocation-unit table and then switching on the
-        // unit merely added a load and hid the real control-flow relation.
-        // Several PCs may enter one connected allocation unit; they share
-        // this one terminal call and the unit resolves only that local choice.
+        Value* stepKey = b.CreateAnd(pc, ConstantInt::get(I32_, BPF_CAPSULE_REGION_COUNTER_STEP_MASK), "step");
+        Value* regionKey = DispatchRegionKey(b, pc);
         SwitchInst* sw = nullptr;
-        SmallVector<SwitchInst*, 16> shardSwitches;
-        SmallVector<Function*, 16> shardFunctions;
-        SmallVector<BasicBlock*, 16> scalarCases;
+        struct UnitRoute {
+            uint32_t Begin;
+            uint32_t End;
+            BasicBlock* Target;
+        };
+        SmallVector<BasicBlock*, 32> rootDispatches;
+        SmallVector<BasicBlock*, 32> rootTraps;
+        SmallVector<Value*, 32> rootRouteKeys;
+        SmallVector<SmallVector<UnitRoute, 32>, 32> rootRoutes;
         SmallVector<SwitchInst*, 32> rootSwitches;
         SmallVector<Function*, 32> rootFunctions;
-        SmallVector<BasicBlock*, 32> rootCases;
         SmallVector<Value*, 32> rootControls;
         SmallVector<Value*, 32> rootStackBackings;
         if (physicalRootMode) {
-            sw = b.CreateSwitch(dispatchKey, trap, Units_.size());
-            rootSwitches.reserve(physicalRoots);
+            sw = b.CreateSwitch(stepKey, trap, physicalRoots + (borrowed ? ScalarStepCount_ : 0));
+            rootDispatches.reserve(physicalRoots);
+            rootTraps.reserve(physicalRoots);
+            rootRouteKeys.reserve(physicalRoots);
+            rootRoutes.resize(physicalRoots);
+            rootSwitches.resize(physicalRoots);
             rootFunctions.reserve(physicalRoots);
-            rootCases.reserve(physicalRoots);
             SmallVector<Type*> rootParameters;
             if (FreplaceRoots_) {
                 if (borrowed) {
@@ -4839,12 +4888,17 @@ private:
                     outputFiber = outputAbi.Fiber;
                     outputDispatchKey = output->getArg(parameters.size());
                 }
-                outputDispatchKey->setName("dispatch_key");
+                outputDispatchKey->setName("region");
 
                 BasicBlock* outputEntry = BasicBlock::Create(Ctx_, "entry", output);
                 BasicBlock* outputDispatch = BasicBlock::Create(Ctx_, "dispatch", output);
                 BasicBlock* outputTrap = BasicBlock::Create(Ctx_, "bad.id", output);
                 IRBuilder<> outputBuilder(outputEntry);
+                // The public step has already separated the packed counter
+                // into its step and region fields. Keep the region in its
+                // masked representation so dispatch needs no shift or second
+                // mask at the root boundary.
+                rootRouteKeys.push_back(outputDispatchKey);
                 if (FreplaceRoots_ && ArenaTier_) {
                     GlobalVariable* arena = Module_.getNamedGlobal(bpf::sym::ArenaMap);
                     if (!arena) {
@@ -4889,7 +4943,11 @@ private:
                     stackCheck.CreateCondBr(stackCheck.CreateIsNotNull(checkedStack), outputDispatch, outputTrap);
                 }
                 outputBuilder.SetInsertPoint(outputDispatch);
-                rootSwitches.push_back(outputBuilder.CreateSwitch(outputDispatchKey, outputTrap));
+                rootDispatches.push_back(outputDispatch);
+                rootTraps.push_back(outputTrap);
+                if (IndirectDispatch_) {
+                    rootSwitches[root] = IRBuilder<>(outputDispatch).CreateSwitch(outputDispatchKey, outputTrap);
+                }
                 IRBuilder<> bad(outputTrap);
                 PublishExit(bad, outputFiber, CAPSULE_ERROR_INVALID_DISPATCH);
                 bad.CreateRet(ConstantInt::get(I32_, 1));
@@ -4907,174 +4965,147 @@ private:
                         rootArguments.push_back(&argument);
                     }
                 }
-                rootArguments.push_back(dispatchKey);
+                rootArguments.push_back(regionKey);
                 routeBuilder.CreateRet(routeBuilder.CreateCall(output, rootArguments));
+                sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), (borrowed ? ScalarStepCount_ : 0) + root), routeRoot);
                 rootFunctions.push_back(output);
-                rootCases.push_back(routeRoot);
-            }
-        } else if (BoundedDispatch_ && !DirectDispatch_) {
-            // CPU v3 branches have signed 16-bit displacements. Keep the top
-            // comparison tree compact and route to independently placed local
-            // comparison trees. The router functions are allocator/layout
-            // units only: machine flattening removes their calls and symbols
-            // together with the region units before BPF assembly.
-            unsigned shardCount = divideCeil(unsigned(Units_.size()), V3DispatchShardUnits);
-            Value* shard = b.CreateLShr(dispatchKey, ConstantInt::get(I32_, Log2_32(V3DispatchShardUnits)), "dispatch.shard");
-            auto* outer = b.CreateSwitch(shard, trap, shardCount);
-            shardSwitches.reserve(shardCount);
-            shardFunctions.reserve(shardCount);
-            scalarCases.resize(shardCount);
-            SmallVector<Type*> routerParameters(parameters.begin(), parameters.end());
-            routerParameters.push_back(I32_);
-            auto* routerType = FunctionType::get(I32_, routerParameters, false);
-            for (unsigned index = 0; index < shardCount; ++index) {
-                std::string routerName = (bpf::sym::DispatchRouterPrefix + (borrowed ? "ctx." : "scalar.") + Twine(index)).str();
-                Function* router = Function::Create(routerType, Function::ExternalLinkage, routerName, Module_);
-                router->setCallingConv(CallingConv::C);
-                router->addFnAttr(Attribute::NoInline);
-                MarkFlattenClass(*router, bpf::md::FlattenUnit, flattenClass);
-                router->setMetadata(bpf::md::FlattenRouter, MDNode::get(Ctx_, {}));
-                StepAbi routerAbi = ConfigureStepAbi(*router, borrowed);
-                Argument* routerFiber = routerAbi.Fiber;
-                router->getArg(parameters.size())->setName("dispatch_key");
-
-                BasicBlock* routerEntry = BasicBlock::Create(Ctx_, "dispatch", router);
-                BasicBlock* routerTrap = BasicBlock::Create(Ctx_, "bad.id", router);
-                IRBuilder<> local(routerEntry);
-                unsigned first = index * V3DispatchShardUnits;
-                unsigned cases = std::min<unsigned>(V3DispatchShardUnits, Units_.size() - first);
-                shardSwitches.push_back(local.CreateSwitch(router->getArg(parameters.size()), routerTrap, cases));
-                IRBuilder<> bad(routerTrap);
-                PublishExit(bad, routerFiber, CAPSULE_ERROR_INVALID_DISPATCH);
-                bad.CreateRet(ConstantInt::get(I32_, 1));
-
-                BasicBlock* routeShard = BasicBlock::Create(Ctx_, routerName, step, terminal);
-                IRBuilder<> routeBuilder(routeShard);
-                SmallVector<Value*, 5> routerArguments;
-                for (Argument& argument : step->args()) {
-                    routerArguments.push_back(&argument);
-                }
-                routerArguments.push_back(dispatchKey);
-                routeBuilder.CreateRet(routeBuilder.CreateCall(router, routerArguments));
-                outer->addCase(ConstantInt::get(cast<IntegerType>(I32_), index), routeShard);
-                shardFunctions.push_back(router);
             }
         } else {
-            sw = b.CreateSwitch(dispatchKey, trap, DirectDispatch_ ? NextPc_ : Units_.size());
+            sw = b.CreateSwitch(regionKey, trap, NextPc_);
         }
-        auto addDispatchCase = [&](unsigned key, BasicBlock* target) {
-            ConstantInt* value = ConstantInt::get(cast<IntegerType>(I32_), key);
-            if (shardSwitches.empty()) {
-                sw->addCase(value, target);
-            } else {
-                shardSwitches[key / V3DispatchShardUnits]->addCase(value, target);
-            }
-        };
 
-        // A context step may also encounter scalar PCs. If the scalar driver
-        // exists, cross that genuine verifier-pointer ABI boundary once via
-        // its final step rather than making the scalar allocation units part
-        // of two different flattened functions.
-        Function* scalarStep = borrowed ? Module_.getFunction(bpf::sym::TrampolineStep) : nullptr;
-        if (scalarStep && scalarStep->isDeclaration()) {
-            scalarStep = nullptr;
-        }
-        BasicBlock* scalarCase = nullptr;
-        if (borrowed && scalarStep && shardFunctions.empty()) {
-            scalarCase = BasicBlock::Create(Ctx_, "scalar.step", step, done);
-            IRBuilder<> scalarBuilder(scalarCase);
-            SmallVector<Value*, 3> scalarArguments{fiber, fiberControl};
-            if (stackBacking) {
-                scalarArguments.push_back(stackBacking);
+        // A context entry may resume scalar code after a managed call.  The
+        // packed counter already identifies its physical scalar root, so call
+        // that root directly instead of repeating lifecycle checks and the
+        // low-byte dispatch in the scalar step.
+        if (borrowed && ScalarStepCount_) {
+            if (!physicalRootMode) {
+                report_fatal_error("stackify: mixed verifier ABIs require physical dispatch roots");
             }
-            Value* action = scalarBuilder.CreateCall(scalarStep, scalarArguments);
-            scalarBuilder.CreateRet(action);
+            for (unsigned scalar = 0; scalar < ScalarStepCount_; ++scalar) {
+                std::string rootName = (bpf::sym::DispatchRouterPrefix + "output.scalar." + Twine(scalar)).str();
+                Function* root = Module_.getFunction(rootName);
+                if (!root || root->isDeclaration()) {
+                    report_fatal_error("stackify: context step is missing a physical scalar root");
+                }
+                BasicBlock* route = BasicBlock::Create(Ctx_, "scalar.root." + Twine(scalar), step, done);
+                IRBuilder<> rb(route);
+                SmallVector<Value*, 4> arguments;
+                arguments.push_back(fiber);
+                if (!FreplaceRoots_) {
+                    arguments.push_back(fiberControl);
+                    if (stackBacking) {
+                        arguments.push_back(stackBacking);
+                    }
+                }
+                arguments.push_back(regionKey);
+                rb.CreateRet(rb.CreateCall(root, arguments));
+                sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), scalar), route);
+            }
         }
-        for (auto&& unit : Units_) {
+
+        for (AllocationUnit& unit : Units_) {
             if (unit.BorrowedContext && !borrowed) {
                 continue;
             }
-            unsigned dispatchUnit = unit.DispatchKey;
-            unsigned shardIndex = shardFunctions.empty() ? 0 : dispatchUnit / V3DispatchShardUnits;
-            Function* caseFunction = shardFunctions.empty() ? step : shardFunctions[shardIndex];
-            if (borrowed && !unit.BorrowedContext && scalarStep) {
-                if (!shardFunctions.empty() && !scalarCases[shardIndex]) {
-                    scalarCases[shardIndex] = BasicBlock::Create(Ctx_, "scalar.step", caseFunction);
-                    IRBuilder<> scalarBuilder(scalarCases[shardIndex]);
-                    SmallVector<Value*, 3> scalarArguments{
-                        caseFunction->getArg(FiberArgumentIndex(borrowed)), caseFunction->getArg(ControlArgumentIndex(borrowed))};
-                    if (FixedMemory_) {
-                        scalarArguments.push_back(caseFunction->getArg(StackBackingArgumentIndex(borrowed)));
-                    }
-                    scalarBuilder.CreateRet(scalarBuilder.CreateCall(scalarStep, scalarArguments));
-                }
-                BasicBlock* target = shardFunctions.empty() ? scalarCase : scalarCases[shardIndex];
-                if (DirectDispatch_) {
-                    for (auto state : unit.States) {
-                        addDispatchCase(state.Pc, target);
-                    }
-                } else {
-                    addDispatchCase(dispatchUnit, target);
-                }
+            if (borrowed && !unit.BorrowedContext) {
                 continue;
             }
-            if (physicalRootMode) {
-                Function* output = rootFunctions[unit.OutputRoot];
-                Value* outputFiber = output->getArg(FreplaceRoots_ ? (borrowed ? 1 : 0) : FiberArgumentIndex(borrowed));
-                Value* outputControl = rootControls[unit.OutputRoot];
-                auto* caseBlock = BasicBlock::Create(Ctx_, unit.Func->getName(), output);
-                IRBuilder<> cb(caseBlock);
-                SmallVector<Value*, 4> arguments;
-                if (unit.BorrowedContext) {
-                    arguments.push_back(output->getArg(0));
-                }
-                arguments.push_back(outputFiber);
-                arguments.push_back(outputControl);
-                if (FixedMemory_) {
-                    arguments.push_back(rootStackBackings[unit.OutputRoot]);
-                }
-                cb.CreateRet(cb.CreateCall(unit.Func, arguments));
-                auto addRootCase = [&](unsigned key) {
-                    ConstantInt* value = ConstantInt::get(cast<IntegerType>(I32_), key);
-                    rootSwitches[unit.OutputRoot]->addCase(value, caseBlock);
-                    addDispatchCase(key, rootCases[unit.OutputRoot]);
-                };
-                if (DirectDispatch_) {
-                    for (auto state : unit.States) {
-                        addRootCase(state.Pc);
-                    }
-                } else {
-                    addRootCase(dispatchUnit);
-                }
-                MarkFlattenClass(*unit.Func, bpf::md::FlattenUnit, physicalClassBase + unit.OutputRoot);
-                continue;
-            }
-            auto functionArguments = [&](Function* owner) {
+
+            Function* owner = physicalRootMode ? rootFunctions[unit.OutputRoot] : step;
+            Value* ownerFiber = physicalRootMode ? owner->getArg(FreplaceRoots_ ? (borrowed ? 1 : 0) : FiberArgumentIndex(borrowed))
+                                                 : owner->getArg(FiberArgumentIndex(borrowed));
+            Value* ownerControl = physicalRootMode ? rootControls[unit.OutputRoot] : owner->getArg(ControlArgumentIndex(borrowed));
+            Value* ownerStack =
+                physicalRootMode ? rootStackBackings[unit.OutputRoot] : (FixedMemory_ ? owner->getArg(StackBackingArgumentIndex(borrowed)) : nullptr);
+            Value* ownerRegion = physicalRootMode ? rootRouteKeys[unit.OutputRoot] : regionKey;
+            auto functionArguments = [&]() {
                 SmallVector<Value*, 4> arguments;
                 if (unit.BorrowedContext) {
                     arguments.push_back(owner->getArg(0));
                 }
-                arguments.push_back(owner->getArg(FiberArgumentIndex(borrowed)));
-                arguments.push_back(owner->getArg(ControlArgumentIndex(borrowed)));
+                arguments.push_back(ownerFiber);
+                arguments.push_back(ownerControl);
                 if (FixedMemory_) {
-                    arguments.push_back(owner->getArg(StackBackingArgumentIndex(borrowed)));
+                    arguments.push_back(ownerStack);
                 }
+                arguments.push_back(ownerRegion);
                 return arguments;
             };
-            if (!unit.Merged) {
-                MarkFlattenClass(*unit.Func, bpf::md::FlattenUnit, flattenClass);
+
+            if (unit.Merged) {
+                continue;
             }
-            auto* caseBlock = BasicBlock::Create(Ctx_, unit.Func->getName(), caseFunction);
+            MarkFlattenClass(*unit.Func, bpf::md::FlattenUnit, physicalRootMode ? physicalClassBase + unit.OutputRoot : flattenClass);
+            auto* caseBlock = BasicBlock::Create(Ctx_, unit.Func->getName(), owner);
             IRBuilder<> cb(caseBlock);
-            SmallVector<Value*, 4> arguments = functionArguments(caseFunction);
-            Value* action = cb.CreateCall(unit.Func, arguments);
-            cb.CreateRet(action);
-            if (DirectDispatch_) {
-                for (auto state : unit.States) {
-                    addDispatchCase(state.Pc, caseBlock);
+            cb.CreateRet(cb.CreateCall(unit.Func, functionArguments()));
+            if (physicalRootMode) {
+                if (IndirectDispatch_) {
+                    for (const ManagedFunction::State& state : unit.States) {
+                        rootSwitches[unit.OutputRoot]->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Pc)), caseBlock);
+                    }
+                    continue;
                 }
+                uint32_t begin = UINT32_MAX;
+                uint32_t end = 0;
+                for (const ManagedFunction::State& state : unit.States) {
+                    uint32_t index = DispatchRegionKey(state.Pc);
+                    begin = std::min(begin, index);
+                    end = std::max(end, index);
+                }
+                if ((end - begin) / (1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) + 1 != unit.States.size()) {
+                    report_fatal_error("stackify: allocation-unit region range is not contiguous");
+                }
+                rootRoutes[unit.OutputRoot].push_back({begin, end, caseBlock});
             } else {
-                addDispatchCase(dispatchUnit, caseBlock);
+                for (const ManagedFunction::State& state : unit.States) {
+                    sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Pc)), caseBlock);
+                }
+            }
+        }
+
+        // Select one allocation unit by an explicit balanced range tree.
+        // Building the ranges here, rather than relying on target switch
+        // lowering, guarantees that every unit prologue reaches the verifier
+        // with one range state instead of one precise state per region.
+        for (unsigned root = 0; root < rootRoutes.size(); ++root) {
+            if (IndirectDispatch_) {
+                continue;
+            }
+            auto& routes = rootRoutes[root];
+            llvm::sort(routes, [](const UnitRoute& a, const UnitRoute& b) { return a.Begin < b.Begin; });
+            for (unsigned index = 1; index < routes.size(); ++index) {
+                if (routes[index - 1].End + (1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) != routes[index].Begin) {
+                    report_fatal_error("stackify: allocation-unit region ranges are not dense");
+                }
+            }
+            if (routes.empty()) {
+                IRBuilder<>(rootDispatches[root]).CreateBr(rootTraps[root]);
+                continue;
+            }
+            auto* routeEntry = BasicBlock::Create(Ctx_, "unit.route", rootFunctions[root], rootTraps[root]);
+            IRBuilder<>(rootDispatches[root]).CreateBr(routeEntry);
+            struct RouteTreeRange {
+                BasicBlock* Block;
+                unsigned Begin;
+                unsigned End;
+            };
+            SmallVector<RouteTreeRange, 32> pending;
+            pending.push_back({routeEntry, 0, unsigned(routes.size())});
+            while (!pending.empty()) {
+                RouteTreeRange range = pending.pop_back_val();
+                IRBuilder<> rb(range.Block);
+                if (range.End - range.Begin == 1) {
+                    rb.CreateBr(routes[range.Begin].Target);
+                    continue;
+                }
+                unsigned middle = range.Begin + (range.End - range.Begin) / 2;
+                auto* left = BasicBlock::Create(Ctx_, "unit.route.left", rootFunctions[root], rootTraps[root]);
+                auto* right = BasicBlock::Create(Ctx_, "unit.route.right", rootFunctions[root], rootTraps[root]);
+                rb.CreateCondBr(rb.CreateICmpULT(rootRouteKeys[root], ConstantInt::get(I32_, routes[middle].Begin)), left, right);
+                pending.push_back({right, middle, range.End});
+                pending.push_back({left, range.Begin, middle});
             }
         }
 
@@ -5519,6 +5550,7 @@ private:
     DenseMap<Function*, ManagedFunction*> ManagedByFunction_;
     SmallVector<std::unique_ptr<Region>> Regions_;
     SmallVector<AllocationUnit> Units_;
+    SmallVector<std::pair<WeakTrackingVH, uint32_t>> PendingRegionCounterStores_;
     uint32_t NextPc_ = 1;
 
     uint64_t FiberStackSize_ = 0;
@@ -5537,7 +5569,6 @@ private:
     ArrayType* FiberControlsType_ = nullptr;
     StructType* FiberControlType_ = nullptr;
     GlobalVariable* FiberConfig_ = nullptr;
-    GlobalVariable* PcUnitTable_ = nullptr;
     StructType* FiberConfigType_ = nullptr;
     DenseMap<Function*, Value*> NativeFiberControls_;
     Function* ScalarTrampoline_ = nullptr;
@@ -5557,17 +5588,17 @@ private:
     bool VerifierPointerError_ = false;
     bool InputError_ = false;
     bool FixedMemory_ = false;
-    bool DirectDispatch_ = false;
-    bool BoundedDispatch_ = false;
+    bool IndirectDispatch_ = false;
     bool FreplaceRoots_ = false;
     unsigned PhysicalScalarRoots_ = 0;
     unsigned PhysicalBorrowedRoots_ = 0;
+    unsigned ScalarStepCount_ = 0;
 };
 
 } // namespace
 
 PreservedAnalyses Stackify::run(Module& module, ModuleAnalysisManager&) {
-    StackifyImpl impl(module, FixedMemory_, DirectDispatch_, BoundedDispatch_);
+    StackifyImpl impl(module, FixedMemory_, IndirectDispatch_);
     if (!impl.run()) {
         // Input diagnostics can be discovered after domain selection has
         // already inlined or erased functions. Be conservative about every
@@ -5701,12 +5732,10 @@ PreservedAnalyses Stackify::run(Module& module, ModuleAnalysisManager&) {
 bool RegisterStackifyPass(StringRef name, ModulePassManager& manager) {
     if (name == "bpf-stackify") {
         manager.addPass(Stackify());
+    } else if (name == "bpf-stackify-indirect") {
+        manager.addPass(Stackify(StackifyMode::ArenaIndirect));
     } else if (name == "bpf-stackify-fixed") {
         manager.addPass(Stackify(StackifyMode::Fixed));
-    } else if (name == "bpf-stackify-fixed-v3") {
-        manager.addPass(Stackify(StackifyMode::FixedV3));
-    } else if (name == "bpf-stackify-direct") {
-        manager.addPass(Stackify(StackifyMode::Direct));
     } else {
         return false;
     }

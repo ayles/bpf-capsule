@@ -7,7 +7,7 @@ target triple = "bpfel"
 %wide = type { i64, i64, i64 }
 
 @bpf_capsule_fibers = global [1 x %fiber_control] zeroinitializer, section ".bss.bpfctrl", align 8
-@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 1, i32 0, i32 1112556353, i32 7, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 1, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @sum_pointer = global ptr @sum_values
 @wide_direct = global %wide { i64 4, i64 5, i64 6 }, align 8
 @wide_indirect = global %wide { i64 10, i64 11, i64 12 }, align 8

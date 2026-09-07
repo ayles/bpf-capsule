@@ -253,15 +253,15 @@ entry.resume.resume.resume.resume:                ; preds = %unit.test.right7
   ret i32 0
 
 unit.dispatch1:                                   ; preds = %unit.dispatch
-  %8 = icmp ult i32 %region, 768, !dbg !52
+  %8 = icmp ult i32 %region, 3, !dbg !52
   br i1 %8, label %unit.test.left, label %unit.test.right, !dbg !52
 
 unit.test.left:                                   ; preds = %unit.dispatch1
-  %9 = icmp ult i32 %region, 512
+  %9 = icmp ult i32 %region, 2
   br i1 %9, label %unit.test.left2, label %unit.test.right3
 
 unit.test.right:                                  ; preds = %unit.dispatch1
-  %10 = icmp ult i32 %region, 1024
+  %10 = icmp ult i32 %region, 4
   br i1 %10, label %unit.test.left4, label %unit.test.right5
 
 unit.test.left2:                                  ; preds = %unit.test.left
@@ -274,7 +274,7 @@ unit.test.left4:                                  ; preds = %unit.test.right
   br label %entry.resume.resume
 
 unit.test.right5:                                 ; preds = %unit.test.right
-  %11 = icmp ult i32 %region, 1280
+  %11 = icmp ult i32 %region, 5
   br i1 %11, label %unit.test.left6, label %unit.test.right7
 
 unit.test.left6:                                  ; preds = %unit.test.right5
@@ -410,7 +410,7 @@ route:                                            ; preds = %iterate
 
 dispatch:                                         ; preds = %route
   %step = and i32 %pc, 255, !dbg !74
-  %region = and i32 %pc, 16776960, !dbg !74
+  %region = lshr i32 %pc, 8, !dbg !74
   switch i32 %step, label %bad.id [
     i32 0, label %bpf.dispatch.output.scalar.0
   ], !dbg !74
@@ -441,29 +441,26 @@ entry:
   br i1 %0, label %dispatch, label %bad.id, !dbg !80
 
 dispatch:                                         ; preds = %entry
-  br label %unit.route, !dbg !80
+  switch i32 %region, label %bad.id [
+    i32 1, label %bpf.unit.0
+    i32 2, label %bpf.unit.0
+    i32 3, label %bpf.unit.0
+    i32 4, label %bpf.unit.0
+    i32 5, label %bpf.unit.0
+    i32 6, label %bpf.unit.1
+  ], !dbg !80
 
-unit.route:                                       ; preds = %dispatch
-  %1 = icmp ult i32 %region, 1536, !dbg !80
-  br i1 %1, label %unit.route.left, label %unit.route.right, !dbg !80
-
-unit.route.left:                                  ; preds = %unit.route
-  br label %bpf.unit.0, !dbg !80
-
-unit.route.right:                                 ; preds = %unit.route
-  br label %bpf.unit.1, !dbg !80
-
-bad.id:                                           ; preds = %entry
-  %2 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !80
+bad.id:                                           ; preds = %dispatch, %entry
+  %1 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !80
   ret i32 1, !dbg !80
 
-bpf.unit.0:                                       ; preds = %unit.route.left
-  %3 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !80
-  ret i32 %3, !dbg !80
+bpf.unit.0:                                       ; preds = %dispatch, %dispatch, %dispatch, %dispatch, %dispatch
+  %2 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !80
+  ret i32 %2, !dbg !80
 
-bpf.unit.1:                                       ; preds = %unit.route.right
-  %4 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !80
-  ret i32 %4, !dbg !80
+bpf.unit.1:                                       ; preds = %dispatch
+  %3 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !80
+  ret i32 %3, !dbg !80
 }
 
 ; Function Attrs: noinline
@@ -495,7 +492,7 @@ route:                                            ; preds = %iterate
 
 dispatch:                                         ; preds = %route
   %step = and i32 %pc, 255, !dbg !86
-  %region = and i32 %pc, 16776960, !dbg !86
+  %region = lshr i32 %pc, 8, !dbg !86
   switch i32 %step, label %bad.id [
     i32 1, label %bpf.dispatch.output.ctx.0
     i32 0, label %scalar.root.0
@@ -531,16 +528,15 @@ entry:
   br i1 %0, label %dispatch, label %bad.id, !dbg !93
 
 dispatch:                                         ; preds = %entry
-  br label %unit.route, !dbg !93
+  switch i32 %region, label %bad.id [
+    i32 1, label %bpf.unit.2
+  ], !dbg !93
 
-unit.route:                                       ; preds = %dispatch
-  br label %bpf.unit.2, !dbg !93
-
-bad.id:                                           ; preds = %entry
+bad.id:                                           ; preds = %dispatch, %entry
   %1 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !93
   ret i32 1, !dbg !93
 
-bpf.unit.2:                                       ; preds = %unit.route
+bpf.unit.2:                                       ; preds = %dispatch
   %2 = call i32 @bpf.unit.2(ptr %ctx, i32 %fiber, ptr %fiber_control, i32 %region), !dbg !93
   ret i32 %2, !dbg !93
 }

@@ -146,7 +146,6 @@ std::string capsulePreparationPipeline() {
 }
 
 std::string capsuleFinalPipeline() {
-    bool v4 = CPU == "v4";
     bool arena = Memory == MemoryMode::Arena;
     std::string pipeline = "function(bpf-expand-mem),bpf-internalize,globaldce,function(bpf-validate-no-float),"
                            "function(bpf-normalize-irreducible,fix-irreducible),bpf-capsule-domains,bpf-remove-suspend-barriers,";
@@ -154,11 +153,7 @@ std::string capsuleFinalPipeline() {
         pipeline += arena ? "function(bpf-lower-managed-atomics)," : "function(bpf-lower-managed-atomics-fixed),";
     }
     pipeline += "function(" + std::string(ManagedAtomics ? "bpf-validate-managed-atomics" : "bpf-validate-atomics") + "),";
-    if (!arena) {
-        pipeline += v4 ? "bpf-stackify-fixed," : "bpf-stackify-fixed-v3,";
-    } else {
-        pipeline += IndirectJumps ? "bpf-stackify-direct," : "bpf-stackify,";
-    }
+    pipeline += arena ? (IndirectJumps ? "bpf-stackify-indirect," : "bpf-stackify,") : "bpf-stackify-fixed,";
     pipeline +=
         // Stackify introduces the entry-to-driver call after whole-program O2.
         // The driver source marks only its top wrapper alwaysinline; use LLVM's

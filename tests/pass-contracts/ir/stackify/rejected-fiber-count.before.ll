@@ -6,7 +6,7 @@ target triple = "bpfel"
 %config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64 }
 
 @bpf_capsule_fibers = global [0 x %fiber_control] zeroinitializer, section ".bss.bpfctrl", align 8
-@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 0, i32 4096, i32 0, i32 0, i32 1, i32 0, i32 1112556353, i32 7, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 0, i32 4096, i32 0, i32 0, i32 1, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 
 declare i32 @__bpf_capsule_trampoline_step(i32, ptr)
 

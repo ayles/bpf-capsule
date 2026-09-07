@@ -59,7 +59,6 @@ inline constexpr llvm::StringLiteral StackBacking{"bpf.capsule.stack.backing"};
 // adapt argument signatures (scalar into borrowed-context today); its selected
 // register moves remain in place when the terminal CALL is removed.
 inline constexpr llvm::StringLiteral FlattenUnit{"bpf.capsule.flatten.unit"};
-inline constexpr llvm::StringLiteral FlattenRouter{"bpf.capsule.flatten.router"};
 inline constexpr llvm::StringLiteral FlattenRoot{"bpf.capsule.flatten.root"};
 inline constexpr llvm::StringLiteral FlattenedUnits{"bpf.capsule.flattened.units"};
 inline constexpr llvm::StringLiteral FreplaceRoots{"bpf.capsule.freplace.roots"};

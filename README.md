@@ -21,11 +21,11 @@ inlining, it cuts the computation into small, self-contained execution
 regions. A region is a bounded piece of ordinary control flow that runs until
 a transformed call, return, yield, or loop boundary.
 
-Each active computation leases a **fiber**. Its control record stores the
-current region number, software stack and frame pointers, completion status,
-and continuation generation. The runtime calls the region number the **PC**,
-but it is a dense compiler-assigned resume-point ID, not a machine instruction
-address.
+Each active computation leases a **fiber**. Its control record stores a packed
+region counter, software stack and frame pointers, completion status, and
+continuation generation. The field is historically named **PC**, but it is not
+a machine instruction address: its low eight bits select a physical step and
+the next sixteen identify the resume region inside that step.
 
 Each fiber also owns a fixed slice of a **software stack** in Capsule memory.
 Arguments, call linkage, and values that must survive a region boundary live
@@ -86,7 +86,7 @@ Capsule transformation, and emits the final BPF object.
 
 Generated objects load through ordinary libbpf on unmodified x86-64 and arm64
 kernels. The test matrix starts at Linux 5.15; newer profiles use `bpf_arena`
-and indirect region dispatch where the kernel and JIT support them.
+and indirect root selection where the kernel and JIT support them.
 
 [DESIGN.md](DESIGN.md) is the technical description of the current system: the
 execution model, fibers, software calling convention, memory backends,

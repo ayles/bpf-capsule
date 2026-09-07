@@ -6,7 +6,7 @@ target triple = "bpfel"
 %config = type { i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i64 }
 
 @bpf_capsule_fibers = global [1 x %fiber_control] zeroinitializer, section ".bss.bpfctrl", align 8
-@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 0, i32 1112556353, i32 7, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_call_stack = internal global [262144 x i8] zeroinitializer, align 262144, !bpf.fiber.stack.size !0
 
 declare ptr @__bpf_capsule_stack_region(i32)
@@ -51,7 +51,7 @@ entry:
   %fiber.index5 = and i32 %fiber.index, 0
   %fiber.control6 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index5, !bpf.capsule.sectioned.bounded !2
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber.control6, i32 0, i32 5
-  store i32 1, ptr %fiber.pc, align 4
+  store i32 256, ptr %fiber.pc, align 4
   %fiber.index7 = and i32 %fiber.index, 0
   %fiber.control8 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index7, !bpf.capsule.sectioned.bounded !2
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber.control8, i32 0, i32 3
@@ -88,27 +88,20 @@ unit.entry:
   %0 = icmp ne ptr %fiber_control, null
   br i1 %0, label %unit.control.ready, label %unit.control.missing
 
-unit.control.ready:                               ; preds = %unit.entry
-  %1 = icmp ne ptr %stack_base, null
-  br i1 %1, label %step.lifecycle, label %unit.stack.missing
-
-unit.control.missing:                             ; preds = %unit.entry
-  ret i32 1
-
-step.lifecycle:                                   ; preds = %unit.control.ready
+step.lifecycle:                                   ; preds = %unit.stack.ready
   %fiber.pc2 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   %pc = load i32, ptr %fiber.pc2, align 4
-  %2 = icmp eq i32 %pc, -1
+  %1 = icmp eq i32 %pc, -1
   %fiber.outcome3 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %3 = load i64, ptr %fiber.outcome3, align 8
-  %4 = icmp ne i64 %3, 0
-  %5 = icmp eq i32 %pc, 0
-  %6 = or i1 %2, %4
-  %7 = or i1 %5, %6
-  br i1 %7, label %step.terminal, label %unit.stack.ready
+  %2 = load i64, ptr %fiber.outcome3, align 8
+  %3 = icmp ne i64 %2, 0
+  %4 = icmp eq i32 %pc, 0
+  %5 = or i1 %1, %3
+  %6 = or i1 %4, %5
+  br i1 %6, label %step.terminal, label %unit.dispatch
 
 step.terminal:                                    ; preds = %step.lifecycle
-  br i1 %2, label %step.completed, label %step.stop
+  br i1 %1, label %step.completed, label %step.stop
 
 step.completed:                                   ; preds = %step.terminal
   store i32 0, ptr %fiber.pc2, align 4
@@ -117,7 +110,20 @@ step.completed:                                   ; preds = %step.terminal
 step.stop:                                        ; preds = %step.completed, %step.terminal
   ret i32 1
 
-unit.stack.ready:                                 ; preds = %step.lifecycle
+unit.dispatch:                                    ; preds = %step.lifecycle
+  %fiber.pc4 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
+  %region.counter = load i32, ptr %fiber.pc4, align 4
+  %region = and i32 %region.counter, 16776960
+  br label %unit.dispatch5
+
+unit.control.ready:                               ; preds = %unit.entry
+  %7 = icmp ne ptr %stack_base, null
+  br i1 %7, label %unit.stack.ready, label %unit.stack.missing
+
+unit.control.missing:                             ; preds = %unit.entry
+  ret i32 1
+
+unit.stack.ready:                                 ; preds = %unit.control.ready
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   %frame.fp = load i64, ptr %fiber.fp, align 8
   %fiber.index = and i32 %fiber, 0
@@ -127,46 +133,43 @@ unit.stack.ready:                                 ; preds = %step.lifecycle
   %stack.linear.offset = add i64 %9, %stack.offset
   %fiber.stack = getelementptr i8, ptr @bpf_call_stack, i64 %stack.linear.offset
   call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %stack_base)
-  %fiber.pc4 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  %pc5 = load i32, ptr %fiber.pc4, align 4
-  %10 = icmp ult i32 %pc5, 2
-  br i1 %10, label %unit.test.left, label %unit.test.right
+  br label %step.lifecycle
 
 unit.stack.missing:                               ; preds = %unit.control.ready
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %11 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -34359738365)
+  %10 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -34359738365)
   ret i32 1
 
 root.prologue:                                    ; preds = %unit.test.left
   %frame.sp = sub i64 %frame.fp, 0
   %slice.offset = and i64 %frame.fp, 262143
-  %12 = icmp ult i64 %slice.offset, 131072
-  br i1 %12, label %root.prologue.overflow, label %entry
+  %11 = icmp ult i64 %slice.offset, 131072
+  br i1 %11, label %root.prologue.overflow, label %entry
 
 entry:                                            ; preds = %root.prologue
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
   store i64 %frame.sp, ptr %fiber.sp, align 8
   %fiber.pc5 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  store i32 2, ptr %fiber.pc5, align 4
+  store i32 512, ptr %fiber.pc5, align 4
   %fiber.outcome6 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
   store i64 2, ptr %fiber.outcome6, align 8
   ret i32 1
 
 root.prologue.overflow:                           ; preds = %root.prologue
   %fiber.outcome1 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %13 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
+  %12 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
   ret i32 0
 
 entry.yield.resume:                               ; preds = %unit.test.right
-  %14 = getelementptr i8, ptr %fiber.stack, i64 24
-  %value = load i32, ptr %14, align 4
+  %13 = getelementptr i8, ptr %fiber.stack, i64 24
+  %value = load i32, ptr %13, align 4
   %result = add i32 %value, 1
   %result.slot = getelementptr i8, ptr %fiber.stack, i64 16
   store i32 %result, ptr %result.slot, align 8
-  %15 = getelementptr i8, ptr %fiber.stack, i64 8
-  %return.pc = load i32, ptr %15, align 4
-  %16 = getelementptr i8, ptr %fiber.stack, i64 0
-  %saved.fp = load i64, ptr %16, align 8
+  %14 = getelementptr i8, ptr %fiber.stack, i64 8
+  %return.pc = load i32, ptr %14, align 4
+  %15 = getelementptr i8, ptr %fiber.stack, i64 0
+  %saved.fp = load i64, ptr %15, align 8
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   store i32 %return.pc, ptr %fiber.pc, align 4
   %return.sp = add i64 %frame.fp, 16
@@ -176,17 +179,15 @@ entry.yield.resume:                               ; preds = %unit.test.right
   store i64 %saved.fp, ptr %fiber.fp4, align 8
   ret i32 0
 
-unit.test.left:                                   ; preds = %unit.stack.ready
-  %17 = icmp eq i32 %pc5, 1
-  br i1 %17, label %root.prologue, label %unit.unknown
+unit.dispatch5:                                   ; preds = %unit.dispatch
+  %16 = icmp ult i32 %region, 512
+  br i1 %16, label %unit.test.left, label %unit.test.right
 
-unit.test.right:                                  ; preds = %unit.stack.ready
-  %18 = icmp eq i32 %pc5, 2
-  br i1 %18, label %entry.yield.resume, label %unit.unknown
+unit.test.left:                                   ; preds = %unit.dispatch5
+  br label %root.prologue
 
-unit.unknown:                                     ; preds = %unit.test.right, %unit.test.left
-  %19 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
-  ret i32 0
+unit.test.right:                                  ; preds = %unit.dispatch5
+  br label %entry.yield.resume
 }
 
 attributes #0 = { "capsule.trampoline" }

@@ -211,10 +211,8 @@ capsule_ir_pass_contract(stackify-branching-loop "bpf-stackify" stackify/branchi
 capsule_ir_pass_contract(stackify-virtualized-loop "bpf-stackify" stackify/virtualized-loop)
 capsule_ir_pass_contract(stackify-terminating-helper "bpf-stackify" stackify/terminating-helper)
 capsule_ir_pass_contract(stackify-native-runtime-btf "bpf-stackify" stackify/native-runtime-btf)
-capsule_ir_pass_contract(stackify-direct "bpf-stackify-direct" stackify-direct/two-region)
+capsule_ir_pass_contract(stackify-indirect "bpf-stackify-indirect" stackify-indirect/borrowed-context)
 capsule_ir_pass_contract(stackify-fixed "bpf-stackify-fixed" stackify-fixed/two-region)
-capsule_ir_pass_contract(stackify-fixed-v3 "bpf-stackify-fixed-v3" stackify-fixed-v3/two-region)
-capsule_ir_pass_contract(stackify-fixed-v3-branching-loop "bpf-stackify-fixed-v3" stackify-fixed-v3/branching-loop)
 capsule_mir_pass_contract(
     unified-spills-scalar
     "bpf-unified-spills"

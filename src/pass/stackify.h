@@ -7,9 +7,8 @@
 
 enum class StackifyMode {
     Arena,
+    ArenaIndirect,
     Fixed,
-    FixedV3,
-    Direct,
 };
 
 // Moves the call stack of "managed" functions into an explicit software stack
@@ -17,17 +16,15 @@ enum class StackifyMode {
 class Stackify : public llvm::PassInfoMixin<Stackify> {
 public:
     explicit Stackify(StackifyMode mode = StackifyMode::Arena)
-        : FixedMemory_(mode == StackifyMode::Fixed || mode == StackifyMode::FixedV3)
-        , DirectDispatch_(mode == StackifyMode::Direct)
-        , BoundedDispatch_(mode == StackifyMode::FixedV3) {
+        : FixedMemory_(mode == StackifyMode::Fixed)
+        , IndirectDispatch_(mode == StackifyMode::ArenaIndirect) {
     }
 
     llvm::PreservedAnalyses run(llvm::Module& module, llvm::ModuleAnalysisManager& am);
 
 private:
     bool FixedMemory_;
-    bool DirectDispatch_;
-    bool BoundedDispatch_;
+    bool IndirectDispatch_;
 };
 
 bool RegisterStackifyPass(llvm::StringRef name, llvm::ModulePassManager& manager);

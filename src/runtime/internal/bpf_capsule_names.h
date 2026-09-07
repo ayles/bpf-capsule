@@ -34,7 +34,6 @@
 #define BPF_CAPSULE_SECTION_FIBER_CONTROLS ".bss.bpfctrl"
 #define BPF_CAPSULE_SECTION_READY ".data.bpfrdy"
 #define BPF_CAPSULE_SECTION_FIXUPS ".rodata.bpffix"
-#define BPF_CAPSULE_SECTION_PC_TABLE ".rodata.bpfpc"
 #define BPF_CAPSULE_SECTION_DATA_HEAP_PREFIX ".data.heap"
 #define BPF_CAPSULE_SECTION_BSS_HEAP_PREFIX ".bss.heap"
 

@@ -10,8 +10,8 @@ using namespace llvm;
 
 namespace {
 
-// Wide switches — the trampoline's allocation-unit dispatch is one in every
-// program — must not become .jumptables indirect jumps: this pass runs for
+// Wide switches — including generated root selection — must not become
+// .jumptables indirect jumps: this pass runs for
 // targets without a working insn-array flow (BPF_MAP_TYPE_INSN_ARRAY,
 // PTR_TO_INSN, libbpf relocation, the base+index lowering). The attribute
 // travels in the bitcode, so every llc invocation lowers switches as compare

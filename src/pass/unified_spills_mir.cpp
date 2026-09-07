@@ -11,10 +11,11 @@
 //
 // Spill words whose contents are provably scalar move into a transient extent
 // at the low end of the current fiber's existing unified stack. Managed
-// frames grow down from the high end; an anchor supplies the resolved backing
-// pointer and current managed SP. Stackify bounds every descent against the
-// transient reserve, while this pass proves that the relocated extent fits in
-// that reserve; no per-spill collision check is needed.
+// frames grow down from the high end; an anchor supplies either the resolved
+// fixed-tier backing pointer or the arena fiber-control pointer. Stackify
+// bounds every descent against the transient reserve, while this pass proves
+// that the relocated extent fits in that reserve; no per-spill collision check
+// is needed.
 // Words holding a rematerializable ld_imm64+const pointer are deleted and
 // their reloads recomputed; everything else stays on the real BPF stack. No
 // register can be reserved without rebuilding LLVM, so the managed base is
@@ -2115,12 +2116,15 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
     };
 
     // --------------------------------------------------------------- rewrite
-    // Save the anchor's backing pointer in the packed native frame. The
-    // anchor register holds the raw full-address stack base — a scalar to
-    // the verifier — while the rewritten accesses below dereference the
-    // reloaded slot directly, so the SAVED value must carry the arena
-    // permission: license a copy in place (the cast truncates, so the
-    // original register is preserved around it), store it, and restore.
+    // Save the fiber-slice backing pointer in the packed native frame. On the
+    // fixed tier the anchor already carries the map-value pointer. On arena
+    // it carries the fiber-control pointer; load fp only for a unit which
+    // actually relocated spills. The stack bank and each power-of-two slice
+    // share the required alignment, so masking fp recovers the slice base.
+    // The rewritten accesses below dereference the reloaded slot directly,
+    // so the SAVED arena value must carry pointer permission: license a copy
+    // in place (the cast truncates, so the original register is preserved
+    // around it), store it, and restore.
     // Spill slots keep a pointer's verifier type, so every reload below is
     // licensed for free. No bound check is emitted here: every descent is
     // bounded at its source (entry prologues and carve sites, against the
@@ -2136,6 +2140,8 @@ bool BPFUnifiedSpillsMIR::runOnMachineFunction(MachineFunction& MF) {
         const bool arenaBacked = function.getParent()->getGlobalVariable(bpf::sym::ArenaMap, /*AllowInternal=*/true) != nullptr;
         if (arenaBacked) {
             BuildMI(block, at, dl, TII->get(opSTD)).addReg(anchor.base).addReg(R10).addImm(borrowOff);
+            BuildMI(block, at, dl, TII->get(opLDD), anchor.base).addReg(anchor.base).addImm(__builtin_offsetof(__bpf_capsule_fiber_control, fp));
+            BuildMI(block, at, dl, TII->get(opANDri), anchor.base).addReg(anchor.base).addImm(-int64_t(fiberStackSize));
             BuildMI(block, at, dl, TII->get(opCast), anchor.base).addReg(anchor.base).addImm(0).addImm(1);
         }
         BuildMI(block, at, dl, TII->get(opSTD)).addReg(anchor.base).addReg(R10).addImm(baseOff);

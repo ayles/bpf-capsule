@@ -130,10 +130,11 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     Function* StackFault_ = nullptr;
     SmallPtrSet<Instruction*, 32> PromotedStackAccesses_;
     std::unordered_map<Function*, Constant*> FunctionIds_;
+    DenseMap<Function*, LoadInst*> MemoryViewBases_;
     // Non-managed function identities follow the managed token range: the
     // 1MiB above window + TOKEN_DISPLACEMENT + TOKEN_LIMIT (both spans are
     // part of the configure-time PROT_NONE reservation).
-    uint64_t NextFunctionId_ = BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT;
+    uint64_t NextFunctionId_ = BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN;
     SmallVector<uint64_t> FixupSlots_;
 
     static constexpr unsigned ConfigHeapBase = BPF_CAPSULE_OBJECT_CONFIG_HEAP_BASE;
@@ -315,9 +316,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                         // pre-load host view base, so published pointers
                         // dereference on the host as-is. The frozen read folds
                         // to the baked constant at verification.
-                        Value* viewSlot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
-                        auto* viewBase = b.CreateLoad(Type::getInt64Ty(module.getContext()), viewSlot, "bpf.view.base");
-                        viewBase->setVolatile(true);
+                        Value* viewBase = MemoryViewBase(*call->getFunction());
                         address = b.CreateAdd(viewBase, address, "bpf.heap.address");
                     }
                     replacement = b.CreateIntToPtr(address, intrinsic->getReturnType(), "bpf.heap.start");
@@ -359,7 +358,11 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (uses.empty()) {
                 continue;
             }
+            LoadInst* viewBase = arenaControl ? nullptr : MemoryViewBase(function);
             IRBuilder<> b(EntryPrologueInsertionPoint(function));
+            if (viewBase) {
+                b.SetInsertPoint(viewBase->getParent(), std::next(viewBase->getIterator()));
+            }
             Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigStackBase);
             auto* offset32 = b.CreateLoad(Type::getInt32Ty(module.getContext()), slot, "bpf.stack.base.offset32");
             offset32->setVolatile(true);
@@ -383,9 +386,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // full-pointer representation the arena branch produces; the
             // frozen window read folds at verification and the fast-path
             // slice/region derivations see through it (IsViewBaseLoad).
-            Value* viewSlot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
-            auto* viewBase = b.CreateLoad(Type::getInt64Ty(module.getContext()), viewSlot, "bpf.view.base");
-            viewBase->setVolatile(true);
             address = b.CreateAdd(viewBase, offset, "bpf.stack.address");
             Value* pointer = b.CreateIntToPtr(address, SoftwareStackGlobal_->getType(), "bpf.stack.base.pointer");
             for (Use* use : uses) {
@@ -421,12 +421,25 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         llvm_unreachable("entry block has no terminator");
     }
 
+    LoadInst* MemoryViewBase(Function& function) {
+        if (auto found = MemoryViewBases_.find(&function); found != MemoryViewBases_.end()) {
+            return found->second;
+        }
+        GlobalVariable* config = ObjectConfig(*function.getParent());
+        IRBuilder<> b(EntryPrologueInsertionPoint(function));
+        Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
+        auto* base = b.CreateLoad(Type::getInt64Ty(function.getContext()), slot, "bpf.view.base");
+        base->setVolatile(true);
+        MemoryViewBases_[&function] = base;
+        return base;
+    }
+
     Constant* GetFunctionId(Function* f) {
         auto it = FunctionIds_.find(f);
         if (it != FunctionIds_.end()) {
             return it->second;
         }
-        if (NextFunctionId_ >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + 2ull * BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT) {
+        if (NextFunctionId_ >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + BPF_CAPSULE_FUNCTION_TOKEN_SPAN) {
             report_fatal_error("bpf-memory: function-token range exhausted");
         }
         auto* id = ConstantExpr::getIntToPtr(ConstantInt::get(IntegerType::getInt64Ty(f->getContext()), NextFunctionId_++), f->getType());
@@ -467,8 +480,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     // The displacement span holding managed function tokens and native
     // function identities, relative to the window base.
     static bool IsTokenDisplacement(uint64_t value) {
-        return value >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT &&
-            value < BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + 2ull * BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT;
+        return value >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT && value < BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + BPF_CAPSULE_FUNCTION_TOKEN_SPAN;
     }
 
     // Function tokens and native function ids are compile-time bare
@@ -484,7 +496,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     void RebaseTokenConstantsInCode(Module& module) {
         LLVMContext& ctx = module.getContext();
         auto* i64 = Type::getInt64Ty(ctx);
-        GlobalVariable* config = ObjectConfig(module);
         auto tokenConstant = [](Value* v) -> ConstantInt* {
             auto* ce = dyn_cast<ConstantExpr>(v);
             if (!ce || ce->getOpcode() != Instruction::IntToPtr) {
@@ -508,10 +519,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             if (uses.empty()) {
                 continue;
             }
-            IRBuilder<> b(EntryPrologueInsertionPoint(function));
-            Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
-            auto* window = b.CreateLoad(i64, slot, "bpf.view.base");
-            window->setVolatile(true);
+            LoadInst* window = MemoryViewBase(function);
+            IRBuilder<> b(window->getParent(), std::next(window->getIterator()));
             DenseMap<std::pair<uint64_t, Type*>, Value*> pointers;
             for (auto&& [use, ci] : uses) {
                 uint64_t displacement = ci->getZExtValue();
@@ -1381,8 +1390,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         }
         uint64_t resolved = value.getZExtValue();
         bool absolute = addressness == 1 ||
-            (resolved >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT &&
-                resolved < BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + 2ull * BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_LIMIT);
+            (resolved >= BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT && resolved < BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + BPF_CAPSULE_FUNCTION_TOKEN_SPAN);
         if (absolute) {
             if (size != 8) {
                 report_fatal_error("bpf-memory: a baked absolute pointer must occupy a full 8-byte slot");
@@ -1720,19 +1728,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                     convertUsersOfConstantsToInstructions(movableConstants, &function, /*RemoveDeadConstants=*/false);
                 }
             }
-            GlobalVariable* config = ObjectConfig(module);
-            DenseMap<Function*, Instruction*> windowLoads;
-            auto windowFor = [&](Function* function) -> Instruction* {
-                Instruction*& load = windowLoads[function];
-                if (!load) {
-                    IRBuilder<> b(EntryPrologueInsertionPoint(*function));
-                    Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
-                    auto* viewBase = b.CreateLoad(i64, slot, "bpf.view.base");
-                    viewBase->setVolatile(true);
-                    load = viewBase;
-                }
-                return load;
-            };
             for (auto* g : movable) {
                 if (g == SoftwareStackGlobal_) {
                     continue;
@@ -1747,7 +1742,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                     byFunction[inst->getFunction()].push_back(&use);
                 }
                 for (auto&& [function, uses] : byFunction) {
-                    Instruction* window = windowFor(function);
+                    Instruction* window = MemoryViewBase(*function);
                     IRBuilder<> b(window->getParent(), std::next(window->getIterator()));
                     Value* address = b.CreateAdd(window, ConstantInt::get(i64, offsets[g]), g->getName() + ".addr");
                     Value* pointer = b.CreateIntToPtr(address, g->getType(), g->getName() + ".ptr");
@@ -3195,12 +3190,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         // with the window base read from the frozen config.
         if (auto* ce = dyn_cast<ConstantExpr>(value); ce && ce->getOpcode() == Instruction::IntToPtr) {
             if (auto* ci = dyn_cast<ConstantInt>(ce->getOperand(0)); ci && IsTokenDisplacement(ci->getZExtValue())) {
-                Module& module = *b.GetInsertBlock()->getModule();
-                GlobalVariable* config = ObjectConfig(module);
-                auto* i64 = Type::getInt64Ty(module.getContext());
-                Value* slot = b.CreateStructGEP(config->getValueType(), config, ConfigMemoryViewBase);
-                auto* window = b.CreateLoad(i64, slot, "bpf.view.base");
-                window->setVolatile(true);
+                Function& function = *b.GetInsertBlock()->getParent();
+                auto* i64 = Type::getInt64Ty(function.getContext());
+                Value* window = MemoryViewBase(function);
                 Value* address = b.CreateAdd(window, ConstantInt::get(i64, ci->getZExtValue()), "capsule.token");
                 return b.CreateIntToPtr(address, value->getType(), "capsule.token.ptr");
             }

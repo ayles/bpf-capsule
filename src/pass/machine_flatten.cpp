@@ -262,7 +262,7 @@ void placeDispatchHierarchy(MachineFunction& function, ArrayRef<Function*> units
     // placement independently. Preserve that order inside it, but lay the
     // temporary terminal-call hierarchy out as compact windows:
     //
-    //   root dispatcher, router 0, router 0's regions, router 1, ...
+    //   root dispatcher, unit 0, unit 0's regions, unit 1, ...
     //
     // Putting each region immediately after its individual comparison leaf
     // interleaves application bodies with the comparison tree. On cpu=v3 that
