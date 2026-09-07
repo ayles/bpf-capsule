@@ -25,7 +25,7 @@ TEST(PipelineSmoke, RecursiveFibComputesInKernel) {
     }
     const volatile auto* control = &skeleton->bss_bpfctrl->bpf_capsule_fibers[0];
     ASSERT_EQ(state->capsule.status, (unsigned)CAPSULE_OK)
-        << "code " << state->capsule.code << ", pc " << control->pc << ", sp " << control->sp << ", fp " << control->fp;
+        << "code " << state->capsule.code << ", resume region " << control->resume_region_id << ", sp " << control->sp << ", fp " << control->fp;
     EXPECT_EQ(state->output, 6765u) << "fib(20)";
 
     EXPECT_EQ(bpf_capsule_release(&capsule), 0) << strerror(errno);

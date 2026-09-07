@@ -22,10 +22,10 @@ regions. A region is a bounded piece of ordinary control flow that runs until
 a transformed call, return, yield, or loop boundary.
 
 Each active computation leases a **fiber**. Its control record stores a packed
-region counter, software stack and frame pointers, completion status, and
-continuation generation. The field is historically named **PC**, but it is not
-a machine instruction address: its low eight bits select a physical step and
-the next sixteen identify the resume region inside that step.
+resume region ID, software stack and frame pointers, completion status, and
+continuation generation. A region is a suspension-free piece of code; its ID
+is an integer, not an address. The low eight bits select a physical step and
+the next sixteen identify the region inside that step.
 
 Each fiber also owns a fixed slice of a **software stack** in Capsule memory.
 Arguments, call linkage, and values that must survive a region boundary live
@@ -33,12 +33,12 @@ there. This is separate from BPF's 512-byte `r10` stack, which the generated
 code still uses within the normal limit while executing the current region.
 
 At a call between regions, the caller stores its live values and a complete
-call frame — return region, result slot, fixed arguments and any variadic
-tail — in the software stack, publishes the callee's entry region, and returns
-to the dispatcher. The callee later writes the result there, publishes the
-caller's resume region, and returns through the dispatcher too. A loop that
-cannot stay inside one region runs a bounded chunk, saves its loop-carried
-values and resume region, and crosses the same boundary.
+call frame — return region ID, result slot, fixed arguments and any variadic
+tail — in the software stack, publishes the callee's entry region ID, and
+returns to the dispatcher. The callee later writes the result there, publishes
+the caller's resume region ID, and returns through the dispatcher too. A loop
+that cannot stay inside one region runs a bounded chunk, saves its loop-carried
+values and resume region ID, and crosses the same boundary.
 
 Every cross-region edge is therefore a return to the bounded driver. Recursive
 source calls do not become recursive BPF calls, and dynamic loops become

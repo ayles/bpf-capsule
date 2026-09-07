@@ -2,9 +2,9 @@ source_filename = "no-jump-tables.ll"
 target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
 target triple = "bpfel"
 
-define i32 @dispatch(i32 %pc) #0 {
+define i32 @dispatch(i32 %region_id) #0 {
 entry:
-  switch i32 %pc, label %invalid [
+  switch i32 %region_id, label %invalid [
     i32 1, label %one
     i32 2, label %two
   ]

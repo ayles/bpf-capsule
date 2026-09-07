@@ -139,7 +139,7 @@ TEST_F(YieldTest, Protocol) {
         ASSERT_EQ(state_->result.status, (unsigned)CAPSULE_YIELD);
         uint32_t fiber = (uint32_t)state_->result.continuation & 0xffffu;
         ASSERT_LT(fiber, controls_count_);
-        controls_[fiber].pc = 0;
+        controls_[fiber].resume_region_id = 0;
         state_->stale_continuation = state_->result.continuation;
         ASSERT_EQ(Run("yield_test_stale_continue"), 0) << strerror(errno);
         EXPECT_EQ(state_->stale_result.status, (unsigned)CAPSULE_EXITED);

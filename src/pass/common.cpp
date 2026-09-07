@@ -30,7 +30,7 @@ bool bpf::IsFiberControlLayout(const StructType* control) {
         control->getElementType(BPF_CAPSULE_FIBER_CONTROL_CODE)->isIntegerTy(32) &&
         control->getElementType(BPF_CAPSULE_FIBER_CONTROL_GENERATION)->isIntegerTy(64) &&
         control->getElementType(BPF_CAPSULE_FIBER_CONTROL_SP)->isIntegerTy(64) && control->getElementType(BPF_CAPSULE_FIBER_CONTROL_FP)->isIntegerTy(64) &&
-        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_PC)->isIntegerTy(32) &&
+        control->getElementType(BPF_CAPSULE_FIBER_CONTROL_RESUME_REGION_ID)->isIntegerTy(32) &&
         control->getElementType(BPF_CAPSULE_FIBER_CONTROL_RETURN_SIZE)->isIntegerTy(32);
 }
 

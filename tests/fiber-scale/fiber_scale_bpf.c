@@ -46,7 +46,7 @@ int fiber_scale_count(void) {
 SEC("syscall")
 int fiber_scale_high(void) {
     fiber_scale_output.call_status = __bpf_capsule_call(FIBER_SCALE_LAST, (void*)0, (void*)0, 0, 1, (void*)fiber_scale_body, FIBER_SCALE_SEED);
-    fiber_scale_output.stack_cursor_zero = bpf_capsule_fibers[FIBER_SCALE_LAST].pc == 0;
+    fiber_scale_output.stack_cursor_zero = bpf_capsule_fibers[FIBER_SCALE_LAST].resume_region_id == 0;
     return 0;
 }
 

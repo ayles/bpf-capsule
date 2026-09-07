@@ -474,7 +474,7 @@ __attribute__((used, noinline)) uint32_t __bpf_capsule_fiber_acquire_page(uint32
 static __attribute__((always_inline)) void __bpf_capsule_clear_fiber(struct __bpf_capsule_fiber_control* control) {
     control->status = CAPSULE_OK;
     control->code = 0;
-    control->pc = 0;
+    control->resume_region_id = 0;
     control->sp = 0;
     control->fp = 0;
     control->return_size = 0;
@@ -537,7 +537,7 @@ static __attribute__((always_inline)) int __bpf_capsule_consume_continuation(uin
     int consumed = 0;
 #if BPF_CAPSULE_FEATURE_ARENA
     struct __bpf_capsule_fiber_control* control = &bpf_capsule_fibers[fiber];
-    if ((control->pc || control->status == CAPSULE_EXITED) && control->generation == generation) {
+    if ((control->resume_region_id || control->status == CAPSULE_EXITED) && control->generation == generation) {
         control->generation = next;
         consumed = 1;
     }
@@ -668,7 +668,7 @@ static __attribute__((always_inline)) int __bpf_capsule_prepare_continue(struct 
         __bpf_capsule_finish_exited(result, *fiber);
         return 0;
     }
-    if (!control->pc) {
+    if (!control->resume_region_id) {
         result->code = CAPSULE_ERROR_NOT_PENDING;
         result->status = CAPSULE_EXITED;
         result->continuation = BPF_CAPSULE_NO_CONTINUATION;
@@ -690,7 +690,7 @@ static __attribute__((always_inline)) struct capsule_result __bpf_capsule_finish
     } else if (control->status == CAPSULE_YIELD) {
         result.status = CAPSULE_YIELD;
         result.continuation = __bpf_capsule_make_continuation(fiber);
-    } else if (control->pc) {
+    } else if (control->resume_region_id) {
         result.status = CAPSULE_PENDING;
         result.continuation = __bpf_capsule_make_continuation(fiber);
     } else {

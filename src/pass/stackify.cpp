@@ -52,12 +52,15 @@ using namespace llvm;
 
 namespace {
 
-// The region counter lives in the fiber's pc register, not in the frame:
-// every suspension writes its resume target there, calls write the callee's
-// entry counter there and park the caller's resume counter in the linkage.
+// A region is a suspension-free piece of code; RegionId is its packed name.
+// The fiber's resume_region_id holds the region where execution resumes:
+// every suspension writes its resume region there, calls write the callee's
+// entry region there and park the caller's return region in the linkage.
 // Its low 8 bits select a physical step and the next 16 bits select the local
 // region. Managed function addresses are based tokens whose low word is that
-// entry counter.
+// entry region ID.
+
+using RegionId = bpf_capsule_region_id;
 
 static cl::opt<unsigned> FiberStackBytes(
     "bpf-fiber-stack-size", cl::init(256u * 1024u), cl::desc("Bytes of unified program memory reserved for each Capsule fiber stack"));
@@ -75,8 +78,8 @@ constexpr int ActionStop = 1;
 // but adds arithmetic to every call and obscures the frame chain.
 constexpr uint64_t LinkageBytes = 16;
 constexpr int64_t SavedFpOffset = 0;
-constexpr int64_t ReturnPcOffset = 8;
-constexpr int64_t JumpPcOffset = 0;
+constexpr int64_t ReturnRegionIdOffset = 8;
+constexpr int64_t JumpRegionIdOffset = 0;
 constexpr int64_t JumpSpOffset = 8;
 constexpr int64_t JumpFpOffset = 16;
 constexpr int64_t JumpResultOffset = 24;
@@ -280,10 +283,10 @@ struct ManagedFunction {
     Value* Fp = nullptr;
     Value* Frame = nullptr;
     Value* Control = nullptr; // staged fiber control, replaced by the physical step argument
-    uint32_t EntryPc = 0;
+    RegionId EntryRegionId = 0;
     enum class StateKind : uint8_t { Entry, Backedge, Call, Yield, Setjmp };
     struct State {
-        uint32_t Pc = 0;
+        RegionId Id = 0;
         BasicBlock* Root = nullptr;
         StateKind Kind = StateKind::Entry;
     };
@@ -522,14 +525,14 @@ public:
                     report_fatal_error(Twine("stackify: leftover call to ") + func->getName());
                 }
             }
-            if (info->EntryPc >= BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN) {
+            if (info->EntryRegionId >= BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN) {
                 report_fatal_error("stackify: managed function-token range exhausted");
             }
             // The compile-time token is the bare displacement; MemoryPass
             // rebases every code use onto the window (a folded frozen-config
             // read) and initializer slots are rebased at initialization.
             func->replaceAllUsesWith(
-                ConstantExpr::getIntToPtr(ConstantInt::get(I64_, BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + info->EntryPc), func->getType()));
+                ConstantExpr::getIntToPtr(ConstantInt::get(I64_, BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT + info->EntryRegionId), func->getType()));
             func->eraseFromParent();
         }
 
@@ -703,13 +706,13 @@ private:
         return b.CreateStructGEP(FiberControlType_, FiberControlPtr(b, fiber), BPF_CAPSULE_FIBER_CONTROL_STATUS, "fiber.outcome");
     }
 
-    Value* PcPtr(IRBuilder<>& b, Value* fiber = nullptr) {
-        return b.CreateStructGEP(FiberControlType_, FiberControlPtr(b, fiber), BPF_CAPSULE_FIBER_CONTROL_PC, "fiber.pc");
+    Value* ResumeRegionIdPtr(IRBuilder<>& b, Value* fiber = nullptr) {
+        return b.CreateStructGEP(FiberControlType_, FiberControlPtr(b, fiber), BPF_CAPSULE_FIBER_CONTROL_RESUME_REGION_ID, "fiber.resume.region.id");
     }
 
-    StoreInst* StoreProvisionalRegionCounter(IRBuilder<>& b, uint32_t counter, Value* pointer) {
-        StoreInst* store = b.CreateStore(ConstantInt::get(I32_, counter), pointer);
-        PendingRegionCounterStores_.push_back({WeakTrackingVH(store), counter});
+    StoreInst* StoreProvisionalRegionId(IRBuilder<>& b, RegionId regionId, Value* pointer) {
+        StoreInst* store = b.CreateStore(ConstantInt::get(I32_, regionId), pointer);
+        PendingRegionIdStores_.push_back({WeakTrackingVH(store), regionId});
         return store;
     }
 
@@ -1231,7 +1234,7 @@ private:
             if (!IsStackifiable(func) || func.getMetadata(bpf::md::NoSuspend) || func.getMetadata(bpf::md::NativeScalar)) {
                 continue;
             }
-            // Provisional entry counters are handed out after the managed set
+            // Provisional entry region IDs are handed out after the managed set
             // is fixed. Physical steps and local regions are packed later,
             // once allocation units and merge roots are known.
             CheckSignature(func);
@@ -1240,7 +1243,7 @@ private:
             Managed_.emplace_back(&func, std::move(info));
         }
         // llvm-link preserves input-module order, and archive member order is
-        // not a semantic property of the whole program. Counters and physical
+        // not a semantic property of the whole program. Region IDs and physical
         // packing must not depend on that incidental order.
         llvm::stable_sort(Managed_, [](const auto& left, const auto& right) { return left.first->getName() < right.first->getName(); });
         for (auto&& [func, info] : Managed_) {
@@ -1830,8 +1833,9 @@ private:
     // subprogram budget.
     void CreateStages() {
         for (auto&& [function, info] : Managed_) {
-            info->EntryPc = NextPc_++;
-            info->Stage = Function::Create(FunctionType::get(I32_, false), GlobalValue::InternalLinkage, bpf::sym::StagePrefix + Twine(info->EntryPc), Module_);
+            info->EntryRegionId = NextRegionId_++;
+            info->Stage =
+                Function::Create(FunctionType::get(I32_, false), GlobalValue::InternalLinkage, bpf::sym::StagePrefix + Twine(info->EntryRegionId), Module_);
             info->Stage->setMetadata(bpf::md::Capsule, MDNode::get(Ctx_, {}));
         }
     }
@@ -1999,16 +2003,16 @@ private:
         return ControlArgumentIndex(borrowed) + 1;
     }
 
-    uint32_t DispatchRegionKey(uint32_t counter) const {
-        uint32_t index = counter & BPF_CAPSULE_REGION_COUNTER_INDEX_MASK;
-        return IndirectDispatch_ ? index >> BPF_CAPSULE_REGION_COUNTER_STEP_BITS : index;
+    uint32_t DispatchRegionKey(RegionId regionId) const {
+        uint32_t index = regionId & BPF_CAPSULE_REGION_ID_INDEX_MASK;
+        return IndirectDispatch_ ? index >> BPF_CAPSULE_REGION_ID_STEP_BITS : index;
     }
 
-    Value* DispatchRegionKey(IRBuilder<>& b, Value* counter) const {
+    Value* DispatchRegionKey(IRBuilder<>& b, Value* regionId) const {
         if (IndirectDispatch_) {
-            return b.CreateLShr(counter, ConstantInt::get(I32_, BPF_CAPSULE_REGION_COUNTER_STEP_BITS), "region");
+            return b.CreateLShr(regionId, ConstantInt::get(I32_, BPF_CAPSULE_REGION_ID_STEP_BITS), "region.index");
         }
-        return b.CreateAnd(counter, ConstantInt::get(I32_, BPF_CAPSULE_REGION_COUNTER_INDEX_MASK), "region");
+        return b.CreateAnd(regionId, ConstantInt::get(I32_, BPF_CAPSULE_REGION_ID_INDEX_MASK), "region.key");
     }
 
     bool FunctionBorrowsContext(const Function* function) const {
@@ -2185,54 +2189,54 @@ private:
         return ScalarStepCount_ + (PhysicalBorrowedRoots_ ? unit.OutputRoot : 0);
     }
 
-    void PackRegionCounters(unsigned scalarUnitCount) {
+    void PackRegionIds(unsigned scalarUnitCount) {
         const unsigned borrowedUnitCount = Units_.size() - scalarUnitCount;
         ScalarStepCount_ = scalarUnitCount ? std::max(1u, PhysicalScalarRoots_) : 0;
         const unsigned borrowedStepCount = borrowedUnitCount ? std::max(1u, PhysicalBorrowedRoots_) : 0;
         const unsigned stepCount = ScalarStepCount_ + borrowedStepCount;
-        if (!stepCount || stepCount > BPF_CAPSULE_REGION_COUNTER_STEP_MASK + 1u) {
-            report_fatal_error("stackify: physical step count exceeds the packed region-counter ABI");
+        if (!stepCount || stepCount > BPF_CAPSULE_REGION_ID_STEP_MASK + 1u) {
+            report_fatal_error("stackify: physical step count exceeds the packed region-ID ABI");
         }
-        DenseMap<uint32_t, uint32_t> packed;
-        SmallVector<uint32_t, 32> nextRegion(stepCount, 1);
+        DenseMap<RegionId, RegionId> packed;
+        SmallVector<uint32_t, 32> nextRegionIndex(stepCount, 1);
         for (unsigned unitIndex = 0; unitIndex < Units_.size(); ++unitIndex) {
             AllocationUnit& unit = Units_[unitIndex];
             unsigned step = StepForUnit(unitIndex, scalarUnitCount);
             llvm::stable_sort(unit.States, [](const auto& a, const auto& b) {
                 bool aEntry = a.Kind == ManagedFunction::StateKind::Entry;
                 bool bEntry = b.Kind == ManagedFunction::StateKind::Entry;
-                return aEntry != bEntry ? aEntry : a.Pc < b.Pc;
+                return aEntry != bEntry ? aEntry : a.Id < b.Id;
             });
-            const uint32_t first = nextRegion[step];
+            const uint32_t first = nextRegionIndex[step];
             for (const ManagedFunction::State& state : unit.States) {
-                uint32_t local = nextRegion[step]++;
+                uint32_t local = nextRegionIndex[step]++;
                 if (local >= 1u << 16) {
-                    report_fatal_error("stackify: local region count exceeds the packed region-counter ABI");
+                    report_fatal_error("stackify: local region count exceeds the packed region-ID ABI");
                 }
-                uint32_t value = (local << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) | step;
-                if (!packed.try_emplace(state.Pc, value).second) {
-                    report_fatal_error("stackify: duplicate provisional region counter");
+                RegionId id = (local << BPF_CAPSULE_REGION_ID_STEP_BITS) | step;
+                if (!packed.try_emplace(state.Id, id).second) {
+                    report_fatal_error("stackify: duplicate provisional region ID");
                 }
             }
-            if (nextRegion[step] - first != unit.States.size()) {
-                report_fatal_error("stackify: allocation-unit region counters are not contiguous");
+            if (nextRegionIndex[step] - first != unit.States.size()) {
+                report_fatal_error("stackify: allocation-unit region IDs are not contiguous");
             }
         }
 
         auto rewriteState = [&](ManagedFunction::State& state) {
-            auto found = packed.find(state.Pc);
+            auto found = packed.find(state.Id);
             if (found == packed.end()) {
-                report_fatal_error("stackify: continuation state was not assigned a packed region counter");
+                report_fatal_error("stackify: continuation state was not assigned a packed region ID");
             }
-            state.Pc = found->second;
+            state.Id = found->second;
         };
         for (auto&& [function, info] : Managed_) {
-            uint32_t provisionalEntry = info->EntryPc;
+            RegionId provisionalEntry = info->EntryRegionId;
             auto found = packed.find(provisionalEntry);
             if (found == packed.end()) {
-                report_fatal_error(Twine("stackify: managed entry has no packed region counter: ") + function->getName());
+                report_fatal_error(Twine("stackify: managed entry has no packed region ID: ") + function->getName());
             }
-            info->EntryPc = found->second;
+            info->EntryRegionId = found->second;
             for (ManagedFunction::State& state : info->States) {
                 rewriteState(state);
             }
@@ -2247,17 +2251,17 @@ private:
                 rewriteState(state);
             }
         }
-        for (auto& [handle, provisional] : PendingRegionCounterStores_) {
+        for (auto& [handle, provisional] : PendingRegionIdStores_) {
             auto* store = dyn_cast_or_null<StoreInst>(handle);
             auto found = packed.find(provisional);
             if (store && found == packed.end()) {
-                report_fatal_error("stackify: live region-counter store has no packed value");
+                report_fatal_error("stackify: live region-ID store has no packed value");
             }
             if (store) {
                 store->setOperand(0, ConstantInt::get(I32_, found->second));
             }
         }
-        PendingRegionCounterStores_.clear();
+        PendingRegionIdStores_.clear();
     }
 
     // Cut transformed staging CFGs at their suspension returns, then balance
@@ -2431,7 +2435,7 @@ private:
         // to a step well past that. The regions are disconnected CFG
         // components that exchange state only through the fiber stack (proved
         // above: no value crosses a region), so an oversized source splits
-        // into several allocation units. Packed counters keep each unit's
+        // into several allocation units. Packed region IDs keep each unit's
         // regions contiguous inside its eventual merge root. Sources under
         // the cap stay whole, preserving the source-function unit.
         {
@@ -2647,7 +2651,7 @@ private:
         };
         assignRoots(0, scalarUnitCount, PhysicalScalarRoots_);
         assignRoots(scalarUnitCount, borrowedUnitCount, PhysicalBorrowedRoots_);
-        PackRegionCounters(scalarUnitCount);
+        PackRegionIds(scalarUnitCount);
 
         // Move complete regions into their physical unit.
         for (auto&& regionPtr : Regions_) {
@@ -2744,7 +2748,7 @@ private:
             if (unit.Merged) {
                 // The merged unit performs the dispatcher's lifecycle
                 // checks itself: idle or completed (sweeping the sentinel to
-                // idle) stops the driver loop; any other counter dispatches.
+                // idle) stops the driver loop; any other region ID dispatches.
                 // Abort paths stop their physical step directly, so checking
                 // the outcome word here would only tax every ordinary step.
                 auto* lifecycle = BasicBlock::Create(Ctx_, "step.lifecycle", unit.Func, entry);
@@ -2759,16 +2763,16 @@ private:
                     predecessor->getTerminator()->replaceSuccessorWith(entry, lifecycle);
                 }
                 IRBuilder<> lb(lifecycle);
-                Value* pcSlot = PcPtr(lb);
-                Value* pc = lb.CreateLoad(I32_, pcSlot, "pc");
-                Value* isCompleted = lb.CreateICmpEQ(pc, DonePc());
-                Value* isIdle = lb.CreateICmpEQ(pc, ConstantInt::get(I32_, 0));
+                Value* resumeRegionIdPtr = ResumeRegionIdPtr(lb);
+                Value* resumeRegionId = lb.CreateLoad(I32_, resumeRegionIdPtr, "resume.region.id");
+                Value* isCompleted = lb.CreateICmpEQ(resumeRegionId, DoneRegionId());
+                Value* isIdle = lb.CreateICmpEQ(resumeRegionId, ConstantInt::get(I32_, 0));
                 Value* stopped = lb.CreateOr(isIdle, isCompleted);
                 lb.CreateCondBr(stopped, terminal, entry);
                 IRBuilder<> tlb(terminal);
                 tlb.CreateCondBr(isCompleted, completed, stop);
                 IRBuilder<> clb(completed);
-                clb.CreateStore(ConstantInt::get(I32_, 0), pcSlot);
+                clb.CreateStore(ConstantInt::get(I32_, 0), resumeRegionIdPtr);
                 clb.CreateBr(stop);
                 IRBuilder<> slb(stop);
                 slb.CreateRet(ConstantInt::get(I32_, 1));
@@ -2776,8 +2780,8 @@ private:
             IRBuilder<> b(entry);
             Value* region = nullptr;
             if (unit.Merged) {
-                Value* regionCounter = b.CreateLoad(I32_, PcPtr(b), "region.counter");
-                region = DispatchRegionKey(b, regionCounter);
+                Value* regionId = b.CreateLoad(I32_, ResumeRegionIdPtr(b), "resume.region.id");
+                region = DispatchRegionKey(b, regionId);
             } else {
                 region = unit.Func->getArg(unit.Func->arg_size() - 1);
             }
@@ -2786,11 +2790,11 @@ private:
             uint32_t firstIndex = UINT32_MAX;
             uint32_t lastIndex = 0;
             for (const ManagedFunction::State& state : unit.States) {
-                uint32_t index = DispatchRegionKey(state.Pc);
+                uint32_t index = DispatchRegionKey(state.Id);
                 firstIndex = std::min(firstIndex, index);
                 lastIndex = std::max(lastIndex, index);
             }
-            uint32_t stride = IndirectDispatch_ ? 1u : 1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS;
+            uint32_t stride = IndirectDispatch_ ? 1u : 1u << BPF_CAPSULE_REGION_ID_STEP_BITS;
             if ((lastIndex - firstIndex) / stride + 1 != unit.States.size()) {
                 report_fatal_error("stackify: allocation-unit region indexes are not contiguous");
             }
@@ -2798,7 +2802,7 @@ private:
             b.CreateBr(selected);
             entry = selected;
 
-            llvm::stable_sort(unit.States, [&](const auto& a, const auto& b) { return DispatchRegionKey(a.Pc) < DispatchRegionKey(b.Pc); });
+            llvm::stable_sort(unit.States, [&](const auto& a, const auto& b) { return DispatchRegionKey(a.Id) < DispatchRegionKey(b.Id); });
             struct TestRange {
                 BasicBlock* Block;
                 unsigned Begin;
@@ -2821,7 +2825,7 @@ private:
                 unsigned middle = range.Begin + (range.End - range.Begin) / 2;
                 auto* left = BasicBlock::Create(Ctx_, "unit.test.left", unit.Func);
                 auto* right = BasicBlock::Create(Ctx_, "unit.test.right", unit.Func);
-                tb.CreateCondBr(tb.CreateICmpULT(regionIndex, ConstantInt::get(I32_, DispatchRegionKey(unit.States[middle].Pc))), left, right);
+                tb.CreateCondBr(tb.CreateICmpULT(regionIndex, ConstantInt::get(I32_, DispatchRegionKey(unit.States[middle].Id))), left, right);
                 pending.push_back({right, middle, range.End});
                 pending.push_back({left, range.Begin, middle});
             }
@@ -2863,7 +2867,7 @@ private:
     // remain SSA on the hot edge; only the cold suspension edge serializes
     // their next values.  The temporary boundary->resume edge keeps the CFG
     // analyzable until TransformFunction replaces it by
-    // store-region-counter-and-return.
+    // store-region-ID-and-return.
     void PrepareChunkedLoop(const ChunkCandidate& chunk) {
         Function& func = *chunk.Header->getParent();
         DebugLoc debugLoc;
@@ -3989,10 +3993,10 @@ private:
         return b.CreateAnd(address, ConstantInt::get(I64_, FiberStackSize_ - 1), "slice.offset");
     }
 
-    // The pc register's completed sentinel: all-ones so BPF compares use the
+    // The resume region ID's completed sentinel: all-ones so BPF compares use the
     // sign-extended -1 immediate instead of a two-instruction 64-bit load.
-    Constant* DonePc() {
-        return ConstantInt::get(I32_, BPF_CAPSULE_PC_DONE);
+    Constant* DoneRegionId() {
+        return ConstantInt::get(I32_, BPF_CAPSULE_REGION_ID_DONE);
     }
 
     Value* ArenaFrameArgument(IRBuilder<>& b, Value* frame) {
@@ -4065,7 +4069,7 @@ private:
         cf.CreateRet(ConstantInt::get(I32_, ActionStop))->setDebugLoc(debugLoc);
         IRBuilder<> eb(origEntry, origEntry->getFirstInsertionPt());
         eb.CreateStore(claimed, SpPtr(eb))->setDebugLoc(debugLoc);
-        info.States.push_back({info.EntryPc, prologue, ManagedFunction::StateKind::Entry});
+        info.States.push_back({info.EntryRegionId, prologue, ManagedFunction::StateKind::Entry});
 
         // Allocas become fixed slots inside this frame.
         SmallVector<AllocaInst*> allocas;
@@ -4191,21 +4195,21 @@ private:
         }
 
         for (auto&& edge : backedges) {
-            uint32_t resumePc = NextPc_++;
-            BasicBlock* root = edge.ChunkTrips ? SuspendAtChunkedBackedge(edge, resumePc, debugLoc) : SuspendAtBackedge(edge, resumePc, debugLoc);
-            info.States.push_back({resumePc, root, ManagedFunction::StateKind::Backedge});
+            RegionId resumeRegionId = NextRegionId_++;
+            BasicBlock* root = edge.ChunkTrips ? SuspendAtChunkedBackedge(edge, resumeRegionId, debugLoc) : SuspendAtBackedge(edge, resumeRegionId, debugLoc);
+            info.States.push_back({resumeRegionId, root, ManagedFunction::StateKind::Backedge});
         }
         for (auto* call : calls) {
-            uint32_t resumePc = NextPc_++;
-            info.States.push_back({resumePc, SuspendAtCall(call, resumePc, info, debugLoc), ManagedFunction::StateKind::Call});
+            RegionId resumeRegionId = NextRegionId_++;
+            info.States.push_back({resumeRegionId, SuspendAtCall(call, resumeRegionId, info, debugLoc), ManagedFunction::StateKind::Call});
         }
         for (auto* call : yields) {
-            uint32_t resumePc = NextPc_++;
-            info.States.push_back({resumePc, SuspendAtYield(call, resumePc, debugLoc), ManagedFunction::StateKind::Yield});
+            RegionId resumeRegionId = NextRegionId_++;
+            info.States.push_back({resumeRegionId, SuspendAtYield(call, resumeRegionId, debugLoc), ManagedFunction::StateKind::Yield});
         }
         for (auto* call : setjmps) {
-            uint32_t resumePc = NextPc_++;
-            info.States.push_back({resumePc, LowerSetjmp(call, frame, info, resumePc), ManagedFunction::StateKind::Setjmp});
+            RegionId resumeRegionId = NextRegionId_++;
+            info.States.push_back({resumeRegionId, LowerSetjmp(call, frame, info, resumeRegionId), ManagedFunction::StateKind::Setjmp});
         }
         for (auto* call : longjmps) {
             LowerLongjmp(call);
@@ -4546,8 +4550,8 @@ private:
     // Split the block at `call`. The caller reserves one exact outgoing area
     // below its live sp, writes the x86-shaped linkage and actual arguments at
     // positive offsets from the new callee fp, then publishes the callee's
-    // region counter. The callee prologue claims only its own locals below fp.
-    BasicBlock* SuspendAtCall(CallBase* call, uint32_t resumePc, ManagedFunction& info, DebugLoc debugLoc) {
+    // entry region ID. The callee prologue claims only its own locals below fp.
+    BasicBlock* SuspendAtCall(CallBase* call, RegionId resumeRegionId, ManagedFunction& info, DebugLoc debugLoc) {
         ManagedCallLayout layout = LayoutCall(*call);
         if (InputError_) {
             return call->getParent();
@@ -4559,7 +4563,7 @@ private:
         Instruction* br = block->getTerminator();
         IRBuilder<> b(br);
 
-        Value* calleePc = CalleePc(b, call);
+        Value* calleeRegionId = CalleeRegionId(b, call);
 
         // A function without dynamic carving can derive its live sp from fp;
         // otherwise use the saved frontier. ReserveFloor_ already includes
@@ -4579,11 +4583,11 @@ private:
             out = b.CreateGEP(I8_, info.Frame, ConstantInt::getSigned(I64_, -int64_t(info.FrameSize + layout.Size)), "callee.frame");
         }
         b.CreateStore(info.Fp, b.CreateGEP(I8_, out, ConstantInt::get(I64_, SavedFpOffset), "saved.fp.slot"));
-        StoreProvisionalRegionCounter(b, resumePc, b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnPcOffset), "return.pc.slot"));
+        StoreProvisionalRegionId(b, resumeRegionId, b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnRegionIdOffset), "return.region.id.slot"));
         StoreCallArguments(b, out, *call, layout);
-        StoreInst* calleeStore = b.CreateStore(calleePc, PcPtr(b));
+        StoreInst* calleeStore = b.CreateStore(calleeRegionId, ResumeRegionIdPtr(b));
         if (Function* callee = ResolveDirectCallee(*call)) {
-            PendingRegionCounterStores_.push_back({WeakTrackingVH(calleeStore), ManagedByFunction_.lookup(callee)->EntryPc});
+            PendingRegionIdStores_.push_back({WeakTrackingVH(calleeStore), ManagedByFunction_.lookup(callee)->EntryRegionId});
         }
         b.CreateStore(calleeFp, FpPtr(b));
         b.CreateRet(ConstantInt::get(I32_, ActionContinue));
@@ -4630,13 +4634,13 @@ private:
     // A voluntary yield preserves the current frame and returns control to the
     // native caller. Unlike a managed call it pushes nothing: continuation
     // resumes at the instruction immediately following the marker.
-    BasicBlock* SuspendAtYield(CallBase* call, uint32_t resumePc, DebugLoc debugLoc) {
+    BasicBlock* SuspendAtYield(CallBase* call, RegionId resumeRegionId, DebugLoc debugLoc) {
         BasicBlock* block = call->getParent();
         BasicBlock* resume = block->splitBasicBlock(call, block->getName() + ".yield.resume");
         Instruction* branch = block->getTerminator();
 
         IRBuilder<> b(branch);
-        StoreProvisionalRegionCounter(b, resumePc, PcPtr(b))->setDebugLoc(debugLoc);
+        StoreProvisionalRegionId(b, resumeRegionId, ResumeRegionIdPtr(b))->setDebugLoc(debugLoc);
         b.CreateStore(ConstantInt::get(I64_, CAPSULE_YIELD), OutcomePtr(b))->setDebugLoc(debugLoc);
         b.CreateRet(ConstantInt::get(I32_, ActionStop))->setDebugLoc(debugLoc);
         branch->eraseFromParent();
@@ -4647,7 +4651,7 @@ private:
     // setjmp's ordinary and restored paths meet at one load. The saved state
     // points longjmp at that frame slot, so no value register or unwinder is
     // part of the machine ABI.
-    BasicBlock* LowerSetjmp(CallBase* call, Value* frame, ManagedFunction& info, uint32_t resumePc) {
+    BasicBlock* LowerSetjmp(CallBase* call, Value* frame, ManagedFunction& info, RegionId resumeRegionId) {
         BasicBlock* block = call->getParent();
         BasicBlock* resume = block->splitBasicBlock(call, block->getName() + ".setjmp.resume");
         int64_t slotOffset = int64_t(info.JumpResultOffsets.lookup(call)) - int64_t(info.FrameSize);
@@ -4657,7 +4661,7 @@ private:
         Value* env = call->getArgOperand(0);
         auto field = [&](int64_t offset) { return b.CreateGEP(I8_, env, ConstantInt::get(I64_, offset)); };
         b.CreateStore(ConstantInt::get(I32_, 0), slot);
-        StoreProvisionalRegionCounter(b, resumePc, field(JumpPcOffset));
+        StoreProvisionalRegionId(b, resumeRegionId, field(JumpRegionIdOffset));
         Value* sp = b.CreateLoad(I64_, SpPtr(b));
         Value* spField = field(JumpSpOffset);
         b.CreateStore(sp, spField);
@@ -4690,9 +4694,9 @@ private:
         Value* fp = load(I64_, JumpFpOffset);
         Value* fpSlot = FpPtr(b);
         b.CreateStore(fp, fpSlot);
-        Value* pc = load(I32_, JumpPcOffset);
-        Value* pcSlot = PcPtr(b);
-        b.CreateStore(pc, pcSlot);
+        Value* jumpRegionId = load(I32_, JumpRegionIdOffset);
+        Value* resumeRegionIdPtr = ResumeRegionIdPtr(b);
+        b.CreateStore(jumpRegionId, resumeRegionIdPtr);
         b.CreateRet(ConstantInt::get(I32_, ActionContinue));
         for (Instruction* inst = call; inst;) {
             Instruction* next = inst->getNextNode();
@@ -4704,36 +4708,36 @@ private:
     // For a direct call the id is a constant; for an indirect one the called
     // value already holds it, because every address-of use of a managed
     // function was replaced by its id.
-    Value* CalleePc(IRBuilder<>& b, CallBase* call) {
+    Value* CalleeRegionId(IRBuilder<>& b, CallBase* call) {
         if (Function* callee = ResolveDirectCallee(*call)) {
-            return ConstantInt::get(I32_, ManagedByFunction_.lookup(callee)->EntryPc);
+            return ConstantInt::get(I32_, ManagedByFunction_.lookup(callee)->EntryRegionId);
         }
         Value* token = b.CreatePtrToInt(call->getCalledOperand(), I64_, "callee.token");
         // The window is 4GiB-aligned and the token displacement is an exact
-        // multiple of 4GiB, so the token's low word is the entry counter.
-        return b.CreateTrunc(token, I32_, "callee.pc");
+        // multiple of 4GiB, so the token's low word is the entry region ID.
+        return b.CreateTrunc(token, I32_, "callee.region.id");
     }
 
     // Replace the branch back to the header with "record where to resume, then
     // return". The trampoline re-enters this same frame, the entry dispatch
     // jumps to the header, and the loop makes one more iteration — without a
     // backedge ever existing in the BPF program.
-    BasicBlock* SuspendAtBackedge(const Backedge& edge, uint32_t resumePc, DebugLoc debugLoc) {
+    BasicBlock* SuspendAtBackedge(const Backedge& edge, RegionId resumeRegionId, DebugLoc debugLoc) {
         Instruction* term = edge.Latch->getTerminator();
 
         IRBuilder<> b(term);
         // An unconditional latch is already the suspension edge; replace its
-        // branch in place. For a conditional latch, put both the counter store
+        // branch in place. For a conditional latch, put both the region-ID store
         // and return in an edge-local block so the loop-exit path publishes no
         // spurious continuation.
         if (term->getNumSuccessors() == 1) {
-            StoreProvisionalRegionCounter(b, resumePc, PcPtr(b))->setDebugLoc(debugLoc);
+            StoreProvisionalRegionId(b, resumeRegionId, ResumeRegionIdPtr(b))->setDebugLoc(debugLoc);
             b.CreateRet(ConstantInt::get(I32_, ActionContinue))->setDebugLoc(debugLoc);
             term->eraseFromParent();
         } else {
             auto* suspend = BasicBlock::Create(Ctx_, edge.Latch->getName() + ".suspend", edge.Latch->getParent());
             IRBuilder<> sb(suspend);
-            StoreProvisionalRegionCounter(sb, resumePc, PcPtr(sb))->setDebugLoc(debugLoc);
+            StoreProvisionalRegionId(sb, resumeRegionId, ResumeRegionIdPtr(sb))->setDebugLoc(debugLoc);
             sb.CreateRet(ConstantInt::get(I32_, ActionContinue))->setDebugLoc(debugLoc);
             term->replaceSuccessorWith(edge.Header, suspend);
         }
@@ -4743,10 +4747,10 @@ private:
     // Finish a chunk prepared before frame layout.  The boundary already
     // stores its loop-carried next values and the resume block reloads them;
     // replace the temporary cyclic edge by a real continuation return.
-    BasicBlock* SuspendAtChunkedBackedge(const Backedge& edge, uint32_t resumePc, DebugLoc debugLoc) {
+    BasicBlock* SuspendAtChunkedBackedge(const Backedge& edge, RegionId resumeRegionId, DebugLoc debugLoc) {
         Instruction* term = edge.Latch->getTerminator();
         IRBuilder<> builder(term);
-        StoreProvisionalRegionCounter(builder, resumePc, PcPtr(builder))->setDebugLoc(debugLoc);
+        StoreProvisionalRegionId(builder, resumeRegionId, ResumeRegionIdPtr(builder))->setDebugLoc(debugLoc);
         auto* ret = builder.CreateRet(ConstantInt::get(I32_, ActionContinue));
         ret->setDebugLoc(debugLoc);
         term->eraseFromParent();
@@ -4786,9 +4790,9 @@ private:
         // region, and leave sp immediately above the two linkage words. The
         // caller's resume state removes its result/argument area. A root uses
         // the same path with (saved fp = 0, return region = DONE).
-        Value* returnPc = b.CreateLoad(I32_, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, ReturnPcOffset)}), "return.pc");
+        Value* returnRegionId = b.CreateLoad(I32_, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, ReturnRegionIdOffset)}), "return.region.id");
         Value* savedFp = b.CreateLoad(I64_, b.CreateGEP(I8_, frame, {ConstantInt::getSigned(I64_, SavedFpOffset)}), "saved.fp");
-        b.CreateStore(returnPc, PcPtr(b));
+        b.CreateStore(returnRegionId, ResumeRegionIdPtr(b));
         Value* returnSp = b.CreateAdd(info.Fp, ConstantInt::get(I64_, LinkageBytes), "return.sp");
         b.CreateStore(returnSp, SpPtr(b));
         b.CreateStore(savedFp, FpPtr(b));
@@ -4852,10 +4856,10 @@ private:
         // registers).
         b.CreateBr(iterate);
         b.SetInsertPoint(iterate);
-        Value* pcSlot = PcPtr(b, fiber);
-        Value* pc = b.CreateLoad(I32_, pcSlot, "pc");
-        Value* isCompleted = b.CreateICmpEQ(pc, DonePc());
-        Value* isIdle = b.CreateICmpEQ(pc, ConstantInt::get(I32_, 0));
+        Value* resumeRegionIdPtr = ResumeRegionIdPtr(b, fiber);
+        Value* resumeRegionId = b.CreateLoad(I32_, resumeRegionIdPtr, "resume.region.id");
+        Value* isCompleted = b.CreateICmpEQ(resumeRegionId, DoneRegionId());
+        Value* isIdle = b.CreateICmpEQ(resumeRegionId, ConstantInt::get(I32_, 0));
         Value* stopped = b.CreateOr(isIdle, isCompleted);
         b.CreateCondBr(stopped, terminal, route);
 
@@ -4863,9 +4867,9 @@ private:
         b.CreateCondBr(isCompleted, completed, done);
 
         // Sweep the completed sentinel to idle: the runtime and the host see
-        // pc == 0 exactly where they used to see a drained stack.
+        // resume_region_id == 0 exactly where they used to see a drained stack.
         b.SetInsertPoint(completed);
-        b.CreateStore(ConstantInt::get(I32_, 0), pcSlot);
+        b.CreateStore(ConstantInt::get(I32_, 0), resumeRegionIdPtr);
         b.CreateBr(done);
 
         b.SetInsertPoint(done);
@@ -4875,8 +4879,8 @@ private:
         b.CreateBr(dispatch);
 
         b.SetInsertPoint(dispatch);
-        Value* stepKey = b.CreateAnd(pc, ConstantInt::get(I32_, BPF_CAPSULE_REGION_COUNTER_STEP_MASK), "step");
-        Value* regionKey = DispatchRegionKey(b, pc);
+        Value* stepKey = b.CreateAnd(resumeRegionId, ConstantInt::get(I32_, BPF_CAPSULE_REGION_ID_STEP_MASK), "step.index");
+        Value* regionKey = DispatchRegionKey(b, resumeRegionId);
         SwitchInst* sw = nullptr;
         struct UnitRoute {
             uint32_t Begin;
@@ -4940,7 +4944,7 @@ private:
                 BasicBlock* outputDispatch = BasicBlock::Create(Ctx_, "dispatch", output);
                 BasicBlock* outputTrap = BasicBlock::Create(Ctx_, "bad.id", output);
                 IRBuilder<> outputBuilder(outputEntry);
-                // The public step has already separated the packed counter
+                // The public step has already separated the packed region ID
                 // into its step and region fields. Keep the region in its
                 // masked representation so dispatch needs no shift or second
                 // mask at the root boundary.
@@ -5017,11 +5021,11 @@ private:
                 rootFunctions.push_back(output);
             }
         } else {
-            sw = b.CreateSwitch(regionKey, trap, NextPc_);
+            sw = b.CreateSwitch(regionKey, trap, NextRegionId_);
         }
 
         // A context entry may resume scalar code after a managed call.  The
-        // packed counter already identifies its physical scalar root, so call
+        // packed region ID already identifies its physical scalar root, so call
         // that root directly instead of repeating lifecycle checks and the
         // low-byte dispatch in the scalar step.
         if (borrowed && ScalarStepCount_) {
@@ -5089,24 +5093,24 @@ private:
             if (physicalRootMode) {
                 if (IndirectDispatch_) {
                     for (const ManagedFunction::State& state : unit.States) {
-                        rootSwitches[unit.OutputRoot]->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Pc)), caseBlock);
+                        rootSwitches[unit.OutputRoot]->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Id)), caseBlock);
                     }
                     continue;
                 }
                 uint32_t begin = UINT32_MAX;
                 uint32_t end = 0;
                 for (const ManagedFunction::State& state : unit.States) {
-                    uint32_t index = DispatchRegionKey(state.Pc);
+                    uint32_t index = DispatchRegionKey(state.Id);
                     begin = std::min(begin, index);
                     end = std::max(end, index);
                 }
-                if ((end - begin) / (1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) + 1 != unit.States.size()) {
+                if ((end - begin) / (1u << BPF_CAPSULE_REGION_ID_STEP_BITS) + 1 != unit.States.size()) {
                     report_fatal_error("stackify: allocation-unit region range is not contiguous");
                 }
                 rootRoutes[unit.OutputRoot].push_back({begin, end, caseBlock});
             } else {
                 for (const ManagedFunction::State& state : unit.States) {
-                    sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Pc)), caseBlock);
+                    sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Id)), caseBlock);
                 }
             }
         }
@@ -5122,7 +5126,7 @@ private:
             auto& routes = rootRoutes[root];
             llvm::sort(routes, [](const UnitRoute& a, const UnitRoute& b) { return a.Begin < b.Begin; });
             for (unsigned index = 1; index < routes.size(); ++index) {
-                if (routes[index - 1].End + (1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) != routes[index].Begin) {
+                if (routes[index - 1].End + (1u << BPF_CAPSULE_REGION_ID_STEP_BITS) != routes[index].Begin) {
                     report_fatal_error("stackify: allocation-unit region ranges are not dense");
                 }
             }
@@ -5538,10 +5542,11 @@ private:
         Value* rootFp = b.CreatePtrToInt(out, I64_, "root.fp");
         b.CreateStore(ConstantInt::get(I64_, 0), OutcomePtr(b, fiber));
         b.CreateStore(ConstantInt::get(I64_, 0), b.CreateGEP(I8_, out, ConstantInt::get(I64_, SavedFpOffset), "root.saved.fp"));
-        b.CreateStore(ConstantInt::get(I32_, BPF_CAPSULE_PC_DONE), b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnPcOffset), "root.return.pc"));
+        b.CreateStore(
+            ConstantInt::get(I32_, BPF_CAPSULE_REGION_ID_DONE), b.CreateGEP(I8_, out, ConstantInt::get(I64_, ReturnRegionIdOffset), "root.return.region.id"));
         StoreCallArguments(b, out, *call, layout);
         b.CreateStore(ConstantInt::get(I32_, root->ReturnSize), ReturnSizePtr(b, fiber));
-        b.CreateStore(ConstantInt::get(I32_, root->EntryPc), PcPtr(b, fiber));
+        b.CreateStore(ConstantInt::get(I32_, root->EntryRegionId), ResumeRegionIdPtr(b, fiber));
         b.CreateStore(rootFp, SpPtr(b, fiber));
         b.CreateStore(rootFp, FpPtr(b, fiber));
         CallInst* drive = nullptr;
@@ -5596,8 +5601,8 @@ private:
     DenseMap<Function*, ManagedFunction*> ManagedByFunction_;
     SmallVector<std::unique_ptr<Region>> Regions_;
     SmallVector<AllocationUnit> Units_;
-    SmallVector<std::pair<WeakTrackingVH, uint32_t>> PendingRegionCounterStores_;
-    uint32_t NextPc_ = 1;
+    SmallVector<std::pair<WeakTrackingVH, RegionId>> PendingRegionIdStores_;
+    RegionId NextRegionId_ = 1;
 
     uint64_t FiberStackSize_ = 0;
     uint64_t ReserveFloor_ = 0;

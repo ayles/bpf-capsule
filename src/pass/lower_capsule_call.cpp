@@ -196,13 +196,13 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
             // limit.
             Value* control = builder.CreateInBoundsGEP(controlsType, controls, {ConstantInt::get(i32, 0), fiber32}, "capsule.control");
             Value* terminal = builder.CreateStructGEP(controlType, control, BPF_CAPSULE_FIBER_CONTROL_STATUS);
-            Value* cursor = builder.CreateStructGEP(controlType, control, BPF_CAPSULE_FIBER_CONTROL_PC);
+            Value* resumeRegionIdPtr = builder.CreateStructGEP(controlType, control, BPF_CAPSULE_FIBER_CONTROL_RESUME_REGION_ID);
             // The terminal status field; the signed code beside it is read
             // by the runtime, not here.
             Value* tag = builder.CreateLoad(i32, terminal);
             Value* exited = builder.CreateICmpEQ(tag, ConstantInt::get(i32, CAPSULE_EXITED));
             Value* yielded = builder.CreateICmpEQ(tag, ConstantInt::get(i32, CAPSULE_YIELD));
-            Value* pending = builder.CreateICmpNE(builder.CreateLoad(i32, cursor), ConstantInt::get(i32, 0));
+            Value* pending = builder.CreateICmpNE(builder.CreateLoad(i32, resumeRegionIdPtr), ConstantInt::get(i32, 0));
             Value* status = builder.CreateSelect(exited, ConstantInt::get(i32, CAPSULE_EXITED),
                 builder.CreateSelect(yielded, ConstantInt::get(i32, CAPSULE_YIELD),
                     builder.CreateSelect(pending, ConstantInt::get(i32, CAPSULE_PENDING), ConstantInt::get(i32, CAPSULE_OK))));

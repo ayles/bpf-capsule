@@ -213,7 +213,7 @@ __attribute__((noinline)) static uint64_t direct_dynamic_leaf(uint64_t value, ui
 // outer BPF program's native stack.  The three regions deliberately match the
 // current managed call sequence: schedule call, execute callee, resume caller.
 // No guest call is represented by a nested BPF call.
-enum flat_pressure_pc {
+enum flat_pressure_region {
     FLAT_PRESSURE_CALL,
     FLAT_PRESSURE_CALLEE,
     FLAT_PRESSURE_RESUME,
@@ -226,18 +226,18 @@ struct flat_pressure_context {
     uint64_t result;
     uint32_t index;
     uint32_t trips;
-    uint32_t pc;
+    uint32_t region_id;
 };
 
 static __always_inline long flat_pressure_step(struct flat_pressure_context* context) {
-    switch (context->pc) {
+    switch (context->region_id) {
         case FLAT_PRESSURE_CALL:
             context->argument = context->a + context->h;
-            context->pc = FLAT_PRESSURE_CALLEE;
+            context->region_id = FLAT_PRESSURE_CALLEE;
             return 0;
         case FLAT_PRESSURE_CALLEE: {
             context->result = ARITHMETIC_STEP(context->argument, context->index);
-            context->pc = FLAT_PRESSURE_RESUME;
+            context->region_id = FLAT_PRESSURE_RESUME;
             return 0;
         }
         case FLAT_PRESSURE_RESUME: {
@@ -252,7 +252,7 @@ static __always_inline long flat_pressure_step(struct flat_pressure_context* con
             context->h ^= a + next;
             context->a = a;
             context->index++;
-            context->pc = context->index < context->trips ? FLAT_PRESSURE_CALL : FLAT_PRESSURE_DONE;
+            context->region_id = context->index < context->trips ? FLAT_PRESSURE_CALL : FLAT_PRESSURE_DONE;
             return 0;
         }
         default:
@@ -526,7 +526,7 @@ int overhead_flat_stack_pressure_call_loop(void) {
         .g = 7,
         .h = 8,
         .trips = trips,
-        .pc = FLAT_PRESSURE_CALL,
+        .region_id = FLAT_PRESSURE_CALL,
     };
     bpf_loop(3u * trips + 1u, flat_stack_pressure_step_callback, &context, 0);
     overhead_state.result = context.a ^ context.b ^ context.c ^ context.d ^ context.e ^ context.f ^ context.g ^ context.h;
@@ -554,7 +554,7 @@ int overhead_flat_map_pressure_call_loop(void) {
     context->h = 8;
     context->index = 0;
     context->trips = trips;
-    context->pc = FLAT_PRESSURE_CALL;
+    context->region_id = FLAT_PRESSURE_CALL;
     struct flat_map_pressure_callback_context callback_context = {.frame = context};
     bpf_loop(3u * trips + 1u, flat_map_pressure_step_callback, &callback_context, 0);
     overhead_state.result = context->a ^ context->b ^ context->c ^ context->d ^ context->e ^ context->f ^ context->g ^ context->h;

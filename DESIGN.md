@@ -36,7 +36,7 @@ program. `capsule_call_ctx(ctx, &output, f, args...)` additionally lends the
 entry's verifier-owned context without adding it to `f`'s source signature.
 Output size, alignment, and type are checked against `f` at compile time. The
 call lowers to: acquire a **fiber**, lay out the ordinary arguments in fiber
-memory, set the fiber's region counter to `f`'s entry, and drive. The drive
+memory, set the fiber's resume region ID to `f`'s entry region, and drive. The drive
 returns `struct capsule_result { int32 code; enum capsule_status status;
 uint64 continuation; }`: `OK`, `EXITED` (one signed code space shaped like
 a shell's `$?` — 0..255 guest codes, negatives reserved for the
@@ -61,10 +61,10 @@ and userspace:
 - data lives in the first 4GiB: relocated globals, the heap at `heap_base`,
   then the per-fiber stack bank, slice-aligned so frame math can mask;
 - code lives just above it: a managed function's address is
-  `window + 4GiB + entry-counter`, non-managed function identities follow
+  `window + 4GiB + entry_region_id`, non-managed function identities follow
   the 16MiB managed-token span in their own 1MiB span. Code and data cannot
   collide as 64-bit values, and since the window is 4GiB-aligned, an indirect
-  call recovers the entry counter by truncating the token to its low word —
+  call recovers the entry region ID by truncating the token to its low word —
   free in BPF, whose 32-bit ALU zero-extends;
 - `NULL` is 0, outside the window. The first page and unbacked remainder stay
   PROT_NONE, so host accesses to those addresses fault.
@@ -150,16 +150,17 @@ struct __bpf_capsule_fiber_control {
     uint64_t generation;        // continuation staleness check
     uint64_t sp;                // allocation frontier: a full pointer
     uint64_t fp;                // running frame boundary: a full pointer
-    uint32_t pc;                // 0 idle, ~0 done, else packed region counter
+    bpf_capsule_region_id resume_region_id; // 0 idle, ~0 done, else packed region ID
     uint32_t return_size;       // erased-return-type witness for continue
 };
 ```
 
-`pc` is not an instruction address. It is a packed compiler-assigned counter:
-the low eight bits select a physical step and the next sixteen select a resume
-region inside that step. It also records lifecycle: 0 means idle,
-`BPF_CAPSULE_PC_DONE` means complete but not yet reaped. `sp` and `fp` are full
-pointers into the fiber's power-of-two stack slice. Exits and yields publish
+`resume_region_id` names the region at which the fiber runs or resumes. A
+region is a suspension-free piece of code; a region ID is an integer, not an
+address. Its low eight bits select a physical step and the next sixteen select
+a region inside that step. It also records lifecycle: 0 means idle,
+`BPF_CAPSULE_REGION_ID_DONE` means complete but not yet reaped. `sp` and `fp`
+are full pointers into the fiber's power-of-two stack slice. Exits and yields publish
 `{status, code}` with one 64-bit store; readers follow it through program order
 or the continuation claim. Fibers have separate stacks but share globals and
 the heap.
@@ -170,7 +171,7 @@ Normal eBPF passes arguments in r1–r5 with a real call stack. The managed
 world replaces all of it:
 
 - **Frames** use the familiar downward x86 shape. `fp` points at the saved
-  caller `fp`, the 32-bit resume counter occupies `fp+8`, and locals grow toward
+  caller `fp`, the 32-bit return region ID occupies `fp+8`, and locals grow toward
   lower addresses. The caller owns everything above that linkage: an optional
   result slot followed by the actual arguments. There is no result register.
   Each function's local-frame size is an immediate in its prologue, checked
@@ -205,8 +206,8 @@ world replaces all of it:
   `leave; ret`; the caller's resume region then reclaims its statically known
   outgoing area, including every actual variadic argument.
 - **A managed call is a suspension**: the caller serializes its live
-  values, writes its resume counter into the linkage and the callee's entry
-  counter into the fiber control, and returns to the dispatcher; return is
+  values, writes its resume region ID into the linkage and the callee's entry
+  region ID into the fiber control, and returns to the dispatcher; return is
   symmetric.
   This handoff is the machine's fundamental call cost and the reason the
   inline policy matters. Stackify also inlines a compact non-recursive helper
@@ -215,7 +216,7 @@ world replaces all of it:
 - **Exit is not a return**: `exit(code)`, traps and unreachables publish
   `{status, code}` and surface as `EXITED`; they never unwind.
 
-`setjmp` saves `{region counter, sp, fp}` and its result slot in the caller's
+`setjmp` saves `{resume region ID, sp, fp}` and its result slot in the caller's
 `jmp_buf`; `longjmp` restores them and resumes at the saved region. General C++
 cleanup unwinding is not implemented.
 
@@ -299,7 +300,7 @@ Picolibc archive members, then performs six logical phases:
 3. **Expose verifier-scale work.** Large memory operations become bounded
    loops and managed atomics receive their target lowering. Stackify lays out
    arguments (including variadics) and turns calls, returns, yields, and
-   unsuitable loop backedges into regions with persistent resume state.
+   unsuitable loop backedges into regions with persistent resume IDs.
 4. **Clean the generated machine.** A narrow cleanup pass removes redundant
    state traffic introduced by Stackify, repairs irreducible control flow, and
    gives every otherwise undefined terminal value a deterministic form.
@@ -323,8 +324,8 @@ contracts live under [`tests/pass-contracts`](tests/pass-contracts/).
 ## Stackify: regions, loops, dispatch
 
 Stackify cuts each managed function at every suspension point — managed
-calls and unsuitable loop backedges — into **regions**, each with a resume
-counter. Before assigning counters it inlines compact single-use helpers when
+calls and unsuitable loop backedges — into **regions**, each with a numeric
+ID. Before assigning IDs it inlines compact single-use helpers when
 removing the managed handoff outweighs losing a verifier boundary; shared,
 address-taken, recursive, large, and entry-boundary functions remain separate.
 Loops then get one of three fates, priced against an explicit verifier budget
@@ -375,13 +376,13 @@ root for each entry: verification work and kernel memory scale with entries
 times roots. This is still preferable only when the unsplit entries do not fit
 or are substantially more expensive to load.
 
-The packed counter makes dispatch direct: the public step masks its low byte
+The packed region ID makes dispatch direct: the public step masks its low byte
 to select a merge root. An explicit balanced range tree then selects one
 temporary allocation unit. That unit runs its prologue and uses another
 balanced tree to enter the exact region.
 MachineFlatten removes the temporary call and merges those blocks into the
 root after register allocation. Runtime dispatch contains only the packed
-counter; source-function identity is absent. CPU v3 uses branch relays where
+region ID; source-function identity is absent. CPU v3 uses branch relays where
 necessary. With `--indirect-jumps`, LLVM may lower the public step's v4 root
 switch to an instruction array and `gotox`. On that profile, root selection
 uses another dense switch over region indexes instead of the explicit range
@@ -394,7 +395,7 @@ context remains in BPF registers or native spills and is never serialized into
 Capsule memory. Pointers derived from the context must be derived and
 bounds-checked again after a region boundary.
 
-The selected region runs, stores its next region counter, and returns. The two
+The selected region runs, stores its resume region ID, and returns. The two
 nested constant-trip driver loops provide roughly four million dispatches in
 one BPF invocation; if that span ends first, the entry returns `PENDING`. Every
 loop in the driver has a verifier-visible constant bound: that is the

@@ -19,17 +19,17 @@
 // 4GiB-aligned span bpf_capsule_configure() reserves (on the arena tier it
 // is the arena's kernel-pinned user_vm_start). Data lives in the window's
 // first 4GiB. Code lives just above it: a managed function's address is
-// window + TOKEN_DISPLACEMENT + entry counter, and non-managed function
+// window + TOKEN_DISPLACEMENT + entry region ID, and non-managed function
 // identities follow the managed-token span — so code and data can never collide
 // as 64-bit values, and because the window is 4GiB-aligned an indirect
-// call recovers that counter by truncating the token to its low word (free in
+// call recovers that region ID by truncating the token to its low word (free in
 // BPF: 32-bit ALU zero-extends). The token span is part of the
 // PROT_NONE reservation, so dereferencing a function pointer faults on the
 // host and falls outside every map on the guest.
 #define BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT (1ull << 32)
-#define BPF_CAPSULE_REGION_COUNTER_STEP_BITS 8u
-#define BPF_CAPSULE_REGION_COUNTER_STEP_MASK ((1u << BPF_CAPSULE_REGION_COUNTER_STEP_BITS) - 1u)
-#define BPF_CAPSULE_REGION_COUNTER_INDEX_MASK 0x00ffff00u
+#define BPF_CAPSULE_REGION_ID_STEP_BITS 8u
+#define BPF_CAPSULE_REGION_ID_STEP_MASK ((1u << BPF_CAPSULE_REGION_ID_STEP_BITS) - 1u)
+#define BPF_CAPSULE_REGION_ID_INDEX_MASK 0x00ffff00u
 #define BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN 0x01000000u
 #define BPF_CAPSULE_NATIVE_FUNCTION_TOKEN_SPAN 0x00100000u
 #define BPF_CAPSULE_FUNCTION_TOKEN_SPAN ((uint64_t)BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN + BPF_CAPSULE_NATIVE_FUNCTION_TOKEN_SPAN)
@@ -73,38 +73,41 @@
 // legal reader is ordered after that store by program order or by the
 // continuation claim, so the fields read independently.
 //
-// The virtualized machine registers. pc is a packed region counter, never an
-// address, and doubles as the lifecycle word: 0 = idle (an all-zero record
-// is a free fiber, which is what makes a fresh zero-filled map a valid
-// pool), BPF_CAPSULE_PC_DONE = computation complete and unconsumed,
+// The virtualized machine registers. A region is a suspension-free piece of
+// code; a region ID is the packed integer which names one. resume_region_id is
+// an ID, never an address, and doubles as the lifecycle word: 0 = idle (an
+// all-zero record is a free fiber, which is what makes a fresh zero-filled map
+// a valid pool), BPF_CAPSULE_REGION_ID_DONE = computation complete and unconsumed,
 // anything else = a live entry/resume region. Its low 8 bits select the
 // physical step and its next 16 bits select a region within that step. sp is
 // the allocation frontier and
 // fp the running frame's x86-shaped anchor; both are full based pointers into
 // capsule memory, the same representation the guest and host dereference.
-// fp points at the saved caller fp, the 32-bit return counter occupies fp+8,
+// fp points at the saved caller fp, the 32-bit return region ID occupies fp+8,
 // and the caller-owned result and actual arguments follow at positive offsets.
 // Locals and dynamic allocations grow toward lower addresses. There is no
 // result register. return_size is the erased return type's byte-count witness,
 // checked when a type-blind continuation reap copies the root result.
+typedef uint32_t bpf_capsule_region_id;
+
 struct __bpf_capsule_fiber_control {
     enum capsule_status status;
     int32_t code;
     uint64_t generation;
     uint64_t sp;
     uint64_t fp;
-    uint32_t pc;
+    bpf_capsule_region_id resume_region_id;
     uint32_t return_size;
 };
 
-#define BPF_CAPSULE_PC_DONE UINT32_MAX
+#define BPF_CAPSULE_REGION_ID_DONE UINT32_MAX
 
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, status) == 0, "fiber control status ABI");
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, code) == 4, "fiber control code ABI");
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, generation) == 8, "fiber control generation ABI");
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, sp) == 16, "fiber control sp ABI");
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, fp) == 24, "fiber control fp ABI");
-__BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, pc) == 32, "fiber control pc ABI");
+__BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, resume_region_id) == 32, "fiber control resume_region_id ABI");
 __BPF_CAPSULE_ABI_ASSERT(__builtin_offsetof(struct __bpf_capsule_fiber_control, return_size) == 36, "fiber control return_size ABI");
 __BPF_CAPSULE_ABI_ASSERT(sizeof(struct __bpf_capsule_fiber_control) == 40, "fiber control size ABI");
 
