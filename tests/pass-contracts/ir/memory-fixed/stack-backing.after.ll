@@ -151,7 +151,7 @@ publish:                                          ; preds = %entry
   br label %done, !dbg !34
 
 done:                                             ; preds = %publish, %entry
-  ret i32 0, !dbg !34
+  ret i32 1, !dbg !34
 }
 
 attributes #0 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }

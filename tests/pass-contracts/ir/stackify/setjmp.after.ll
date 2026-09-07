@@ -88,13 +88,9 @@ step.lifecycle:                                   ; preds = %unit.control.ready
   %fiber.pc1 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   %pc = load i32, ptr %fiber.pc1, align 4
   %1 = icmp eq i32 %pc, -1
-  %fiber.outcome2 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %2 = load i64, ptr %fiber.outcome2, align 8
-  %3 = icmp ne i64 %2, 0
-  %4 = icmp eq i32 %pc, 0
-  %5 = or i1 %1, %3
-  %6 = or i1 %4, %5
-  br i1 %6, label %step.terminal, label %unit.dispatch
+  %2 = icmp eq i32 %pc, 0
+  %3 = or i1 %2, %1
+  br i1 %3, label %step.terminal, label %unit.dispatch
 
 step.terminal:                                    ; preds = %step.lifecycle
   br i1 %1, label %step.completed, label %step.stop
@@ -107,10 +103,10 @@ step.stop:                                        ; preds = %step.completed, %st
   ret i32 1
 
 unit.dispatch:                                    ; preds = %step.lifecycle
-  %fiber.pc3 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  %region.counter = load i32, ptr %fiber.pc3, align 4
+  %fiber.pc2 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
+  %region.counter = load i32, ptr %fiber.pc2, align 4
   %region = and i32 %region.counter, 16776960
-  br label %unit.dispatch4
+  br label %unit.dispatch3
 
 unit.control.ready:                               ; preds = %unit.entry
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
@@ -125,8 +121,8 @@ unit.control.missing:                             ; preds = %unit.entry
 root.prologue:                                    ; preds = %unit.test.left
   %frame.sp = sub i64 %frame.fp, 48
   %slice.offset = and i64 %frame.fp, 262143
-  %7 = icmp ult i64 %slice.offset, 131120
-  br i1 %7, label %root.prologue.overflow, label %entry
+  %4 = icmp ult i64 %slice.offset, 131120
+  br i1 %4, label %root.prologue.overflow, label %entry
 
 entry:                                            ; preds = %root.prologue
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
@@ -134,32 +130,32 @@ entry:                                            ; preds = %root.prologue
   %env.slot1 = getelementptr i8, ptr %frame.addr, i64 -48
   %setjmp.slot = getelementptr i8, ptr %frame.addr, i64 -16
   store i32 0, ptr %setjmp.slot, align 4
-  %8 = getelementptr i8, ptr %env.slot1, i64 0
-  store i32 512, ptr %8, align 4
+  %5 = getelementptr i8, ptr %env.slot1, i64 0
+  store i32 512, ptr %5, align 4
   %fiber.sp4 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
-  %9 = load i64, ptr %fiber.sp4, align 8
-  %10 = getelementptr i8, ptr %env.slot1, i64 8
+  %6 = load i64, ptr %fiber.sp4, align 8
+  %7 = getelementptr i8, ptr %env.slot1, i64 8
+  store i64 %6, ptr %7, align 8
+  %8 = getelementptr i8, ptr %env.slot1, i64 16
+  store i64 %frame.fp, ptr %8, align 8
+  %9 = ptrtoint ptr %setjmp.slot to i64
+  %10 = getelementptr i8, ptr %env.slot1, i64 24
   store i64 %9, ptr %10, align 8
-  %11 = getelementptr i8, ptr %env.slot1, i64 16
-  store i64 %frame.fp, ptr %11, align 8
-  %12 = ptrtoint ptr %setjmp.slot to i64
-  %13 = getelementptr i8, ptr %env.slot1, i64 24
-  store i64 %12, ptr %13, align 8
   br label %entry.setjmp.resume
 
 entry.setjmp.resume:                              ; preds = %unit.test.right, %entry
-  %14 = getelementptr i8, ptr %frame.addr, i64 -16
-  %setjmp.result = load i32, ptr %14, align 4
+  %11 = getelementptr i8, ptr %frame.addr, i64 -16
+  %setjmp.result = load i32, ptr %11, align 4
   %first = icmp eq i32 %setjmp.result, 0
   br i1 %first, label %jump, label %done
 
 done:                                             ; preds = %entry.setjmp.resume
   %result.slot = getelementptr i8, ptr %frame.addr, i64 16
   store i32 %setjmp.result, ptr %result.slot, align 8
-  %15 = getelementptr i8, ptr %frame.addr, i64 8
-  %return.pc = load i32, ptr %15, align 4
-  %16 = getelementptr i8, ptr %frame.addr, i64 0
-  %saved.fp = load i64, ptr %16, align 8
+  %12 = getelementptr i8, ptr %frame.addr, i64 8
+  %return.pc = load i32, ptr %12, align 4
+  %13 = getelementptr i8, ptr %frame.addr, i64 0
+  %saved.fp = load i64, ptr %13, align 8
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   store i32 %return.pc, ptr %fiber.pc, align 4
   %return.sp = add i64 %frame.fp, 16
@@ -171,41 +167,41 @@ done:                                             ; preds = %entry.setjmp.resume
 
 jump:                                             ; preds = %entry.setjmp.resume
   %env.slot = getelementptr i8, ptr %frame.addr, i64 -48
-  %17 = getelementptr i8, ptr %frame.addr, i64 24
-  %value = load i32, ptr %17, align 4
-  %18 = icmp eq i32 %value, 0
-  %longjmp.value = select i1 %18, i32 1, i32 %value
-  %19 = getelementptr i8, ptr %env.slot, i64 24
+  %14 = getelementptr i8, ptr %frame.addr, i64 24
+  %value = load i32, ptr %14, align 4
+  %15 = icmp eq i32 %value, 0
+  %longjmp.value = select i1 %15, i32 1, i32 %value
+  %16 = getelementptr i8, ptr %env.slot, i64 24
+  %17 = load i64, ptr %16, align 8
+  %18 = inttoptr i64 %17 to ptr
+  store i32 %longjmp.value, ptr %18, align 4
+  %19 = getelementptr i8, ptr %env.slot, i64 8
   %20 = load i64, ptr %19, align 8
-  %21 = inttoptr i64 %20 to ptr
-  store i32 %longjmp.value, ptr %21, align 4
-  %22 = getelementptr i8, ptr %env.slot, i64 8
-  %23 = load i64, ptr %22, align 8
   %fiber.sp5 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
-  store i64 %23, ptr %fiber.sp5, align 8
-  %24 = getelementptr i8, ptr %env.slot, i64 16
-  %25 = load i64, ptr %24, align 8
+  store i64 %20, ptr %fiber.sp5, align 8
+  %21 = getelementptr i8, ptr %env.slot, i64 16
+  %22 = load i64, ptr %21, align 8
   %fiber.fp6 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
-  store i64 %25, ptr %fiber.fp6, align 8
-  %26 = getelementptr i8, ptr %env.slot, i64 0
-  %27 = load i32, ptr %26, align 4
+  store i64 %22, ptr %fiber.fp6, align 8
+  %23 = getelementptr i8, ptr %env.slot, i64 0
+  %24 = load i32, ptr %23, align 4
   %fiber.pc7 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  store i32 %27, ptr %fiber.pc7, align 4
+  store i32 %24, ptr %fiber.pc7, align 4
   ret i32 0
 
 root.prologue.overflow:                           ; preds = %root.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %28 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
-  ret i32 0
+  %25 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
+  ret i32 1
 
-unit.dispatch4:                                   ; preds = %unit.dispatch
-  %29 = icmp ult i32 %region, 512
-  br i1 %29, label %unit.test.left, label %unit.test.right
+unit.dispatch3:                                   ; preds = %unit.dispatch
+  %26 = icmp ult i32 %region, 512
+  br i1 %26, label %unit.test.left, label %unit.test.right
 
-unit.test.left:                                   ; preds = %unit.dispatch4
+unit.test.left:                                   ; preds = %unit.dispatch3
   br label %root.prologue
 
-unit.test.right:                                  ; preds = %unit.dispatch4
+unit.test.right:                                  ; preds = %unit.dispatch3
   br label %entry.setjmp.resume
 }
 

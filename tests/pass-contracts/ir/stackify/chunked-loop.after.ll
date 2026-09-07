@@ -88,13 +88,9 @@ step.lifecycle:                                   ; preds = %unit.control.ready
   %fiber.pc1 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   %pc = load i32, ptr %fiber.pc1, align 4
   %1 = icmp eq i32 %pc, -1
-  %fiber.outcome2 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %2 = load i64, ptr %fiber.outcome2, align 8
-  %3 = icmp ne i64 %2, 0
-  %4 = icmp eq i32 %pc, 0
-  %5 = or i1 %1, %3
-  %6 = or i1 %4, %5
-  br i1 %6, label %step.terminal, label %unit.dispatch
+  %2 = icmp eq i32 %pc, 0
+  %3 = or i1 %2, %1
+  br i1 %3, label %step.terminal, label %unit.dispatch
 
 step.terminal:                                    ; preds = %step.lifecycle
   br i1 %1, label %step.completed, label %step.stop
@@ -107,10 +103,10 @@ step.stop:                                        ; preds = %step.completed, %st
   ret i32 1
 
 unit.dispatch:                                    ; preds = %step.lifecycle
-  %fiber.pc3 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  %region.counter = load i32, ptr %fiber.pc3, align 4
+  %fiber.pc2 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
+  %region.counter = load i32, ptr %fiber.pc2, align 4
   %region = and i32 %region.counter, 16776960
-  br label %unit.dispatch4
+  br label %unit.dispatch3
 
 unit.control.ready:                               ; preds = %unit.entry
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
@@ -125,8 +121,8 @@ unit.control.missing:                             ; preds = %unit.entry
 chunked_loop.prologue:                            ; preds = %unit.test.left
   %frame.sp = sub i64 %frame.fp, 16
   %slice.offset = and i64 %frame.fp, 262143
-  %7 = icmp ult i64 %slice.offset, 131088
-  br i1 %7, label %chunked_loop.prologue.overflow, label %entry
+  %4 = icmp ult i64 %slice.offset, 131088
+  br i1 %4, label %chunked_loop.prologue.overflow, label %entry
 
 entry:                                            ; preds = %chunked_loop.prologue
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
@@ -137,8 +133,8 @@ loop:                                             ; preds = %loop.chunk.continue
   %bpf.loop.chunk = phi i32 [ 0, %entry ], [ 0, %loop.chunk.resume ], [ %bpf.loop.chunk.next, %loop.chunk.continue ]
   %index = phi i32 [ 0, %entry ], [ %next, %loop.chunk.continue ], [ %index.chunk.reload, %loop.chunk.resume ]
   %next = add i32 %index, 1
-  %8 = getelementptr i8, ptr %frame.addr, i64 24
-  %count = load i32, ptr %8, align 4
+  %5 = getelementptr i8, ptr %frame.addr, i64 24
+  %count = load i32, ptr %5, align 4
   %more = icmp ult i32 %next, %count
   br i1 %more, label %loop.chunk.guard, label %exit
 
@@ -153,10 +149,10 @@ loop.chunk.continue:                              ; preds = %loop.chunk.guard
 exit:                                             ; preds = %loop
   %result.slot = getelementptr i8, ptr %frame.addr, i64 16
   store i32 %next, ptr %result.slot, align 8
-  %9 = getelementptr i8, ptr %frame.addr, i64 8
-  %return.pc = load i32, ptr %9, align 4
-  %10 = getelementptr i8, ptr %frame.addr, i64 0
-  %saved.fp = load i64, ptr %10, align 8
+  %6 = getelementptr i8, ptr %frame.addr, i64 8
+  %return.pc = load i32, ptr %6, align 4
+  %7 = getelementptr i8, ptr %frame.addr, i64 0
+  %saved.fp = load i64, ptr %7, align 8
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   store i32 %return.pc, ptr %fiber.pc, align 4
   %return.sp = add i64 %frame.fp, 16
@@ -168,8 +164,8 @@ exit:                                             ; preds = %loop
 
 loop.chunk.guard:                                 ; preds = %loop
   %bpf.loop.chunk.next = add i32 %bpf.loop.chunk, 1
-  %11 = icmp ult i32 %bpf.loop.chunk.next, 16
-  br i1 %11, label %loop.chunk.continue, label %loop.chunk.boundary
+  %8 = icmp ult i32 %bpf.loop.chunk.next, 16
+  br i1 %8, label %loop.chunk.continue, label %loop.chunk.boundary
 
 loop.chunk.boundary:                              ; preds = %loop.chunk.guard
   %index.chunk.slot.slot = getelementptr i8, ptr %frame.addr, i64 -16
@@ -180,17 +176,17 @@ loop.chunk.boundary:                              ; preds = %loop.chunk.guard
 
 chunked_loop.prologue.overflow:                   ; preds = %chunked_loop.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %12 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
-  ret i32 0
+  %9 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
+  ret i32 1
 
-unit.dispatch4:                                   ; preds = %unit.dispatch
-  %13 = icmp ult i32 %region, 512
-  br i1 %13, label %unit.test.left, label %unit.test.right
+unit.dispatch3:                                   ; preds = %unit.dispatch
+  %10 = icmp ult i32 %region, 512
+  br i1 %10, label %unit.test.left, label %unit.test.right
 
-unit.test.left:                                   ; preds = %unit.dispatch4
+unit.test.left:                                   ; preds = %unit.dispatch3
   br label %chunked_loop.prologue
 
-unit.test.right:                                  ; preds = %unit.dispatch4
+unit.test.right:                                  ; preds = %unit.dispatch3
   br label %loop.chunk.resume
 }
 

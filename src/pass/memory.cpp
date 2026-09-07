@@ -2363,7 +2363,10 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                     fb.CreateAlignedStore(ConstantInt::get(i64, bpf::OutcomeValue(CAPSULE_ERROR_MEMORY_FAULT)), StackFault_->getArg(0), Align(8));
                     fb.CreateBr(done);
                     fb.SetInsertPoint(done);
-                    fb.CreateRet(ConstantInt::get(i32, 0));
+                    // Publishing an outcome is terminal. Returning the stop
+                    // action keeps the driver from redispatching the same
+                    // invalid frame until its bounded budget expires.
+                    fb.CreateRet(ConstantInt::get(i32, 1));
                     if (!module.debug_compile_units().empty()) {
                         DIBuilder db(module, false, *module.debug_compile_units_begin());
                         constexpr uint64_t controlBytes = sizeof(struct __bpf_capsule_fiber_control);

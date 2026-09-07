@@ -210,6 +210,7 @@ capsule_ir_pass_contract(stackify-chunked-loop "bpf-stackify" stackify/chunked-l
 capsule_ir_pass_contract(stackify-branching-loop "bpf-stackify" stackify/branching-loop)
 capsule_ir_pass_contract(stackify-virtualized-loop "bpf-stackify" stackify/virtualized-loop)
 capsule_ir_pass_contract(stackify-terminating-helper "bpf-stackify" stackify/terminating-helper)
+capsule_ir_pass_diagnostic(stackify-nosuspend-outcome "bpf-stackify" stackify/rejected-nosuspend-outcome)
 capsule_ir_pass_contract(stackify-native-runtime-btf "bpf-stackify" stackify/native-runtime-btf)
 capsule_ir_pass_contract(stackify-indirect "bpf-stackify-indirect" stackify-indirect/borrowed-context)
 capsule_ir_pass_contract(stackify-fixed "bpf-stackify-fixed" stackify-fixed/two-region)

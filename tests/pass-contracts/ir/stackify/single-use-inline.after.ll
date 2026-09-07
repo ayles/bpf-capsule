@@ -108,7 +108,7 @@ entry:                                            ; preds = %root.prologue
 root.prologue.overflow:                           ; preds = %root.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
   %1 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
-  ret i32 0
+  ret i32 1
 
 entry.yield.resume:                               ; preds = %unit.test.right3
   %2 = getelementptr i8, ptr %frame.addr, i64 24
@@ -209,7 +209,7 @@ entry:                                            ; preds = %explicit_noinline.p
 explicit_noinline.prologue.overflow:              ; preds = %explicit_noinline.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
   %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
-  ret i32 0
+  ret i32 1
 
 unit.dispatch1:                                   ; preds = %unit.dispatch
   br label %explicit_noinline.prologue
@@ -225,13 +225,9 @@ iterate:                                          ; preds = %control.ready
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   %pc = load i32, ptr %fiber.pc, align 4
   %1 = icmp eq i32 %pc, -1
-  %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %2 = load i64, ptr %fiber.outcome, align 8
-  %3 = icmp ne i64 %2, 0
-  %4 = icmp eq i32 %pc, 0
-  %5 = or i1 %1, %3
-  %6 = or i1 %4, %5
-  br i1 %6, label %terminal, label %route
+  %2 = icmp eq i32 %pc, 0
+  %3 = or i1 %2, %1
+  br i1 %3, label %terminal, label %route
 
 control.ready:                                    ; preds = %entry
   br label %iterate
@@ -263,16 +259,16 @@ done:                                             ; preds = %completed, %termina
   ret i32 1
 
 bad.id:                                           ; preds = %dispatch
-  %7 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
+  %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
   ret i32 1
 
 bpf.unit.0:                                       ; preds = %dispatch, %dispatch, %dispatch
-  %8 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region)
-  ret i32 %8
+  %5 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region)
+  ret i32 %5
 
 bpf.unit.1:                                       ; preds = %dispatch
-  %9 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region)
-  ret i32 %9
+  %6 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region)
+  ret i32 %6
 }
 
 attributes #0 = { "capsule.trampoline" }

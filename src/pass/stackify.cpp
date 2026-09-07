@@ -64,9 +64,9 @@ static cl::opt<unsigned> FiberStackBytes(
 
 // An intra-frame continuation immediately re-enters the managed dispatcher.
 constexpr int ActionContinue = 0;
-// Same frame, but return to the native caller before dispatching it again.
-// Step actions are deliberately boolean: zero continues, one stops.
-constexpr int ActionYield = 1;
+// Return to the native caller before another dispatch. Yield, abort and a
+// completed stack all use the same boolean action: zero continues, one stops.
+constexpr int ActionStop = 1;
 
 // Match an x86 frame anchor: fp points at the saved caller fp and the return
 // region occupies the next machine word. Results and arguments belong to the
@@ -1387,6 +1387,9 @@ private:
             }
 
             for (Instruction& instruction : instructions(*function)) {
+                if (auto* store = dyn_cast<StoreInst>(&instruction); store && store->getMetadata(bpf::md::OutcomeStore)) {
+                    report_fatal_error(Twine("stackify: nosuspend function ") + function->getName() + " cannot terminate a Capsule fiber");
+                }
                 auto* call = dyn_cast<CallBase>(&instruction);
                 if (!call || call->isInlineAsm() || isa<IntrinsicInst>(call)) {
                     continue;
@@ -2740,9 +2743,10 @@ private:
             }
             if (unit.Merged) {
                 // The merged unit performs the dispatcher's lifecycle
-                // checks itself: idle, completed (sweeping the sentinel to
-                // idle), or a published exit stops the driver loop; any
-                // other counter dispatches.
+                // checks itself: idle or completed (sweeping the sentinel to
+                // idle) stops the driver loop; any other counter dispatches.
+                // Abort paths stop their physical step directly, so checking
+                // the outcome word here would only tax every ordinary step.
                 auto* lifecycle = BasicBlock::Create(Ctx_, "step.lifecycle", unit.Func, entry);
                 auto* terminal = BasicBlock::Create(Ctx_, "step.terminal", unit.Func, entry);
                 auto* completed = BasicBlock::Create(Ctx_, "step.completed", unit.Func, entry);
@@ -2758,10 +2762,8 @@ private:
                 Value* pcSlot = PcPtr(lb);
                 Value* pc = lb.CreateLoad(I32_, pcSlot, "pc");
                 Value* isCompleted = lb.CreateICmpEQ(pc, DonePc());
-                Value* hasExited = lb.CreateICmpNE(lb.CreateLoad(I64_, OutcomePtr(lb)), ConstantInt::get(I64_, 0));
                 Value* isIdle = lb.CreateICmpEQ(pc, ConstantInt::get(I32_, 0));
-                Value* isTerminal = lb.CreateOr(isCompleted, hasExited);
-                Value* stopped = lb.CreateOr(isIdle, isTerminal);
+                Value* stopped = lb.CreateOr(isIdle, isCompleted);
                 lb.CreateCondBr(stopped, terminal, entry);
                 IRBuilder<> tlb(terminal);
                 tlb.CreateCondBr(isCompleted, completed, stop);
@@ -3885,9 +3887,8 @@ private:
         Stack_->setMetadata(bpf::md::FiberStackSize, MDNode::get(Ctx_, ConstantAsMetadata::get(ConstantInt::get(I64_, FiberStackSize_))));
     }
 
-    // Publish the error in the current fiber. The driver observes it between
-    // physical steps and reclaims the managed stack without a kernel-specific
-    // exception mechanism.
+    // Publish the error in the current fiber. The failing physical step stops
+    // the driver immediately, without a kernel-specific exception mechanism.
     // Make an LLVM-proven maximum visible to the BPF verifier.  SCEV can use
     // facts (notably `range` metadata) which are valid for optimization but
     // are intentionally erased later because the kernel cannot see them.  A
@@ -4061,7 +4062,7 @@ private:
             ->setDebugLoc(debugLoc);
         IRBuilder<> cf(claimFail);
         EmitAbort(cf, CAPSULE_ERROR_STACK_OVERFLOW);
-        cf.CreateRet(ConstantInt::get(I32_, ActionContinue))->setDebugLoc(debugLoc);
+        cf.CreateRet(ConstantInt::get(I32_, ActionStop))->setDebugLoc(debugLoc);
         IRBuilder<> eb(origEntry, origEntry->getFirstInsertionPt());
         eb.CreateStore(claimed, SpPtr(eb))->setDebugLoc(debugLoc);
         info.States.push_back({info.EntryPc, prologue, ManagedFunction::StateKind::Entry});
@@ -4139,7 +4140,54 @@ private:
             }
         }
         for (auto* ret : returns) {
-            LowerReturn(ret, frame, info, debugLoc);
+            // bpf-lower-capsule-exit leaves a marked outcome store immediately
+            // before its synthetic return. The outcome is terminal, so do not
+            // pop the frame merely to discover the same word on the next
+            // dispatch.
+            auto publishesOutcome = [](const BasicBlock* block) {
+                return llvm::any_of(*block, [](const Instruction& instruction) {
+                    auto* store = dyn_cast<StoreInst>(&instruction);
+                    return store && store->getMetadata(bpf::md::OutcomeStore);
+                });
+            };
+            bool terminal = publishesOutcome(ret->getParent());
+            if (!terminal) {
+                SmallVector<UncondBrInst*, 4> terminalPredecessors;
+                bool hasOrdinaryPredecessor = false;
+                for (BasicBlock* predecessor : predecessors(ret->getParent())) {
+                    bool predecessorPublishes = publishesOutcome(predecessor);
+                    auto* branch = dyn_cast<UncondBrInst>(predecessor->getTerminator());
+                    bool direct = branch && branch->getSuccessor(0) == ret->getParent();
+                    if (predecessorPublishes && !direct) {
+                        report_fatal_error(
+                            Twine("stackify: terminal return in ") + info.Original->getName() + " is reached conditionally from an outcome-publishing block");
+                    }
+                    if (predecessorPublishes) {
+                        terminalPredecessors.push_back(branch);
+                    } else {
+                        hasOrdinaryPredecessor = true;
+                    }
+                }
+                terminal = !terminalPredecessors.empty() && !hasOrdinaryPredecessor;
+                if (!terminal && !terminalPredecessors.empty()) {
+                    BasicBlock* returnBlock = ret->getParent();
+                    auto* terminalReturn = BasicBlock::Create(Ctx_, returnBlock->getName() + ".terminal", returnBlock->getParent(), returnBlock);
+                    auto* stop = IRBuilder<>(terminalReturn).CreateRet(ConstantInt::get(I32_, ActionStop));
+                    stop->setDebugLoc(ret->getDebugLoc() ? ret->getDebugLoc() : debugLoc);
+                    for (UncondBrInst* branch : terminalPredecessors) {
+                        returnBlock->removePredecessor(branch->getParent());
+                        branch->setSuccessor(0, terminalReturn);
+                    }
+                }
+            }
+            if (terminal) {
+                IRBuilder<> b(ret);
+                auto* stop = b.CreateRet(ConstantInt::get(I32_, ActionStop));
+                stop->setDebugLoc(ret->getDebugLoc() ? ret->getDebugLoc() : debugLoc);
+                ret->eraseFromParent();
+            } else {
+                LowerReturn(ret, frame, info, debugLoc);
+            }
         }
 
         for (auto&& edge : backedges) {
@@ -4276,7 +4324,7 @@ private:
             auto* overflow = BasicBlock::Create(Ctx_, block->getName() + ".carve.abort", block->getParent(), carve);
             IRBuilder<> ob(overflow);
             EmitAbort(ob, CAPSULE_ERROR_STACK_OVERFLOW);
-            ob.CreateRet(ConstantInt::get(I32_, ActionContinue))->setDebugLoc(debugLoc);
+            ob.CreateRet(ConstantInt::get(I32_, ActionStop))->setDebugLoc(debugLoc);
             Instruction* br = block->getTerminator();
             b.SetInsertPoint(br);
             b.CreateCondBr(over, overflow, carve)->setDebugLoc(debugLoc);
@@ -4590,7 +4638,7 @@ private:
         IRBuilder<> b(branch);
         StoreProvisionalRegionCounter(b, resumePc, PcPtr(b))->setDebugLoc(debugLoc);
         b.CreateStore(ConstantInt::get(I64_, CAPSULE_YIELD), OutcomePtr(b))->setDebugLoc(debugLoc);
-        b.CreateRet(ConstantInt::get(I32_, ActionYield))->setDebugLoc(debugLoc);
+        b.CreateRet(ConstantInt::get(I32_, ActionStop))->setDebugLoc(debugLoc);
         branch->eraseFromParent();
         call->eraseFromParent();
         return resume;
@@ -4807,10 +4855,8 @@ private:
         Value* pcSlot = PcPtr(b, fiber);
         Value* pc = b.CreateLoad(I32_, pcSlot, "pc");
         Value* isCompleted = b.CreateICmpEQ(pc, DonePc());
-        Value* hasExited = b.CreateICmpNE(b.CreateLoad(I64_, OutcomePtr(b, fiber)), ConstantInt::get(I64_, 0));
         Value* isIdle = b.CreateICmpEQ(pc, ConstantInt::get(I32_, 0));
-        Value* isTerminal = b.CreateOr(isCompleted, hasExited);
-        Value* stopped = b.CreateOr(isIdle, isTerminal);
+        Value* stopped = b.CreateOr(isIdle, isCompleted);
         b.CreateCondBr(stopped, terminal, route);
 
         b.SetInsertPoint(terminal);

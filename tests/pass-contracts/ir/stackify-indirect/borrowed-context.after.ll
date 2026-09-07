@@ -174,7 +174,7 @@ entry:                                            ; preds = %borrowed_root.prolo
 borrowed_root.prologue.overflow:                  ; preds = %borrowed_root.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
   %2 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !52
-  ret i32 0
+  ret i32 1
 
 entry.resume:                                     ; preds = %unit.test.right3
   %returned.frame = getelementptr i8, ptr %frame.addr, i64 -32
@@ -326,7 +326,7 @@ entry:                                            ; preds = %scalar_helper.prolo
 scalar_helper.prologue.overflow:                  ; preds = %scalar_helper.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
   %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !58
-  ret i32 0
+  ret i32 1
 
 unit.dispatch1:                                   ; preds = %unit.dispatch
   br label %scalar_helper.prologue, !dbg !58
@@ -375,7 +375,7 @@ entry:                                            ; preds = %context_helper.prol
 context_helper.prologue.overflow:                 ; preds = %context_helper.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
   %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !69
-  ret i32 0
+  ret i32 1
 
 unit.dispatch1:                                   ; preds = %unit.dispatch
   br label %context_helper.prologue, !dbg !69
@@ -391,13 +391,9 @@ iterate:                                          ; preds = %control.ready
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5, !dbg !74
   %pc = load i32, ptr %fiber.pc, align 4, !dbg !74
   %1 = icmp eq i32 %pc, -1, !dbg !74
-  %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0, !dbg !74
-  %2 = load i64, ptr %fiber.outcome, align 8, !dbg !74
-  %3 = icmp ne i64 %2, 0, !dbg !74
-  %4 = icmp eq i32 %pc, 0, !dbg !74
-  %5 = or i1 %1, %3, !dbg !74
-  %6 = or i1 %4, %5, !dbg !74
-  br i1 %6, label %terminal, label %route, !dbg !74
+  %2 = icmp eq i32 %pc, 0, !dbg !74
+  %3 = or i1 %2, %1, !dbg !74
+  br i1 %3, label %terminal, label %route, !dbg !74
 
 control.ready:                                    ; preds = %entry
   br label %iterate, !dbg !74
@@ -416,8 +412,8 @@ dispatch:                                         ; preds = %route
   ], !dbg !74
 
 bpf.dispatch.output.scalar.0:                     ; preds = %dispatch
-  %7 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !74
-  ret i32 %7, !dbg !74
+  %4 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !74
+  ret i32 %4, !dbg !74
 
 terminal:                                         ; preds = %iterate
   br i1 %1, label %completed, label %done, !dbg !74
@@ -430,7 +426,7 @@ done:                                             ; preds = %completed, %termina
   ret i32 1, !dbg !74
 
 bad.id:                                           ; preds = %dispatch
-  %8 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !74
+  %5 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !74
   ret i32 1, !dbg !74
 }
 
@@ -473,13 +469,9 @@ iterate:                                          ; preds = %control.ready
   %fiber.pc = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5, !dbg !86
   %pc = load i32, ptr %fiber.pc, align 4, !dbg !86
   %1 = icmp eq i32 %pc, -1, !dbg !86
-  %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0, !dbg !86
-  %2 = load i64, ptr %fiber.outcome, align 8, !dbg !86
-  %3 = icmp ne i64 %2, 0, !dbg !86
-  %4 = icmp eq i32 %pc, 0, !dbg !86
-  %5 = or i1 %1, %3, !dbg !86
-  %6 = or i1 %4, %5, !dbg !86
-  br i1 %6, label %terminal, label %route, !dbg !86
+  %2 = icmp eq i32 %pc, 0, !dbg !86
+  %3 = or i1 %2, %1, !dbg !86
+  br i1 %3, label %terminal, label %route, !dbg !86
 
 control.ready:                                    ; preds = %entry
   br label %iterate, !dbg !86
@@ -499,8 +491,8 @@ dispatch:                                         ; preds = %route
   ], !dbg !86
 
 bpf.dispatch.output.ctx.0:                        ; preds = %dispatch
-  %7 = call i32 @bpf.dispatch.output.ctx.0(ptr %ctx, i32 %fiber, ptr %fiber_control, i32 %region), !dbg !86
-  ret i32 %7, !dbg !86
+  %4 = call i32 @bpf.dispatch.output.ctx.0(ptr %ctx, i32 %fiber, ptr %fiber_control, i32 %region), !dbg !86
+  ret i32 %4, !dbg !86
 
 terminal:                                         ; preds = %iterate
   br i1 %1, label %completed, label %done, !dbg !86
@@ -510,14 +502,14 @@ completed:                                        ; preds = %terminal
   br label %done, !dbg !86
 
 scalar.root.0:                                    ; preds = %dispatch
-  %8 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !86
-  ret i32 %8, !dbg !86
+  %5 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !86
+  ret i32 %5, !dbg !86
 
 done:                                             ; preds = %completed, %terminal
   ret i32 1, !dbg !86
 
 bad.id:                                           ; preds = %dispatch
-  %9 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !86
+  %6 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !86
   ret i32 1, !dbg !86
 }
 

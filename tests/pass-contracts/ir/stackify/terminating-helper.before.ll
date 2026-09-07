@@ -10,6 +10,8 @@ target triple = "bpfel"
 
 declare i32 @__bpf_capsule_trampoline_step(i32, ptr)
 
+declare ptr @__bpf_capsule_outcome_ptr()
+
 define i32 @__bpf_capsule_trampoline_l1(i32 %fiber, ptr %control) #0 {
 entry:
   %status = call i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr %control)
@@ -25,21 +27,52 @@ entry:
 
 define i32 @terminating_helper(i1 %fail) !bpf.capsule !0 {
 entry:
-  br i1 %fail, label %unreachable, label %return
+  br i1 %fail, label %outcome.route, label %return
 
-unreachable:                                      ; preds = %entry
-  unreachable
+outcome.route:                                    ; preds = %entry
+  br i1 %fail, label %outcome.one, label %outcome.two
+
+outcome.one:                                      ; preds = %outcome.route
+  %outcome = call ptr @__bpf_capsule_outcome_ptr()
+  store i64 -4294967293, ptr %outcome, align 8, !bpf.capsule.outcome.store !0
+  br label %outcome.return
+
+outcome.two:                                      ; preds = %outcome.route
+  %outcome.2 = call ptr @__bpf_capsule_outcome_ptr()
+  store i64 -4294967292, ptr %outcome.2, align 8, !bpf.capsule.outcome.store !0
+  br label %outcome.return
+
+outcome.return:                                   ; preds = %outcome.two, %outcome.one
+  ret i32 0
 
 return:                                           ; preds = %entry
   ret i32 7
 }
 
+define i32 @mixed_terminating_helper(i1 %fail) !bpf.capsule !0 {
+entry:
+  br i1 %fail, label %outcome, label %ordinary
+
+outcome:                                          ; preds = %entry
+  %outcome.ptr = call ptr @__bpf_capsule_outcome_ptr()
+  store i64 -4294967291, ptr %outcome.ptr, align 8, !bpf.capsule.outcome.store !0
+  br label %return
+
+ordinary:                                         ; preds = %entry
+  br label %return
+
+return:                                           ; preds = %ordinary, %outcome
+  ret i32 11
+}
+
 define i32 @root(i1 %fail) !bpf.capsule !0 {
 entry:
+  %mixed = call i32 @mixed_terminating_helper(i1 %fail)
   %first = call i32 @terminating_helper(i1 %fail)
   %second = call i32 @terminating_helper(i1 false)
   %sum = add i32 %first, %second
-  ret i32 %sum
+  %total = add i32 %sum, %mixed
+  ret i32 %total
 }
 
 define i32 @start(i32 %fiber) section "syscall" !bpf.native !0 {
