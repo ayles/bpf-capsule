@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Private C linkage inside the compiler runtime: the 64-bit building blocks
-// shared by int128.c and softfloat.c. Everything defined here is loop-free,
+// used by int128.c. Everything defined here is loop-free,
 // so a routine built on it can still be proven non-suspendable.
 #pragma once
 

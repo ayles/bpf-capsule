@@ -27,7 +27,7 @@ entry:
   ret i64 %address
 }
 
-define i64 @__bpf_i2d(i64 %value) #2 {
+define i64 @__floatdidf(i64 %value) #2 {
 entry:
   ret i64 %value
 }

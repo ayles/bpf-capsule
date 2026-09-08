@@ -65,6 +65,7 @@ stdenv.mkDerivation {
     "-DCMAKE_VERBOSE_MAKEFILE:BOOL=ON"
     "-DFETCHCONTENT_SOURCE_DIR_PICOLIBC=${picolibcSource}"
     "-DFETCHCONTENT_SOURCE_DIR_TLSF=${tlsfSource}"
+    "-DFETCHCONTENT_SOURCE_DIR_COMPILER_RT=${llvmPackages.llvm.monorepoSrc}"
     "-DBPF_CAPSULE_LINUX_UAPI_INCLUDE_DIR=${linuxHeaders}/include"
     "-DBPF_CAPSULE_LINUX_UAPI_ARCH_INCLUDE_DIR=${linuxHeaders}/include"
     "-DBPF_CAPSULE_LINUX_UAPI_GENERIC_INCLUDE_DIR=${linuxHeaders}/include"

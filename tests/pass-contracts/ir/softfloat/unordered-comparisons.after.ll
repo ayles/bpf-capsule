@@ -4,80 +4,60 @@ target triple = "bpfel"
 
 define i1 @unordered(i32 %lhs, i32 %rhs) {
 entry:
-  %0 = call i32 @__bpf_fcmp(i32 %lhs, i32 %rhs)
-  %1 = icmp eq i32 %0, 2
-  %2 = icmp eq i32 %0, -1
-  %3 = icmp eq i32 %0, 0
-  %4 = icmp eq i32 %0, 1
+  %0 = call i64 @__unordsf2(i32 %lhs, i32 %rhs)
+  %1 = icmp ne i64 %0, 0
   ret i1 %1
 }
 
 define i1 @unordered_equal(i32 %lhs, i32 %rhs) {
 entry:
-  %0 = call i32 @__bpf_fcmp(i32 %lhs, i32 %rhs)
-  %1 = icmp eq i32 %0, 2
-  %2 = icmp eq i32 %0, -1
-  %3 = icmp eq i32 %0, 0
-  %4 = icmp eq i32 %0, 1
-  %5 = or i1 %3, %1
-  ret i1 %5
+  %0 = call i64 @__eqsf2(i32 %lhs, i32 %rhs)
+  %1 = icmp eq i64 %0, 0
+  %2 = call i64 @__unordsf2(i32 %lhs, i32 %rhs)
+  %3 = icmp ne i64 %2, 0
+  %4 = or i1 %1, %3
+  ret i1 %4
 }
 
 define i1 @unordered_greater(i32 %lhs, i32 %rhs) {
 entry:
-  %0 = call i32 @__bpf_fcmp(i32 %lhs, i32 %rhs)
-  %1 = icmp eq i32 %0, 2
-  %2 = icmp eq i32 %0, -1
-  %3 = icmp eq i32 %0, 0
-  %4 = icmp eq i32 %0, 1
-  %5 = or i1 %4, %1
-  ret i1 %5
+  %0 = call i64 @__lesf2(i32 %lhs, i32 %rhs)
+  %1 = icmp sgt i64 %0, 0
+  ret i1 %1
 }
 
 define i1 @unordered_greater_equal(i32 %lhs, i32 %rhs) {
 entry:
-  %0 = call i32 @__bpf_fcmp(i32 %lhs, i32 %rhs)
-  %1 = icmp eq i32 %0, 2
-  %2 = icmp eq i32 %0, -1
-  %3 = icmp eq i32 %0, 0
-  %4 = icmp eq i32 %0, 1
-  %5 = or i1 %4, %3
-  %6 = or i1 %5, %1
-  ret i1 %6
+  %0 = call i64 @__lesf2(i32 %lhs, i32 %rhs)
+  %1 = icmp sge i64 %0, 0
+  ret i1 %1
 }
 
 define i1 @unordered_less(i32 %lhs, i32 %rhs) {
 entry:
-  %0 = call i32 @__bpf_fcmp(i32 %lhs, i32 %rhs)
-  %1 = icmp eq i32 %0, 2
-  %2 = icmp eq i32 %0, -1
-  %3 = icmp eq i32 %0, 0
-  %4 = icmp eq i32 %0, 1
-  %5 = or i1 %2, %1
-  ret i1 %5
+  %0 = call i64 @__gesf2(i32 %lhs, i32 %rhs)
+  %1 = icmp slt i64 %0, 0
+  ret i1 %1
 }
 
 define i1 @unordered_less_equal(i32 %lhs, i32 %rhs) {
 entry:
-  %0 = call i32 @__bpf_fcmp(i32 %lhs, i32 %rhs)
-  %1 = icmp eq i32 %0, 2
-  %2 = icmp eq i32 %0, -1
-  %3 = icmp eq i32 %0, 0
-  %4 = icmp eq i32 %0, 1
-  %5 = or i1 %2, %3
-  %6 = or i1 %5, %1
-  ret i1 %6
+  %0 = call i64 @__gesf2(i32 %lhs, i32 %rhs)
+  %1 = icmp sle i64 %0, 0
+  ret i1 %1
 }
 
 define i1 @unordered_not_equal(i32 %lhs, i32 %rhs) {
 entry:
-  %0 = call i32 @__bpf_fcmp(i32 %lhs, i32 %rhs)
-  %1 = icmp eq i32 %0, 2
-  %2 = icmp eq i32 %0, -1
-  %3 = icmp eq i32 %0, 0
-  %4 = icmp eq i32 %0, 1
-  %5 = xor i1 %3, true
-  ret i1 %5
+  %0 = call i64 @__eqsf2(i32 %lhs, i32 %rhs)
+  %1 = icmp ne i64 %0, 0
+  ret i1 %1
 }
 
-declare i32 @__bpf_fcmp(i32, i32)
+declare i64 @__unordsf2(i32, i32)
+
+declare i64 @__eqsf2(i32, i32)
+
+declare i64 @__lesf2(i32, i32)
+
+declare i64 @__gesf2(i32, i32)

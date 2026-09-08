@@ -48,6 +48,79 @@ namespace {
 
 enum class UnsupportedFloatType { None, Narrow, Wide, Vector };
 
+struct FloatComparison {
+    StringRef name;
+    CmpInst::Predicate predicate;
+};
+
+// compiler-rt's LE and GE entry points differ only in the sign returned for
+// NaN. Select the one that implements the requested LLVM predicate without
+// an extra unordered test. ONE/UEQ additionally need __unord below.
+FloatComparison comparisonLibcall(CmpInst::Predicate predicate, bool f32) {
+    switch (predicate) {
+        case CmpInst::FCMP_OEQ:
+        case CmpInst::FCMP_UEQ:
+            return {f32 ? "__eqsf2" : "__eqdf2", CmpInst::ICMP_EQ};
+        case CmpInst::FCMP_ONE:
+        case CmpInst::FCMP_UNE:
+            return {f32 ? "__eqsf2" : "__eqdf2", CmpInst::ICMP_NE};
+        case CmpInst::FCMP_OLT:
+            return {f32 ? "__lesf2" : "__ledf2", CmpInst::ICMP_SLT};
+        case CmpInst::FCMP_OLE:
+            return {f32 ? "__lesf2" : "__ledf2", CmpInst::ICMP_SLE};
+        case CmpInst::FCMP_OGT:
+            return {f32 ? "__gesf2" : "__gedf2", CmpInst::ICMP_SGT};
+        case CmpInst::FCMP_OGE:
+            return {f32 ? "__gesf2" : "__gedf2", CmpInst::ICMP_SGE};
+        case CmpInst::FCMP_ULT:
+            return {f32 ? "__gesf2" : "__gedf2", CmpInst::ICMP_SLT};
+        case CmpInst::FCMP_ULE:
+            return {f32 ? "__gesf2" : "__gedf2", CmpInst::ICMP_SLE};
+        case CmpInst::FCMP_UGT:
+            return {f32 ? "__lesf2" : "__ledf2", CmpInst::ICMP_SGT};
+        case CmpInst::FCMP_UGE:
+            return {f32 ? "__lesf2" : "__ledf2", CmpInst::ICMP_SGE};
+        case CmpInst::FCMP_ORD:
+            return {f32 ? "__unordsf2" : "__unorddf2", CmpInst::ICMP_EQ};
+        case CmpInst::FCMP_UNO:
+            return {f32 ? "__unordsf2" : "__unorddf2", CmpInst::ICMP_NE};
+        default:
+            return {{}, CmpInst::BAD_ICMP_PREDICATE};
+    }
+}
+
+StringRef arithmeticLibcall(const Instruction& instruction) {
+    bool f32 = instruction.getType()->isFloatTy();
+    switch (instruction.getOpcode()) {
+        case Instruction::FAdd:
+            return f32 ? bpf::sym::FAdd : bpf::sym::DAdd;
+        case Instruction::FSub:
+            return f32 ? bpf::sym::FSub : bpf::sym::DSub;
+        case Instruction::FMul:
+            return f32 ? bpf::sym::FMul : bpf::sym::DMul;
+        case Instruction::FDiv:
+            return f32 ? bpf::sym::FDiv : bpf::sym::DDiv;
+        case Instruction::FRem:
+            return f32 ? bpf::sym::FRem : bpf::sym::DRem;
+        case Instruction::FNeg:
+            return f32 ? bpf::sym::FNeg : bpf::sym::DNeg;
+        case Instruction::FPExt:
+            return bpf::sym::F2D;
+        case Instruction::FPTrunc:
+            return bpf::sym::D2F;
+        case Instruction::SIToFP:
+            return f32 ? bpf::sym::I2F : bpf::sym::I2D;
+        case Instruction::UIToFP:
+            return f32 ? bpf::sym::U2F : bpf::sym::U2D;
+        case Instruction::FPToSI:
+            return instruction.getOperand(0)->getType()->isFloatTy() ? bpf::sym::F2I : bpf::sym::D2I;
+        case Instruction::FPToUI:
+            return instruction.getOperand(0)->getType()->isFloatTy() ? bpf::sym::F2U : bpf::sym::D2U;
+        default:
+            return {};
+    }
+}
+
 StringRef intrinsicLibmBase(Intrinsic::ID intrinsic) {
     switch (intrinsic) {
         case Intrinsic::fabs:
@@ -485,8 +558,8 @@ struct SoftFloat {
             case Instruction::FRem:
                 return call2(bpf::sym::FRem, bpf::sym::DRem, I.getOperand(0), I.getOperand(1));
             case Instruction::FNeg: {
-                // A call like its siblings; the always_inline C body is one
-                // sign-bit flip and the post-link O2 folds it back to a XOR.
+                // The compiler-rt body is one integer sign-bit flip; the
+                // post-link optimizer can fold the call back to a XOR.
                 Value* x = get(I.getOperand(0));
                 bool f32 = isF32(I.getOperand(0));
                 Type* t = f32 ? i32() : i64();
@@ -494,71 +567,25 @@ struct SoftFloat {
             }
             case Instruction::FCmp: {
                 auto& fc = cast<FCmpInst>(I);
-                Value* x = fc.getOperand(0);
-                bool f32 = isF32(x);
-                Type* t = f32 ? i32() : i64();
-                Value* c = b.CreateCall(routine(f32 ? bpf::sym::FCmp : bpf::sym::DCmp, i32(), {t, t}), {get(fc.getOperand(0)), get(fc.getOperand(1))});
-                // The routine answers -1 / 0 / 1, or 2 when either side is NaN.
-                Value* zero = ConstantInt::get(i32(), 0);
-                Value* two = ConstantInt::get(i32(), 2);
-                Value* unord = b.CreateICmpEQ(c, two);
-                Value* lt = b.CreateICmpEQ(c, ConstantInt::get(i32(), -1));
-                Value* eq = b.CreateICmpEQ(c, zero);
-                Value* gt = b.CreateICmpEQ(c, ConstantInt::get(i32(), 1));
-                Value* r = nullptr;
-                switch (fc.getPredicate()) {
-                    case FCmpInst::FCMP_FALSE:
-                        r = b.getFalse();
-                        break;
-                    case FCmpInst::FCMP_TRUE:
-                        r = b.getTrue();
-                        break;
-                    case FCmpInst::FCMP_ORD:
-                        r = b.CreateNot(unord);
-                        break;
-                    case FCmpInst::FCMP_UNO:
-                        r = unord;
-                        break;
-                    case FCmpInst::FCMP_OEQ:
-                        r = eq;
-                        break;
-                    case FCmpInst::FCMP_OGT:
-                        r = gt;
-                        break;
-                    case FCmpInst::FCMP_OGE:
-                        r = b.CreateOr(gt, eq);
-                        break;
-                    case FCmpInst::FCMP_OLT:
-                        r = lt;
-                        break;
-                    case FCmpInst::FCMP_OLE:
-                        r = b.CreateOr(lt, eq);
-                        break;
-                    case FCmpInst::FCMP_ONE:
-                        r = b.CreateOr(lt, gt);
-                        break;
-                    case FCmpInst::FCMP_UEQ:
-                        r = b.CreateOr(eq, unord);
-                        break;
-                    case FCmpInst::FCMP_UGT:
-                        r = b.CreateOr(gt, unord);
-                        break;
-                    case FCmpInst::FCMP_UGE:
-                        r = b.CreateOr(b.CreateOr(gt, eq), unord);
-                        break;
-                    case FCmpInst::FCMP_ULT:
-                        r = b.CreateOr(lt, unord);
-                        break;
-                    case FCmpInst::FCMP_ULE:
-                        r = b.CreateOr(b.CreateOr(lt, eq), unord);
-                        break;
-                    case FCmpInst::FCMP_UNE:
-                        r = b.CreateNot(eq);
-                        break;
-                    default:
-                        llvm_unreachable("invalid floating-point comparison predicate");
+                auto predicate = fc.getPredicate();
+                if (predicate == CmpInst::FCMP_FALSE || predicate == CmpInst::FCMP_TRUE) {
+                    return b.getInt1(predicate == CmpInst::FCMP_TRUE);
                 }
-                return r;
+                bool f32 = isF32(fc.getOperand(0));
+                Type* type = f32 ? i32() : i64();
+                // compiler-rt uses C long as CMP_RESULT on the BPF LP64 ABI.
+                auto compare = [&](FloatComparison comparison) {
+                    Value* result = b.CreateCall(routine(comparison.name, i64(), {type, type}), {get(fc.getOperand(0)), get(fc.getOperand(1))});
+                    return b.CreateICmp(comparison.predicate, result, b.getInt64(0));
+                };
+                Value* result = compare(comparisonLibcall(predicate, f32));
+                if (predicate == CmpInst::FCMP_ONE) {
+                    return b.CreateAnd(result, compare(comparisonLibcall(CmpInst::FCMP_ORD, f32)));
+                }
+                if (predicate == CmpInst::FCMP_UEQ) {
+                    return b.CreateOr(result, compare(comparisonLibcall(CmpInst::FCMP_UNO, f32)));
+                }
+                return result;
             }
             case Instruction::FPExt: { // float -> double
                 Value* x = get(I.getOperand(0));
@@ -597,24 +624,43 @@ struct SoftFloat {
 std::vector<std::string> RequiredSoftFloatLibcalls(const Module& module) {
     std::vector<std::string> result;
     StringSet<> seen;
+    auto require = [&](StringRef name) {
+        if (name.empty()) {
+            return;
+        }
+        const GlobalValue* implementation = module.getNamedValue(name);
+        if ((!implementation || implementation->isDeclarationForLinker()) && seen.insert(name).second) {
+            result.push_back(name.str());
+        }
+    };
     for (const Function& function : module) {
         if (function.isDeclaration()) {
             continue;
         }
         for (const Instruction& instruction : instructions(function)) {
+            require(arithmeticLibcall(instruction));
+            if (const auto* comparison = dyn_cast<FCmpInst>(&instruction)) {
+                bool f32 = comparison->getOperand(0)->getType()->isFloatTy();
+                require(comparisonLibcall(comparison->getPredicate(), f32).name);
+                if (comparison->getPredicate() == CmpInst::FCMP_ONE || comparison->getPredicate() == CmpInst::FCMP_UEQ) {
+                    require(comparisonLibcall(CmpInst::FCMP_UNO, f32).name);
+                }
+            }
             const auto* intrinsic = dyn_cast<IntrinsicInst>(&instruction);
             if (!intrinsic) {
                 continue;
+            }
+            if (intrinsic->getIntrinsicID() == Intrinsic::fmuladd) {
+                bool f32 = intrinsic->getType()->isFloatTy();
+                require(f32 ? bpf::sym::FMul : bpf::sym::DMul);
+                require(f32 ? bpf::sym::FAdd : bpf::sym::DAdd);
             }
             StringRef base = intrinsicLibmBase(intrinsic->getIntrinsicID());
             if (base.empty() || (!intrinsic->getType()->isFloatTy() && !intrinsic->getType()->isDoubleTy())) {
                 continue;
             }
             std::string name = intrinsic->getType()->isFloatTy() ? (base + "f").str() : base.str();
-            const Function* implementation = module.getFunction(name);
-            if ((!implementation || implementation->isDeclarationForLinker()) && seen.insert(name).second) {
-                result.push_back(std::move(name));
-            }
+            require(name);
         }
     }
     return result;
@@ -1000,7 +1046,7 @@ PreservedAnalyses SoftFloatPass::run(Module& module, ModuleAnalysisManager&) {
 
     // A retyped function's debug info still describes the floats it used to
     // take, so its BTF record contradicts the function itself and the kernel
-    // rejects the object ("FUNC __bpf_dadd Invalid arg#1"). Keep the original
+    // rejects the object ("FUNC __adddf3 Invalid arg#1"). Keep the original
     // distinct DISubprogram -- every instruction and loop DILocation already
     // names it -- and replace only its signature. Declarations instead carry
     // uniqued (non-distinct) DISubprogram nodes, which LLVM forbids mutating;

@@ -13,7 +13,8 @@ class Module;
 
 bool RegisterSoftFloatPass(llvm::StringRef name, llvm::ModulePassManager& manager);
 
-// libm routines that bpf-soft-float will call when it lowers intrinsics.
+// Compiler-rt/libm routines that bpf-soft-float will call when it lowers
+// arithmetic and intrinsics.
 // Archive linking needs these implicit dependencies as well as the module's
 // explicit undefined symbols.
 std::vector<std::string> RequiredSoftFloatLibcalls(const llvm::Module& module);

@@ -274,11 +274,7 @@ function(_bpf_capsule_compiler_runtime_bitcode out_var)
     get_property(bitcode DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_BITCODE)
     get_property(target DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_TARGET)
     if(NOT bitcode)
-        _bpf_capsule_compile_bitcode(
-            bitcode
-            SOURCES "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/int128.c" "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/softfloat.c"
-            COMPILE_OPTIONS -g
-        )
+        _bpf_capsule_compile_bitcode(bitcode SOURCES "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/int128.c" COMPILE_OPTIONS -g)
         string(MD5 target_id "${CMAKE_CURRENT_BINARY_DIR};compiler-runtime")
         set(target "bpf_capsule_compiler_runtime_${target_id}")
         add_custom_target(${target} DEPENDS ${bitcode})
@@ -442,7 +438,8 @@ function(bpf_capsule_object out_var)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${output_directory}"
         COMMAND
             $<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}> ${ARG_LINK_OPTIONS} -o "${output}" ${input_bitcode}
-            ${runtime_bitcode} ${compiler_runtime_bitcode} ${platform_bitcode} "${BPF_CAPSULE_LIBC_ARCHIVE}"
+            ${runtime_bitcode} ${compiler_runtime_bitcode} ${platform_bitcode} "${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
+            "${BPF_CAPSULE_LIBC_ARCHIVE}"
         DEPENDS
             ${BPF_CAPSULE_LD_TARGET}
             ${input_bitcode}
@@ -450,6 +447,7 @@ function(bpf_capsule_object out_var)
             ${runtime_bitcode_target}
             ${compiler_runtime_bitcode}
             ${compiler_runtime_bitcode_target}
+            "${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
             ${platform_bitcode}
             ${platform_bitcode_target}
             "${BPF_CAPSULE_LIBC_ARCHIVE}"

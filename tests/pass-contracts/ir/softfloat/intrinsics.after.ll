@@ -42,13 +42,13 @@ entry:
 
 define i32 @use_fmuladd(i32 %a, i32 %b, i32 %c) {
 entry:
-  %0 = call i32 @__bpf_fmul(i32 %a, i32 %b)
-  %1 = call i32 @__bpf_fadd(i32 %0, i32 %c)
+  %0 = call i32 @__mulsf3(i32 %a, i32 %b)
+  %1 = call i32 @__addsf3(i32 %0, i32 %c)
   ret i32 %1
 }
 
-declare i32 @__bpf_fmul(i32, i32)
+declare i32 @__mulsf3(i32, i32)
 
-declare i32 @__bpf_fadd(i32, i32)
+declare i32 @__addsf3(i32, i32)
 
 attributes #0 = { nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none) }

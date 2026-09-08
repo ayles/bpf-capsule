@@ -221,22 +221,31 @@ target_compile_options(int128_contract_test PRIVATE -fno-builtin)
 add_test(NAME CompilerRuntime.Int128Contracts COMMAND int128_contract_test)
 set_tests_properties(CompilerRuntime.Int128Contracts PROPERTIES LABELS unprivileged)
 
-# The soft-float routines are plain C over integers: compile them for the
-# host and compare every operation bit for bit with the host FPU. Contraction
-# is disabled so the reference never fuses a multiply-add.
-add_executable(
-    softfloat_contract_test
-    compiler-runtime/softfloat_contract.c
-    ${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/softfloat.c
-)
-target_include_directories(
-    softfloat_contract_test
-    PRIVATE "${BPF_CAPSULE_INCLUDE_DIR}" "${BPF_CAPSULE_INTERNAL_INCLUDE_DIR}"
-)
+# Compile the installed standard libcalls natively and compare them with the
+# FPU. Libm remainder is checked separately through Capsule, against host libm.
+file(GLOB softfloat_sources "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/compiler-rt/*.c")
+add_executable(softfloat_contract_test compiler-runtime/softfloat_contract.c ${softfloat_sources})
+target_compile_definitions(softfloat_contract_test PRIVATE __SOFTFP__)
+target_compile_options(softfloat_contract_test PRIVATE -U__SIZEOF_INT128__)
 target_compile_options(softfloat_contract_test PRIVATE -fno-builtin -ffp-contract=off)
 target_link_libraries(softfloat_contract_test PRIVATE m)
 add_test(NAME CompilerRuntime.SoftFloatContracts COMMAND softfloat_contract_test)
 set_tests_properties(CompilerRuntime.SoftFloatContracts PROPERTIES LABELS unprivileged)
+
+capsule_test_object(
+    softfloat
+    SOURCES compiler-runtime/float_bpf.c compiler-runtime/float_ops.c
+    INCLUDE_DIRECTORIES ${test_source_dir}/compiler-runtime
+    COMPILE_OPTIONS -ffp-contract=off
+)
+capsule_gtest_host(
+    softfloat_test
+    SOURCES compiler-runtime/float_test.cc compiler-runtime/float_ops.c
+    SKELETONS softfloat_skeleton
+    INCLUDE_DIRECTORIES ${test_source_dir}/compiler-runtime
+    LIBRARIES m
+)
+target_compile_options(softfloat_test PRIVATE -fno-builtin -ffp-contract=off)
 
 # ============================================================================
 # Runtime semantics: fibers, suspension, memory.

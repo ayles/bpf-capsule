@@ -103,6 +103,7 @@ set(BPF_CAPSULE_BUILD_GUEST_SYSROOT "${CMAKE_BINARY_DIR}/picolibc")
 add_subdirectory(src/pass)
 add_subdirectory(tools)
 include(cmake/Picolibc.cmake)
+include(cmake/CompilerRuntime.cmake)
 
 add_library(bpf_capsule_host STATIC src/runtime/host/bpf_capsule_host.c)
 target_include_directories(

@@ -239,8 +239,8 @@ names; symbol names are link-time contracts only.
 
 The library boundary is conventional. Picolibc is a profile-neutral bitcode
 archive, and the linker extracts only members reached by the application.
-Capsule owns the smaller pieces that cannot be generic: compiler-emitted
-soft-float and wide-integer helpers, fiber-local `errno`, the TLSF heap adapter,
+Capsule owns the target-specific pieces: the wide-integer helper ABI,
+fiber-local `errno`, the TLSF heap adapter,
 and weak OS-facing functions that fail unless the application replaces them.
 These sources are compiled like any other guest translation unit before the
 whole-program link. `errno` follows the fiber and the heap is synchronized;
@@ -290,9 +290,16 @@ immediately before libbpf destroys the object.
 
 ## The transformation pipeline
 
+Floating-point operations use the standard compiler-rt libcalls; remainder
+uses Picolibc's `fmod`/`fmodf`. The SDK compiles unmodified compiler-rt sources
+into a profile-neutral bitcode archive. A declaration header marks scalar
+builtins `nosuspend`; trivial sign/subtraction wrappers remain inlineable.
+The pass replaces floating-point SSA types with equally wide integers for
+the BPF backend, preserving the source memory layout.
+
 `bpf-capsule-cc` uses clang to emit per-translation-unit bitcode.
 `bpf-capsule-ld` resolves the complete application, runtime, and referenced
-Picolibc archive members, then performs six logical phases:
+compiler-rt and Picolibc archive members, then performs six logical phases:
 
 1. **Normalize the source ABI.** Aggregate returns, `capsule_call`, exits,
    unsupported i128 operations, and floating point are lowered. Supported

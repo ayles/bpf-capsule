@@ -126,32 +126,30 @@ inline constexpr llvm::StringLiteral URem128{"__bpf_urem128"};
 inline constexpr llvm::StringLiteral SDiv128{"__bpf_sdiv128"};
 inline constexpr llvm::StringLiteral SRem128{"__bpf_srem128"};
 
-// ------------------------------------------------ soft-float (softfloat.c)
+// ------------------------------------------------ compiler-rt / libm
 
 // bpf-soft-float lowers f32/f64 operations to these compiler-runtime routines.
-inline constexpr llvm::StringLiteral FAdd{"__bpf_fadd"};
-inline constexpr llvm::StringLiteral FSub{"__bpf_fsub"};
-inline constexpr llvm::StringLiteral FMul{"__bpf_fmul"};
-inline constexpr llvm::StringLiteral FDiv{"__bpf_fdiv"};
-inline constexpr llvm::StringLiteral FRem{"__bpf_frem"};
-inline constexpr llvm::StringLiteral FCmp{"__bpf_fcmp"};
-inline constexpr llvm::StringLiteral DAdd{"__bpf_dadd"};
-inline constexpr llvm::StringLiteral DSub{"__bpf_dsub"};
-inline constexpr llvm::StringLiteral DMul{"__bpf_dmul"};
-inline constexpr llvm::StringLiteral DDiv{"__bpf_ddiv"};
-inline constexpr llvm::StringLiteral DRem{"__bpf_drem"};
-inline constexpr llvm::StringLiteral DCmp{"__bpf_dcmp"};
-inline constexpr llvm::StringLiteral FNeg{"__bpf_fneg"};
-inline constexpr llvm::StringLiteral DNeg{"__bpf_dneg"};
-inline constexpr llvm::StringLiteral F2D{"__bpf_f2d"};
-inline constexpr llvm::StringLiteral D2F{"__bpf_d2f"};
-inline constexpr llvm::StringLiteral I2F{"__bpf_i2f"};
-inline constexpr llvm::StringLiteral U2F{"__bpf_u2f"};
-inline constexpr llvm::StringLiteral I2D{"__bpf_i2d"};
-inline constexpr llvm::StringLiteral U2D{"__bpf_u2d"};
-inline constexpr llvm::StringLiteral F2I{"__bpf_f2i"};
-inline constexpr llvm::StringLiteral F2U{"__bpf_f2u"};
-inline constexpr llvm::StringLiteral D2I{"__bpf_d2i"};
-inline constexpr llvm::StringLiteral D2U{"__bpf_d2u"};
+inline constexpr llvm::StringLiteral FAdd{"__addsf3"};
+inline constexpr llvm::StringLiteral FSub{"__subsf3"};
+inline constexpr llvm::StringLiteral FMul{"__mulsf3"};
+inline constexpr llvm::StringLiteral FDiv{"__divsf3"};
+inline constexpr llvm::StringLiteral FRem{"fmodf"};
+inline constexpr llvm::StringLiteral DAdd{"__adddf3"};
+inline constexpr llvm::StringLiteral DSub{"__subdf3"};
+inline constexpr llvm::StringLiteral DMul{"__muldf3"};
+inline constexpr llvm::StringLiteral DDiv{"__divdf3"};
+inline constexpr llvm::StringLiteral DRem{"fmod"};
+inline constexpr llvm::StringLiteral FNeg{"__negsf2"};
+inline constexpr llvm::StringLiteral DNeg{"__negdf2"};
+inline constexpr llvm::StringLiteral F2D{"__extendsfdf2"};
+inline constexpr llvm::StringLiteral D2F{"__truncdfsf2"};
+inline constexpr llvm::StringLiteral I2F{"__floatdisf"};
+inline constexpr llvm::StringLiteral U2F{"__floatundisf"};
+inline constexpr llvm::StringLiteral I2D{"__floatdidf"};
+inline constexpr llvm::StringLiteral U2D{"__floatundidf"};
+inline constexpr llvm::StringLiteral F2I{"__fixsfdi"};
+inline constexpr llvm::StringLiteral F2U{"__fixunssfdi"};
+inline constexpr llvm::StringLiteral D2I{"__fixdfdi"};
+inline constexpr llvm::StringLiteral D2U{"__fixunsdfdi"};
 
 } // namespace bpf::sym

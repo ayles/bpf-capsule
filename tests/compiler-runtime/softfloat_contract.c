@@ -14,30 +14,43 @@ typedef unsigned long long u64;
 typedef long long i64;
 typedef unsigned int u32;
 
-u64 __bpf_dadd(u64 a, u64 b);
-u64 __bpf_dsub(u64 a, u64 b);
-u64 __bpf_dmul(u64 a, u64 b);
-u64 __bpf_ddiv(u64 a, u64 b);
-u64 __bpf_drem(u64 a, u64 b);
-int __bpf_dcmp(u64 a, u64 b);
-u64 __bpf_dneg(u64 a);
-u64 __bpf_i2d(i64 v);
-u64 __bpf_u2d(u64 u);
-i64 __bpf_d2i(u64 a);
-u64 __bpf_d2u(u64 a);
-u64 __bpf_f2d(u32 f);
-u32 __bpf_d2f(u64 a);
-u32 __bpf_fadd(u32 a, u32 b);
-u32 __bpf_fsub(u32 a, u32 b);
-u32 __bpf_fmul(u32 a, u32 b);
-u32 __bpf_fdiv(u32 a, u32 b);
-u32 __bpf_frem(u32 a, u32 b);
-int __bpf_fcmp(u32 a, u32 b);
-u32 __bpf_fneg(u32 a);
-u32 __bpf_i2f(i64 v);
-u32 __bpf_u2f(u64 v);
-i64 __bpf_f2i(u32 f);
-u64 __bpf_f2u(u32 f);
+// The standard compiler-libcall ABI, including its target-specific comparison
+// return type. These declarations cover the two supported native host ABIs.
+#if defined(__aarch64__)
+typedef int cmp_result;
+#elif defined(__x86_64__)
+typedef long cmp_result;
+#else
+#error "Declare the native compiler-libcall comparison ABI for this host"
+#endif
+double __adddf3(double, double);
+double __subdf3(double, double);
+double __muldf3(double, double);
+double __divdf3(double, double);
+double __negdf2(double);
+cmp_result __ledf2(double, double);
+cmp_result __gedf2(double, double);
+cmp_result __eqdf2(double, double);
+cmp_result __unorddf2(double, double);
+double __floatdidf(int64_t);
+double __floatundidf(uint64_t);
+int64_t __fixdfdi(double);
+uint64_t __fixunsdfdi(double);
+double __extendsfdf2(float);
+float __truncdfsf2(double);
+float __addsf3(float, float);
+float __subsf3(float, float);
+float __mulsf3(float, float);
+float __divsf3(float, float);
+float __negsf2(float);
+cmp_result __lesf2(float, float);
+cmp_result __gesf2(float, float);
+cmp_result __eqsf2(float, float);
+cmp_result __unordsf2(float, float);
+float __floatdisf(int64_t);
+float __floatundisf(uint64_t);
+int64_t __fixsfdi(float);
+uint64_t __fixunssfdi(float);
 
 static u64 random_state = 0x9e3779b97f4a7c15ull;
 
@@ -250,65 +263,69 @@ static void expect_exact(const char* operation, u64 a, u64 b, u64 got, u64 want)
     }
 }
 
-static int reference_compare(double a, double b) {
+static int reference_compare(double a, double b, int unordered_result) {
     if (isnan(a) || isnan(b)) {
-        return 2;
+        return unordered_result;
     }
     return a < b ? -1 : a == b ? 0 : 1;
 }
 
 static void check_double_pair(u64 a, u64 b) {
     double x = double_of_bits(a), y = double_of_bits(b);
-    expect_double("dadd", a, b, __bpf_dadd(a, b), x + y);
-    expect_double("dsub", a, b, __bpf_dsub(a, b), x - y);
-    expect_double("dmul", a, b, __bpf_dmul(a, b), x * y);
-    expect_double("ddiv", a, b, __bpf_ddiv(a, b), x / y);
-    expect_double("drem", a, b, __bpf_drem(a, b), fmod(x, y));
-    expect_exact("dcmp", a, b, (u64)(i64)__bpf_dcmp(a, b), (u64)(i64)reference_compare(x, y));
+    expect_double("dadd", a, b, bits_of_double(__adddf3(x, y)), x + y);
+    expect_double("dsub", a, b, bits_of_double(__subdf3(x, y)), x - y);
+    expect_double("dmul", a, b, bits_of_double(__muldf3(x, y)), x * y);
+    expect_double("ddiv", a, b, bits_of_double(__divdf3(x, y)), x / y);
+    expect_exact("dle", a, b, (u64)(i64)__ledf2(x, y), (u64)(i64)reference_compare(x, y, 1));
+    expect_exact("dge", a, b, (u64)(i64)__gedf2(x, y), (u64)(i64)reference_compare(x, y, -1));
+    expect_exact("deq", a, b, __eqdf2(x, y) == 0, x == y);
+    expect_exact("dunord", a, b, __unorddf2(x, y) != 0, isnan(x) || isnan(y));
 }
 
 static void check_double_unary(u64 a) {
     double x = double_of_bits(a);
-    expect_double("dneg", a, 0, __bpf_dneg(a), -x);
-    expect_float("d2f", a, 0, __bpf_d2f(a), (float)x);
+    expect_double("dneg", a, 0, bits_of_double(__negdf2(x)), -x);
+    expect_float("d2f", a, 0, bits_of_float(__truncdfsf2(x)), (float)x);
     // C requires the truncated value to fit. Do not prescribe NaN/overflow
     // results; [2^63, 2^64) is valid for unsigned, as are fractions in (-1, 0).
     if (x >= -0x1p63 && x < 0x1p63) {
-        expect_exact("d2i", a, 0, (u64)__bpf_d2i(a), (u64)(i64)x);
+        expect_exact("d2i", a, 0, (u64)__fixdfdi(x), (u64)(i64)x);
     }
     if (x > -1.0 && x < 0x1p64) {
-        expect_exact("d2u", a, 0, __bpf_d2u(a), (u64)x);
+        expect_exact("d2u", a, 0, __fixunsdfdi(x), (u64)x);
     }
 }
 
 static void check_float_pair(u32 a, u32 b) {
     float x = float_of_bits(a), y = float_of_bits(b);
-    expect_float("fadd", a, b, __bpf_fadd(a, b), x + y);
-    expect_float("fsub", a, b, __bpf_fsub(a, b), x - y);
-    expect_float("fmul", a, b, __bpf_fmul(a, b), x * y);
-    expect_float("fdiv", a, b, __bpf_fdiv(a, b), x / y);
-    expect_float("frem", a, b, __bpf_frem(a, b), fmodf(x, y));
-    expect_exact("fcmp", a, b, (u64)(i64)__bpf_fcmp(a, b), (u64)(i64)reference_compare(x, y));
+    expect_float("fadd", a, b, bits_of_float(__addsf3(x, y)), x + y);
+    expect_float("fsub", a, b, bits_of_float(__subsf3(x, y)), x - y);
+    expect_float("fmul", a, b, bits_of_float(__mulsf3(x, y)), x * y);
+    expect_float("fdiv", a, b, bits_of_float(__divsf3(x, y)), x / y);
+    expect_exact("fle", a, b, (u64)(i64)__lesf2(x, y), (u64)(i64)reference_compare(x, y, 1));
+    expect_exact("fge", a, b, (u64)(i64)__gesf2(x, y), (u64)(i64)reference_compare(x, y, -1));
+    expect_exact("feq", a, b, __eqsf2(x, y) == 0, x == y);
+    expect_exact("funord", a, b, __unordsf2(x, y) != 0, isnan(x) || isnan(y));
 }
 
 static void check_float_unary(u32 a) {
     float x = float_of_bits(a);
-    expect_float("fneg", a, 0, __bpf_fneg(a), -x);
-    expect_double("f2d", a, 0, __bpf_f2d(a), (double)x);
+    expect_float("fneg", a, 0, bits_of_float(__negsf2(x)), -x);
+    expect_double("f2d", a, 0, bits_of_double(__extendsfdf2(x)), (double)x);
     if (x >= -0x1p63f && x < 0x1p63f) {
-        expect_exact("f2i", a, 0, (u64)__bpf_f2i(a), (u64)(i64)x);
+        expect_exact("f2i", a, 0, (u64)__fixsfdi(x), (u64)(i64)x);
     }
     if (x > -1.0f && x < 0x1p64f) {
-        expect_exact("f2u", a, 0, __bpf_f2u(a), (u64)x);
+        expect_exact("f2u", a, 0, __fixunssfdi(x), (u64)x);
     }
 }
 
 static void check_integer(u64 u) {
     i64 v = (i64)u;
-    expect_double("i2d", u, 0, __bpf_i2d(v), (double)v);
-    expect_double("u2d", u, 0, __bpf_u2d(u), (double)u);
-    expect_float("i2f", u, 0, __bpf_i2f(v), (float)v);
-    expect_float("u2f", u, 0, __bpf_u2f(u), (float)u);
+    expect_double("i2d", u, 0, bits_of_double(__floatdidf(v)), (double)v);
+    expect_double("u2d", u, 0, bits_of_double(__floatundidf(u)), (double)u);
+    expect_float("i2f", u, 0, bits_of_float(__floatdisf(v)), (float)v);
+    expect_float("u2f", u, 0, bits_of_float(__floatundisf(u)), (float)u);
 }
 
 int main(int argc, char** argv) {

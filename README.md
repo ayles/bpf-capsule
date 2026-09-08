@@ -124,10 +124,10 @@ cmake -S examples/fib -B build/fib -DCMAKE_PREFIX_PATH="$PWD/build/prefix"
 cmake --build build/fib
 ```
 
-Without CMake, compile application, guest runtime, compiler-runtime, and
-platform sources with `bpf-capsule-cc`, then pass their `.bc` files and the
-installed Picolibc `libc.a` to `bpf-capsule-ld`. The compiler locates its guest
-headers and sysroot automatically; the TLSF wrapper also needs the installed
+Without CMake, compile application, guest runtime, `int128.c`, and platform
+sources with `bpf-capsule-cc`, then pass their `.bc` files and the installed
+`libclang_rt.builtins.a` and Picolibc `libc.a` to `bpf-capsule-ld`. The compiler
+locates its guest headers and sysroot automatically; the TLSF wrapper also needs the installed
 TLSF include directory. Runtime feature defines must match the linker's memory
 and allocator capabilities, which it checks at link time. The CMake helper
 supplies these sources, includes, and defines automatically.

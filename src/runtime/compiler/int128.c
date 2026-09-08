@@ -17,7 +17,7 @@
 // below the C level.
 
 // 64x64 -> 128 as {lo, hi}, in 64-bit arithmetic only. Every wide product in
-// this file and in softfloat.c goes through here; the overflow-multiply
+// this file goes through here; the overflow-multiply
 // intrinsics (TLSF's allocator math is the usual source) do too.
 extern inline __attribute__((always_inline)) struct bpf_u128_pair __bpf_mul64_wide(unsigned long long a, unsigned long long b) {
     unsigned long long a0 = a & 0xffffffffull, a1 = a >> 32;
