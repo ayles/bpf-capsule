@@ -3,6 +3,7 @@
   target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
   target triple = "bpfel"
   
+  ; Function Attrs: nounwind
   define i32 @root(i32 %value) #0 !bpf.capsule.flatten.root !0 !bpf.capsule.flattened.units !1 {
   entry:
     %is.zero = icmp eq i32 %value, 0
@@ -17,19 +18,21 @@
     ret i32 %from.unit1
   }
   
+  ; Function Attrs: nounwind
   define available_externally i32 @unit0(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
   entry:
     %result = add i32 %value, 10
     ret i32 %result
   }
   
+  ; Function Attrs: nounwind
   define available_externally i32 @unit1(i32 %value) #0 !bpf.capsule.flatten.unit !0 {
   entry:
     %result = add i32 %value, 20
     ret i32 %result
   }
   
-  attributes #0 = { "target-cpu"="v4" }
+  attributes #0 = { nounwind "target-cpu"="v4" }
   
   !0 = !{i32 0}
   !1 = !{i32 2}

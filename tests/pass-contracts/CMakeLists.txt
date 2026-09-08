@@ -116,6 +116,14 @@ endfunction()
 
 # The inventory below covers every registered pass, starting with the late
 # correctness rules that exposed real kernel/JIT bugs.
+add_test(
+    NAME PassContract.NoUnwind
+    COMMAND
+        "${CMAKE_COMMAND}" "-DBPF_CAPSULE_LD=$<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}>"
+        "-DLLVM_READELF=${BPF_CAPSULE_LLVM_READELF}" "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/no-unwind" -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/RunNoUnwind.cmake"
+)
+set_tests_properties(PassContract.NoUnwind PROPERTIES LABELS "pass-contract;unprivileged")
 capsule_ir_pass_contract(split-shift63 "function(bpf-split-shift63)" split-shift63/basic)
 capsule_ir_pass_contract(no-jump-tables "function(bpf-no-jump-tables)" no-jump-tables/basic)
 capsule_ir_pass_contract(inline-policy "function(bpf-inline-policy)" inline-policy/basic)

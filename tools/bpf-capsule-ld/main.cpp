@@ -6,8 +6,8 @@
 // Takes LLVM bitcode/IR produced by bpf-capsule-cc, rustc, or a compatible
 // frontend, links it into one module together with the Capsule
 // runtime, runs the whole-program capsule pipeline, and emits a
-// libbpf-loadable BPF ELF. Internally this subsumes llvm-link, opt, llc and
-// llvm-objcopy from the reference pipeline; the passes are linked statically,
+// libbpf-loadable BPF ELF. Internally this subsumes llvm-link, opt and llc
+// from the reference pipeline; the passes are linked statically,
 // so there is no plugin, no tool-version matching, and no PIC relocation trap.
 //
 // The runtime rule: the Capsule runtime is ordinary LLVM bitcode. The CMake
@@ -45,10 +45,6 @@
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Object/Archive.h>
-#include <llvm/Object/Binary.h>
-#include <llvm/ObjCopy/CommonConfig.h>
-#include <llvm/ObjCopy/ConfigManager.h>
-#include <llvm/ObjCopy/ObjCopy.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Pass.h>
 #include <llvm/PassRegistry.h>
@@ -724,6 +720,15 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // Capsule currently lowers exits/panics without native unwinding.
+    // Generated functions need nounwind too:
+    // clearing uwtable alone still asks LLVM for .eh_frame on those functions.
+    // Set this at codegen, after all IR transformations have finished.
+    for (Function& function : *module) {
+        function.setUWTableKind(UWTableKind::None);
+        function.setDoesNotThrow();
+    }
+
     if (EmitAssembly) {
         std::error_code errorCode;
         raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_Text);
@@ -756,44 +761,18 @@ int main(int argc, char** argv) {
     }
 
     // ---------------------------------------------------------------- codegen
-    SmallString<0> objectBuffer;
-    {
-        raw_svector_ostream objectStream(objectBuffer);
-        legacy::PassManager codegen;
-        // Post-RA spill relocation, machine flattening and final-layout repair
-        // insert themselves through RegisterTargetPassConfigCallback, gated
-        // on the unified spill pipeline enabled above.
-        if (machine->addPassesToEmitFile(codegen, objectStream, nullptr, CodeGenFileType::ObjectFile)) {
-            fail("the BPF target cannot emit object files");
-        }
-        codegen.run(*module);
+    std::error_code errorCode;
+    raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_None);
+    if (errorCode) {
+        fail(errorCode.message() + ": " + OutputFilename);
     }
-
-    // LLVM emits an unusable .eh_frame even though every generated function
-    // is nounwind; libbpf ignores it but warns on every open. Strip it.
-    {
-        auto binary = object::createBinary(MemoryBufferRef(StringRef(objectBuffer.data(), objectBuffer.size()), "capsule"));
-        if (!binary) {
-            fail("cannot reopen the emitted object: " + toString(binary.takeError()));
-        }
-        objcopy::ConfigManager config;
-        config.Common.OutputFilename = OutputFilename;
-        Expected<objcopy::NameOrPattern> pattern =
-            objcopy::NameOrPattern::create(".eh_frame", objcopy::MatchStyle::Literal, [](Error e) -> Error { return e; });
-        if (!pattern) {
-            fail("objcopy pattern: " + toString(pattern.takeError()));
-        }
-        if (Error addError = config.Common.ToRemove.addMatcher(std::move(*pattern))) {
-            fail("objcopy matcher: " + toString(std::move(addError)));
-        }
-        std::error_code errorCode;
-        raw_fd_ostream out(OutputFilename, errorCode, sys::fs::OF_None);
-        if (errorCode) {
-            fail(errorCode.message() + ": " + OutputFilename);
-        }
-        if (Error copyError = objcopy::executeObjcopyOnBinary(config, **binary, out)) {
-            fail("cannot strip .eh_frame: " + toString(std::move(copyError)));
-        }
+    legacy::PassManager codegen;
+    // Post-RA spill relocation, machine flattening and final-layout repair
+    // insert themselves through RegisterTargetPassConfigCallback, gated
+    // on the unified spill pipeline enabled above.
+    if (machine->addPassesToEmitFile(codegen, out, nullptr, CodeGenFileType::ObjectFile)) {
+        fail("the BPF target cannot emit object files");
     }
+    codegen.run(*module);
     return 0;
 }
