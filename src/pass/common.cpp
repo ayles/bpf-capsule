@@ -199,6 +199,15 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
         auto* integer = dyn_cast<ConstantInt>(value);
         return integer && integer->isZero();
     };
+    auto isNullablePhi = [&](const SmallPtrSetImpl<Value*>& values, PHINode& phi) {
+        return llvm::any_of(phi.incoming_values(), [&](Value* incoming) { return isOrDerivesFrom(values, incoming); }) &&
+            llvm::all_of(phi.incoming_values(), [&](Value* incoming) { return isOrDerivesFrom(values, incoming) || isZero(incoming); });
+    };
+    auto isNullableSelect = [&](const SmallPtrSetImpl<Value*>& values, SelectInst& select) {
+        bool trueDerived = isOrDerivesFrom(values, select.getTrueValue());
+        bool falseDerived = isOrDerivesFrom(values, select.getFalseValue());
+        return (trueDerived || falseDerived) && (trueDerived || isZero(select.getTrueValue())) && (falseDerived || isZero(select.getFalseValue()));
+    };
     // First close the set of addresses that still identify the borrowed
     // context object. A load through one of these addresses is only a
     // *candidate*: xdp_md contains both data/data_end pointer handles and
@@ -209,12 +218,9 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
         for (Instruction& inst : instructions(func)) {
             bool derived = false;
             if (auto* phi = dyn_cast<PHINode>(&inst)) {
-                derived = phi->getNumIncomingValues() != 0 && llvm::all_of(phi->incoming_values(), [&](Value* incoming) {
-                    return isOrDerivesFrom(pointerProducingMemory, incoming) || isZero(incoming);
-                });
+                derived = isNullablePhi(pointerProducingMemory, *phi);
             } else if (auto* select = dyn_cast<SelectInst>(&inst)) {
-                derived = (isOrDerivesFrom(pointerProducingMemory, select->getTrueValue()) || isZero(select->getTrueValue())) &&
-                    (isOrDerivesFrom(pointerProducingMemory, select->getFalseValue()) || isZero(select->getFalseValue()));
+                derived = isNullableSelect(pointerProducingMemory, *select);
             } else if (isa<GetElementPtrInst>(&inst) || isa<CastInst>(&inst) || isa<FreezeInst>(&inst)) {
                 derived = llvm::any_of(inst.operands(), [&](Value* operand) { return isOrDerivesFrom(pointerProducingMemory, operand); });
             } else if (auto* binary = dyn_cast<BinaryOperator>(&inst)) {
@@ -241,11 +247,9 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
             if (auto* load = dyn_cast<LoadInst>(&inst)) {
                 candidate = isOrDerivesFrom(pointerProducingMemory, load->getPointerOperand());
             } else if (auto* phi = dyn_cast<PHINode>(&inst)) {
-                candidate = phi->getNumIncomingValues() != 0 &&
-                    llvm::all_of(phi->incoming_values(), [&](Value* incoming) { return isOrDerivesFrom(contextCandidates, incoming) || isZero(incoming); });
+                candidate = isNullablePhi(contextCandidates, *phi);
             } else if (auto* select = dyn_cast<SelectInst>(&inst)) {
-                candidate = (isOrDerivesFrom(contextCandidates, select->getTrueValue()) || isZero(select->getTrueValue())) &&
-                    (isOrDerivesFrom(contextCandidates, select->getFalseValue()) || isZero(select->getFalseValue()));
+                candidate = isNullableSelect(contextCandidates, *select);
             } else if (isa<CastInst>(&inst) || isa<FreezeInst>(&inst)) {
                 candidate = llvm::any_of(inst.operands(), [&](Value* operand) { return isOrDerivesFrom(contextCandidates, operand); });
             } else if (auto* binary = dyn_cast<BinaryOperator>(&inst)) {
@@ -288,11 +292,9 @@ void bpf::FindVerifierNativeValues(Function& func, SmallPtrSetImpl<Value*>& nati
             if (auto* load = dyn_cast<LoadInst>(&inst)) {
                 derived = load->getType()->isPointerTy() && isOrDerivesFrom(pointerProducingMemory, load->getPointerOperand());
             } else if (auto* phi = dyn_cast<PHINode>(&inst)) {
-                derived = phi->getNumIncomingValues() != 0 &&
-                    llvm::all_of(phi->incoming_values(), [&](Value* incoming) { return isOrDerivesFrom(native, incoming) || isZero(incoming); });
+                derived = isNullablePhi(native, *phi);
             } else if (auto* select = dyn_cast<SelectInst>(&inst)) {
-                derived = (isOrDerivesFrom(native, select->getTrueValue()) || isZero(select->getTrueValue())) &&
-                    (isOrDerivesFrom(native, select->getFalseValue()) || isZero(select->getFalseValue()));
+                derived = isNullableSelect(native, *select);
             } else if (isa<GetElementPtrInst>(&inst) || isa<CastInst>(&inst) || isa<FreezeInst>(&inst)) {
                 derived = llvm::any_of(inst.operands(), [&](Value* operand) { return isOrDerivesFrom(native, operand); });
             } else if (auto* binary = dyn_cast<BinaryOperator>(&inst)) {

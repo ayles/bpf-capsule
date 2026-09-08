@@ -218,6 +218,7 @@ capsule_ir_pass_contract(stackify-aligned-frame "bpf-stackify" stackify/aligned-
 capsule_ir_pass_contract(stackify-root-result-scope "bpf-stackify" stackify/root-result-scope)
 capsule_ir_pass_contract(stackify-dynamic-alloca "bpf-stackify" stackify/dynamic-alloca)
 capsule_ir_pass_contract(stackify-helper-alloca-select "bpf-stackify" stackify/helper-alloca-select)
+capsule_ir_pass_contract(stackify-nullable-pointer-merges "bpf-stackify" stackify/nullable-pointer-merges)
 capsule_ir_pass_contract(stackify-borrowed-context "bpf-stackify" stackify/borrowed-context)
 capsule_ir_pass_contract(stackify-native-loop "bpf-stackify" stackify/native-loop)
 capsule_ir_pass_contract(stackify-chunked-loop "bpf-stackify" stackify/chunked-loop)
