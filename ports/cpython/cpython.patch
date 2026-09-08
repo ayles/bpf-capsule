@@ -1,0 +1,193 @@
+diff --git a/Include/cpython/pthread_stubs.h b/Include/cpython/pthread_stubs.h
+index e542eaa..00f0edc 100644
+--- a/Include/cpython/pthread_stubs.h
++++ b/Include/cpython/pthread_stubs.h
+@@ -5,6 +5,13 @@
+ #  error "this header file requires stubbed pthreads."
+ #endif
+
++#include <time.h>
++
++/* pthread_t is unsigned in the fallback declarations below. */
++#ifndef SIZEOF_PTHREAD_T
++#  define SIZEOF_PTHREAD_T SIZEOF_INT
++#endif
++
+ #ifndef _POSIX_THREADS
+ #  define _POSIX_THREADS 1
+ #endif
+@@ -46,9 +53,9 @@
+ #  endif
+ #  include <bits/alltypes.h>
+ #else
+-typedef struct { void *__x; } pthread_cond_t;
++typedef struct { unsigned sequence; clockid_t clock; } pthread_cond_t;
+ typedef struct { unsigned __attr; } pthread_condattr_t;
+-typedef struct { void *__x; } pthread_mutex_t;
++typedef struct { unsigned locked; } pthread_mutex_t;
+ typedef struct { unsigned __attr; } pthread_mutexattr_t;
+ typedef unsigned pthread_key_t;
+ typedef unsigned pthread_t;
+diff --git a/Include/pyport.h b/Include/pyport.h
+index 2c8567f..114bad9 100644
+--- a/Include/pyport.h
++++ b/Include/pyport.h
+@@ -154,7 +154,11 @@ typedef intptr_t        Py_intptr_t;
+
+ #elif HAVE_SSIZE_T
+ typedef ssize_t         Py_ssize_t;
+-#   define PY_SSIZE_T_MAX SSIZE_MAX
++#   ifdef __BPF__
++#     define PY_SSIZE_T_MAX INTPTR_MAX
++#   else
++#     define PY_SSIZE_T_MAX SSIZE_MAX
++#   endif
+ #elif SIZEOF_VOID_P == SIZEOF_SIZE_T
+ typedef Py_intptr_t     Py_ssize_t;
+ #   define PY_SSIZE_T_MAX INTPTR_MAX
+diff --git a/Modules/timemodule.c b/Modules/timemodule.c
+index 5e43adb..0b1d27e 100644
+--- a/Modules/timemodule.c
++++ b/Modules/timemodule.c
+@@ -189,10 +189,16 @@ time_clockid_converter(PyObject *obj, clockid_t *p)
+     long long clk_id = PyLong_AsLongLong(obj);
+ #elif defined(__DragonFly__)
+     long clk_id = PyLong_AsLong(obj);
++#elif defined(__BPF__)
++    unsigned long clk_id = PyLong_AsUnsignedLong(obj);
+ #else
+     int clk_id = PyLong_AsInt(obj);
+ #endif
++#ifdef __BPF__
++    if (clk_id == (clockid_t)-1 && PyErr_Occurred()) {
++#else
+     if (clk_id == -1 && PyErr_Occurred()) {
++#endif
+         PyErr_Format(PyExc_TypeError,
+                      "clk_id should be integer, not %s",
+                      _PyType_Name(Py_TYPE(obj)));
+diff --git a/Modules/grpmodule.c b/Modules/grpmodule.c
+index f6ea6f0..965d955 100644
+--- a/Modules/grpmodule.c
++++ b/Modules/grpmodule.c
+@@ -95,12 +95,16 @@ mkgrent(PyObject *module, struct group *p)
+
+ #define SET(i,val) PyStructSequence_SetItem(v, i, val)
+     SET(setIndex++, PyUnicode_DecodeFSDefault(p->gr_name));
++#ifdef __BPF__
++    SET(setIndex++, Py_NewRef(Py_None));
++#else
+     if (p->gr_passwd)
+             SET(setIndex++, PyUnicode_DecodeFSDefault(p->gr_passwd));
+     else {
+             SET(setIndex++, Py_None);
+             Py_INCREF(Py_None);
+     }
++#endif
+     SET(setIndex++, _PyLong_FromGid(p->gr_gid));
+     SET(setIndex++, w);
+ #undef SET
+diff --git a/Python/thread.c b/Python/thread.c
+index 4ff5f11..49514e3 100644
+--- a/Python/thread.c
++++ b/Python/thread.c
+@@ -54,8 +54,14 @@ PyThread_init_thread(void)
+ }
+
+ #if defined(HAVE_PTHREAD_STUBS)
+-#   define PYTHREAD_NAME "pthread-stubs"
+-#   include "thread_pthread_stubs.h"
++#   ifdef __BPF__
++      /* Capsule fibers: the embedding supplies the pthread functions. */
++#     define PYTHREAD_NAME "capsule-fibers"
++#     include "thread_pthread.h"
++#   else
++#     define PYTHREAD_NAME "pthread-stubs"
++#     include "thread_pthread_stubs.h"
++#   endif
+ #elif defined(_USE_PTHREADS)  /* AKA _PTHREADS */
+ #   if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+ #     define PYTHREAD_NAME "pthread-stubs"
+diff --git a/Tools/build/freeze_modules.py b/Tools/build/freeze_modules.py
+index 3c43f7e..8e6ba95 100644
+--- a/Tools/build/freeze_modules.py
++++ b/Tools/build/freeze_modules.py
+@@ -50,10 +50,9 @@ FROZEN = [
+     ('stdlib - startup, without site (python -S)', [
+         'abc',
+         'codecs',
+-        # For now we do not freeze the encodings, due # to the noise all
+-        # those extra modules add to the text printed during the build.
+-        # (See https://github.com/python/cpython/pull/28398#pullrequestreview-756856469.)
+-        #'<encodings.*>',
++        '<encodings>',
++        'encodings.aliases',
++        'encodings.utf_8',
+         'io',
+         ]),
+     ('stdlib - startup, with site', [
+diff --git a/configure b/configure
+index 2cb22a7..2de123d 100755
+--- a/configure
++++ b/configure
+@@ -4130,6 +4130,9 @@ then
+ 	*-*-wasi*)
+ 	    ac_sys_system=WASI
+ 	    ;;
++	bpf-*-none*)
++	    ac_sys_system=BpfCapsule
++	    ;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
+@@ -4634,6 +4637,9 @@ printf "%s\n" "$IPHONEOS_DEPLOYMENT_TARGET" >&6; }
+ 	wasm32-*-* | wasm64-*-*)
+ 		_host_ident=$host_cpu
+ 		;;
++	bpf-*-none*)
++		_host_ident=$host_cpu
++		;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
+@@ -18196,6 +18202,8 @@ else case e in #(
+     case $ac_sys_system in #(
+   WASI) :
+     posix_threads=stub ;; #(
++  BpfCapsule) :
++    posix_threads=stub ;; #(
+   *) :
+     as_fn_error $? "could not find pthreads on your system" "$LINENO" 5
+      ;;
+diff --git a/configure.ac b/configure.ac
+index 967d34d..81748aa 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -342,6 +342,9 @@ then
+ 	*-*-wasi*)
+ 	    ac_sys_system=WASI
+ 	    ;;
++	bpf-*-none*)
++	    ac_sys_system=BpfCapsule
++	    ;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
+@@ -812,6 +815,9 @@ if test "$cross_compiling" = yes; then
+ 	wasm32-*-* | wasm64-*-*)
+ 		_host_ident=$host_cpu
+ 		;;
++	bpf-*-none*)
++		_host_ident=$host_cpu
++		;;
+ 	*)
+ 		# for now, limit cross builds to known configurations
+ 		MACHDEP="unknown"
+@@ -4790,6 +4796,7 @@ pthread_create (NULL, NULL, start_routine, NULL)]])],[
+     ],[
+     AS_CASE([$ac_sys_system],
+       [WASI], [posix_threads=stub],
++      [BpfCapsule], [posix_threads=stub],
+       [AC_MSG_ERROR([could not find pthreads on your system])]
+     )
+     ])])])])])])

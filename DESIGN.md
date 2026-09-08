@@ -240,9 +240,9 @@ names; symbol names are link-time contracts only.
 
 The library boundary is conventional. Picolibc is a profile-neutral bitcode
 archive, and the linker extracts only members reached by the application.
-Capsule owns the target-specific pieces: the wide-integer helper ABI,
-fiber-local `errno`, the TLSF heap adapter,
-and weak OS-facing functions that fail unless the application replaces them.
+Capsule owns the target-specific pieces: fiber-local `errno`, the TLSF heap
+adapter, and weak OS-facing functions that fail unless the application
+replaces them.
 These sources are compiled like any other guest translation unit before the
 whole-program link. `errno` follows the fiber and the heap is synchronized;
 other libc APIs with implicit process-global state retain Picolibc's

@@ -38,6 +38,9 @@ import ./run.nix {
     pkgs.coreutils
     pkgs.iproute2 # veth pair and namespace for the Lua-XDP run
     pkgs.gnugrep
+    pkgs.bpftools
+    pkgs.jq
+    pkgs.util-linux
   ];
   script = ''
     ulimit -l unlimited
@@ -128,5 +131,40 @@ import ./run.nix {
     cat /tmp/xdp-events /tmp/xdp-summary
     [[ "$(grep -c 'UDP 4242' /tmp/xdp-events)" -eq 5 ]]
     [[ "$(cat /tmp/xdp-summary)" == *'kernel execution: avg'* ]]
+
+    ${pkgs.lib.optionalString (examples ? python) ''
+      # Full CPython and representative built-in/pure-Python modules execute
+      # in the kernel; the source image is consumed by its normal importer.
+      run_example python 'CPython 3b09041c50e319a2 8.75' - \
+        env BPF_CAPSULE_MAX_DRAINS=64 ${examples.python}/bin/python ${../../tests/vm/python.py}
+
+      # Python-XDP mirrors the Lua check with one isolated interpreter per
+      # fiber. Five live packets plus eight test runs on each of two CPUs.
+      # Heavy imports run at initialization; simultaneous test packets also
+      # exercise a small cold import and shared CPython runtime locks.
+      timeout 240 env BPF_CAPSULE_MAX_DRAINS=256 ${examples."python-xdp"}/bin/python-xdp \
+        ${../../tests/vm/python_xdp_count.py} xdp0 21 \
+        >/tmp/python-xdp-events 2>/tmp/python-xdp-summary &
+      observer=$!
+      trap 'cat /tmp/python-xdp-events /tmp/python-xdp-summary; kill "$observer" 2>/dev/null || true' EXIT
+      until grep -q 'observing live traffic' /tmp/python-xdp-summary; do
+        kill -0 "$observer" 2>/dev/null || { cat /tmp/python-xdp-summary; exit 1; }
+        sleep 0.2
+      done
+      for _ in 1 2 3 4 5; do
+        ip netns exec peer bash -c 'echo ping >/dev/udp/10.99.0.1/4243'
+      done
+      program_id=$(bpftool -j net show dev xdp0 | jq -er '.[].xdp[].id')
+      printf '\x02\x00\x00\x00\x00\x01\x02\x00\x00\x00\x00\x02\x08\x00\x45\x00\x00\x20\x00\x00\x00\x00\x40\x11\x00\x00\x0a\x63\x00\x02\x0a\x63\x00\x01\x10\x92\x10\x93\x00\x0c\x00\x00test' >/tmp/python-packet
+      taskset -c 0 bpftool prog run id "$program_id" data_in /tmp/python-packet repeat 8 &
+      sender=$!
+      taskset -c 1 bpftool prog run id "$program_id" data_in /tmp/python-packet repeat 8
+      wait "$sender"
+      wait "$observer"
+      trap - EXIT
+      cat /tmp/python-xdp-events /tmp/python-xdp-summary
+      [[ "$(grep -c '> 4243' /tmp/python-xdp-events)" -eq 21 ]]
+      [[ "$(cat /tmp/python-xdp-summary)" == *'kernel execution: avg'* ]]
+    ''}
   '';
 }

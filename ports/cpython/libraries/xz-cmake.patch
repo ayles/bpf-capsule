@@ -1,0 +1,6 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1285,1 +1285,1 @@
+-    message(SEND_ERROR
++    message(WARNING

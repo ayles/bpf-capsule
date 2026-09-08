@@ -2,13 +2,14 @@
 
 [![CI](https://github.com/ayles/bpf-capsule/actions/workflows/ci.yml/badge.svg)](https://github.com/ayles/bpf-capsule/actions/workflows/ci.yml)
 
-BPF Capsule compiles freestanding C, C++, and `no_std` Rust into ordinary
-libbpf-loadable eBPF objects. It lets programs with recursion, indirect calls,
+BPF Capsule compiles C, C++, and `no_std` Rust into ordinary libbpf-loadable
+eBPF objects. It lets programs with recursion, indirect calls,
 deep stacks, data-dependent loops, dynamic allocation, and large linked
 libraries run in the kernel without a custom kernel or a userspace VM.
 
-It already runs PureDOOM, Lua, QuickJS, SQLite, zlib, wasm3, llama2.c, and
-Rust `core`/`alloc` inside BPF.
+It already runs PureDOOM, CPython, Lua, QuickJS, SQLite, zlib, wasm3,
+llama2.c, and Rust `core`/`alloc` inside BPF. The CPython and Lua integrations
+also run user-supplied packet observers directly from XDP.
 
 ## How can large programs run in the kernel?
 
@@ -169,7 +170,9 @@ patches, target, and license installation.
 The host lifecycle brackets libbpf's own load: call
 `bpf_capsule_configure()` before loading the object,
 `bpf_capsule_initialize()` afterward, and `bpf_capsule_release()` before
-destroying it. Drive each entry through the Capsule result protocol.
+destroying it. An object linked with `--freplace` also needs
+`bpf_capsule_attach_freplace()` between load and initialization. Drive each
+entry through the Capsule result protocol.
 
 The API is defined by the
 [host header](src/runtime/host/bpf_capsule_host.h),
@@ -197,6 +200,19 @@ The Capsule environment has a C library but no operating system:
   from it may not be stored in Capsule state across a region boundary;
 - all program and fiber capacities remain finite compile-time or load-time
   bounds.
+
+The CPython examples pack the pure-Python standard library and statically link
+the available C modules, including compression (`zlib`, `bz2`, `lzma`, `zstd`),
+in-memory `sqlite3`, XML, decimal arithmetic and hashing. Filesystem access,
+sockets, native dynamic extensions and OS-dependent modules remain unavailable.
+`python-xdp` uses one isolated subinterpreter per fiber: a fiber is CPython's
+thread, with real locks and `_Thread_local` state, but it cannot create
+threads (`pthread_create` returns `EAGAIN`). A packet observer must finish
+within one BPF invocation; if it suspends while waiting for a shared CPython
+lock or exhausts the drive budget, the example reports the fault and stops
+observing.
+The batch example reserves 128 MiB of interpreter heap; XDP reserves 32 MiB per
+fiber, plus input storage. Both choose a fresh hash seed on the host.
 
 The loader requests strict alignment for all BPF programs in the object,
 including native entry code and extensions. Non-arena memory accesses must

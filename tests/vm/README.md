@@ -18,5 +18,7 @@ Host-allocation tests cover concurrent requests, cross-side frees and fiber
 exhaustion.
 
 Examples run on both Linux 5.15 and the default arena profile, checking results
-and continuation counts. GitHub CI runs on x86-64; `nix flake check` on arm64
-runs the corresponding native ARM matrix.
+and continuation counts. The default arena VM also runs both CPython forms,
+including live XDP traffic and simultaneous packet test runs on two CPUs.
+GitHub CI runs on x86-64; `nix flake check` on arm64 runs the corresponding
+native ARM matrix.

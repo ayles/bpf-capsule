@@ -1,0 +1,24 @@
+# Values that Autoconf cannot discover by executing a cross-built Capsule.
+ac_cv_buggy_getaddrinfo=no
+ac_cv_file__dev_ptmx=no
+ac_cv_file__dev_ptc=no
+ac_cv_cc_name=clang
+ax_cv_c_float_words_bigendian=no
+ac_cv_gcc_asm_for_x64=no
+ac_cv_gcc_asm_for_x87=no
+ac_cv_gcc_asm_for_mc68881=no
+
+# Capsule currently exposes neither virtual-memory mappings nor networking.
+ac_cv_func_mmap=no
+ac_cv_header_sys_resource_h=no
+ac_cv_header_sys_socket_h=no
+ac_cv_header_netinet_in_h=no
+ac_cv_header_netdb_h=no
+ac_cv_header_sys_un_h=no
+ac_cv_header_netpacket_packet_h=no
+
+# The corresponding CPython extension modules cannot be implemented without
+# the missing OS API.
+py_cv_module_mmap=n/a
+py_cv_module_select=n/a
+py_cv_module_termios=n/a

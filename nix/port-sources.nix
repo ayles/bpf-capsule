@@ -30,4 +30,20 @@
     url = "https://github.com/Daivuk/PureDOOM/archive/355cfbd16fac119718879239336ee2ea408886bd.tar.gz";
     hash = "sha256-wW3psXtWuyxByUlelkTFp3BwWjp5W+uUaHeUEqr+sWw=";
   };
+  cpython = fetchzip {
+    url = "https://github.com/python/cpython/archive/refs/tags/v3.14.7.tar.gz";
+    hash = "sha256-NaLBOxFZv3zljyREKrDUw7UBx3iUabNybAZHhc+CgJc=";
+  };
+  bzip2 = fetchzip {
+    url = "https://sourceware.org/pub/bzip2/bzip2-1.0.8.tar.gz";
+    hash = "sha256-Uvi4JZPPERK3gym4yoaeTEJwKXF5brBAEN7GgF+iF6g=";
+  };
+  xz = fetchzip {
+    url = "https://github.com/tukaani-project/xz/releases/download/v5.8.3/xz-5.8.3.tar.xz";
+    hash = "sha256-DhBCivleFs6+2f57v5IkqRmMPGHaG+VZOg3ZiRIxIXM=";
+  };
+  zstd = fetchzip {
+    url = "https://github.com/facebook/zstd/archive/v1.5.7.tar.gz";
+    hash = "sha256-tNFWIT9ydfozB8dWcmTMuZLCQmQudTFJIkSr0aG7S44=";
+  };
 }

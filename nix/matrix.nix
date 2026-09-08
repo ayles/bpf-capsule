@@ -22,8 +22,9 @@ let
   defaultKernel = defaultProfile.kernel;
   examplesFor =
     targetKernel:
-    lib.genAttrs
-      [
+    let
+      profile = profileFor targetKernel;
+      names = [
         "fib"
         "zlib"
         "sqlite"
@@ -35,17 +36,24 @@ let
         "rust"
         "doom"
       ]
-      (
-        example:
-        callPackage ./example.nix {
-          inherit
-            llvmPackages
-            bpfCapsule
-            example
-            targetKernel
-            ;
-        }
-      );
+      # CPython's large sparse heap is practical only with arena memory. The
+      # fixed tier still exercises freplace through the Lua contract tests.
+      ++ lib.optionals (profile.arena && profile.freplace && profile.managedAtomics) [
+        "python"
+        "python-xdp"
+      ];
+    in
+    lib.genAttrs names (
+      example:
+      callPackage ./example.nix {
+        inherit
+          llvmPackages
+          bpfCapsule
+          example
+          targetKernel
+          ;
+      }
+    );
   suiteFor = targetKernel: callPackage ./tests.nix { inherit llvmPackages bpfCapsule targetKernel; };
   suites = {
     "5.15" = suiteFor "5.15";

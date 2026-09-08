@@ -13,6 +13,10 @@
   elfutils,
   zlib,
   zstd,
+  gnumake,
+  patch,
+  python314,
+  which,
   cargo,
   rustc,
   llvmPackages,
@@ -25,8 +29,25 @@ let
     kernel = targetKernel;
     arch = stdenv.hostPlatform.parsed.cpu.name;
   };
+  isPython = lib.elem example [
+    "python"
+    "python-xdp"
+  ];
+  # CPython needs independent verifier budgets; hardware capabilities still
+  # come only from targetProfile, just as for the other examples.
+  linkOptions = targetProfile.linkOptions ++ lib.optional isPython "--freplace";
   exampleSource = ../examples + "/${example}";
   sources = import ./port-sources.nix { inherit fetchzip; };
+  # CPython's port fetches its compression libraries itself; they have no port
+  # directory of their own.
+  pythonSources = [
+    "cpython"
+    "zlib"
+    "bzip2"
+    "xz"
+    "zstd"
+    "sqlite"
+  ];
   # Select the same port definitions for CMake and the sandbox fileset.
   upstream = {
     fib = [ ];
@@ -42,6 +63,8 @@ let
     quickjs = [ "quickjs" ];
     rust = [ ];
     doom = [ "puredoom" ];
+    python = pythonSources;
+    python-xdp = pythonSources;
   };
 in
 assert lib.assertMsg (upstream ? ${example}) "unknown BPF Capsule example: ${example}";
@@ -52,7 +75,10 @@ stdenv.mkDerivation {
   src = lib.fileset.toSource {
     root = ../.;
     fileset = lib.fileset.unions (
-      [ exampleSource ] ++ map (name: ../ports + "/${name}") upstream.${example}
+      [ exampleSource ]
+      ++ map (name: ../ports + "/${name}") (
+        lib.filter (name: builtins.pathExists (../ports + "/${name}")) upstream.${example}
+      )
     );
   };
 
@@ -73,6 +99,12 @@ stdenv.mkDerivation {
   ++ lib.optionals (example == "rust") [
     cargo
     rustc
+  ]
+  ++ lib.optionals isPython [
+    gnumake
+    patch
+    python314
+    which
   ];
   buildInputs = [
     bpfCapsule
@@ -85,7 +117,7 @@ stdenv.mkDerivation {
   cmakeBuildType = "Release";
   cmakeFlags = [
     "-DCMAKE_PREFIX_PATH=${bpfCapsule}"
-    "-DBPF_CAPSULE_LINK_OPTIONS=${lib.concatStringsSep ";" targetProfile.linkOptions}"
+    "-DBPF_CAPSULE_LINK_OPTIONS=${lib.concatStringsSep ";" linkOptions}"
   ]
   ++ map (
     name: "-DFETCHCONTENT_SOURCE_DIR_${lib.toUpper name}=${sources.${name}}"
@@ -119,6 +151,22 @@ stdenv.mkDerivation {
         quickjs = [ mit ];
         rust = [ mit ];
         doom = [ gpl2Only ];
+        python = [
+          psfl
+          mit
+          lib.licenses.zlib
+          bzip2
+          bsd0
+          publicDomain
+        ];
+        python-xdp = [
+          psfl
+          mit
+          lib.licenses.zlib
+          bzip2
+          bsd0
+          publicDomain
+        ];
       }
       .${example};
     platforms = lib.platforms.linux;
