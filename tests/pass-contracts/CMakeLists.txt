@@ -10,6 +10,12 @@ find_program(
     HINTS "${LLVM_TOOLS_BINARY_DIR}"
     REQUIRED
 )
+find_program(
+    BPF_CAPSULE_LLVM_READELF
+    NAMES llvm-readelf-${LLVM_VERSION_MAJOR} llvm-readelf
+    HINTS "${LLVM_TOOLS_BINARY_DIR}"
+    REQUIRED
+)
 # bpf-capsule-ld mirrors llc's -run-pass and MIR parser/printer interface, so
 # every contract exercises the statically linked production pass code.
 
