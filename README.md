@@ -124,7 +124,7 @@ cmake -S examples/fib -B build/fib -DCMAKE_PREFIX_PATH="$PWD/build/prefix"
 cmake --build build/fib
 ```
 
-Without CMake, compile application, guest runtime, `int128.c`, and platform
+Without CMake, compile application, guest runtime, and platform
 sources with `bpf-capsule-cc`, then pass their `.bc` files and the installed
 `libclang_rt.builtins.a` and Picolibc `libc.a` to `bpf-capsule-ld`. The compiler
 locates its guest headers and sysroot automatically; the TLSF wrapper also needs the installed

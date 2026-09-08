@@ -1,37 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-#include "bpf_capsule_arithmetic.h"
-
 #include <stdint.h>
 #include <stdio.h>
 
 typedef unsigned __int128 u128;
 typedef __int128 i128;
 
-struct bpf_u128_pair __bpf_udiv128(unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi);
-struct bpf_u128_pair __bpf_urem128(unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi);
-struct bpf_u128_pair __bpf_sdiv128(unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi);
-struct bpf_u128_pair __bpf_srem128(unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi);
+i128 __multi3(i128, i128);
+u128 __udivti3(u128, u128);
+u128 __umodti3(u128, u128);
+i128 __divti3(i128, i128);
+i128 __modti3(i128, i128);
+int64_t __mulodi4(int64_t, int64_t, int*);
 
 static int check_mul64_wide(uint64_t a, uint64_t b) {
     u128 product = (u128)a * b;
-    struct bpf_u128_pair got = __bpf_mul64_wide(a, b);
-    if (got.lo == (uint64_t)product && got.hi == (uint64_t)(product >> 64)) {
+    u128 got = __multi3(a, b);
+    if (got == product) {
         return 0;
     }
     fprintf(stderr, "wide multiplication contract failed\n");
     return 1;
 }
 
-static u128 join(struct bpf_u128_pair value) {
-    return ((u128)value.hi << 64) | value.lo;
-}
-
 static int check_unsigned(u128 dividend, u128 divisor) {
-    uint64_t nlo = dividend, nhi = dividend >> 64;
-    uint64_t dlo = divisor, dhi = divisor >> 64;
-    u128 quotient = join(__bpf_udiv128(nlo, nhi, dlo, dhi));
-    u128 remainder = join(__bpf_urem128(nlo, nhi, dlo, dhi));
-    if (quotient == dividend / divisor && remainder == dividend % divisor) {
+    u128 quotient = __udivti3(dividend, divisor);
+    u128 remainder = __umodti3(dividend, divisor);
+    if (quotient == dividend / divisor && remainder == dividend % divisor && __multi3(dividend, divisor) == dividend * divisor) {
         return 0;
     }
     fprintf(stderr, "int128 unsigned division contract failed\n");
@@ -44,14 +38,24 @@ static int check_signed(u128 dividend_bits, u128 divisor_bits) {
     if (divisor == 0 || (dividend_bits == ((u128)1 << 127) && divisor == -1)) {
         return 0;
     }
-    uint64_t nlo = dividend_bits, nhi = dividend_bits >> 64;
-    uint64_t dlo = divisor_bits, dhi = divisor_bits >> 64;
-    u128 quotient = join(__bpf_sdiv128(nlo, nhi, dlo, dhi));
-    u128 remainder = join(__bpf_srem128(nlo, nhi, dlo, dhi));
-    if (quotient == (u128)(dividend / divisor) && remainder == (u128)(dividend % divisor)) {
+    i128 quotient = __divti3(dividend, divisor);
+    i128 remainder = __modti3(dividend, divisor);
+    if (quotient == dividend / divisor && remainder == dividend % divisor) {
         return 0;
     }
     fprintf(stderr, "int128 signed division contract failed\n");
+    return 1;
+}
+
+static int check_overflow(int64_t a, int64_t b) {
+    int overflow;
+    int64_t expected;
+    int expected_overflow = __builtin_mul_overflow(a, b, &expected);
+    int64_t product = __mulodi4(a, b, &overflow);
+    if (product == expected && !!overflow == expected_overflow) {
+        return 0;
+    }
+    fprintf(stderr, "signed multiply overflow contract failed\n");
     return 1;
 }
 
@@ -66,6 +70,12 @@ static uint64_t next_random(void) {
 
 int main(void) {
     int failures = 0;
+    const int64_t edges[] = {0, 1, -1, 2, -2, INT32_MAX, INT32_MIN, INT64_MAX, INT64_MIN};
+    for (unsigned i = 0; i < sizeof(edges) / sizeof(edges[0]); ++i) {
+        for (unsigned j = 0; j < sizeof(edges) / sizeof(edges[0]); ++j) {
+            failures += check_overflow(edges[i], edges[j]);
+        }
+    }
     failures += check_unsigned(((u128)0xfffffffffffffffeull << 64) | 0xdc8f2ca367a4c16full, ((u128)0x000000000000000cull << 64) | 0x0003ffffffffffffull);
     failures += check_unsigned(((u128)0xffffffffffffffffull << 64) | 0xd65f110a8e27e567ull, ((u128)0x000000000000000cull << 64) | 0x0000003fffffffffull);
 
@@ -75,6 +85,7 @@ int main(void) {
         failures += check_unsigned(dividend, divisor);
         failures += check_signed(((u128)next_random() << 64) | next_random(), ((u128)next_random() << 64) | next_random());
         failures += check_mul64_wide(next_random(), next_random());
+        failures += check_overflow(next_random(), next_random());
         // Divisors that fit 64 bits take the two-digit path, including its
         // correction steps; the high dividend word must exercise both sides
         // of the "nhi < dlo" split.

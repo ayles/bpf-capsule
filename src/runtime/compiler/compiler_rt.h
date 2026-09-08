@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// These declarations select native scalar subprograms without changing the
-// upstream implementations. Capsule proves each body cannot suspend.
+// These declarations set inlining and native scalar boundaries without
+// changing upstream implementations. Capsule proves nosuspend bodies.
 #pragma once
 
 #include <stdint.h>
+
+// Wide multiplication is a handful of limb operations, not a suspension.
+__attribute__((always_inline)) __int128 __multi3(__int128, __int128);
+__attribute__((always_inline)) static __int128 __mulddi3(uint64_t, uint64_t);
 
 #define CAPSULE_BUILTIN __attribute__((annotate("capsule.nosuspend"), noinline))
 

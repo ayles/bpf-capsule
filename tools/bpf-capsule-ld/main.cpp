@@ -15,6 +15,7 @@
 // caller must link the matching runtime input explicitly. The linker verifies
 // that the runtime and platform choices agree with its target options.
 #include "common.h"
+#include "expand_i128.h"
 #include "registry.h"
 #include "softfloat.h"
 
@@ -418,8 +419,13 @@ int main(int argc, char** argv) {
                 names.push_back(value.getName().str());
             }
         }
-        // Floating-point intrinsics become libm calls in the preparation
-        // pipeline, so they are implicit archive references.
+        // Arithmetic operations become compiler-rt/libm calls in the
+        // preparation pipeline, so they are implicit archive references.
+        for (std::string& name : RequiredIntegerLibcalls(reference)) {
+            if (seen.insert(name).second) {
+                names.push_back(std::move(name));
+            }
+        }
         for (std::string& name : RequiredSoftFloatLibcalls(reference)) {
             if (seen.insert(name).second) {
                 names.push_back(std::move(name));

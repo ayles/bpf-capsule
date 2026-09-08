@@ -116,15 +116,13 @@ inline constexpr llvm::StringLiteral StackAccessorPrefix{"bpf_stack_"};
 
 // ----------------------------------------------- arithmetic (compiler runtime)
 
-// 64-bit overflow multiply and i128 arithmetic, defined in compiler-runtime
-// int128.c (bpf-expand-i128).
-inline constexpr llvm::StringLiteral UMul64Overflow{"__bpf_umul64_overflow"};
-inline constexpr llvm::StringLiteral SMul64Overflow{"__bpf_smul64_overflow"};
-inline constexpr llvm::StringLiteral Mul128{"__bpf_mul128"};
-inline constexpr llvm::StringLiteral UDiv128{"__bpf_udiv128"};
-inline constexpr llvm::StringLiteral URem128{"__bpf_urem128"};
-inline constexpr llvm::StringLiteral SDiv128{"__bpf_sdiv128"};
-inline constexpr llvm::StringLiteral SRem128{"__bpf_srem128"};
+// Standard compiler-rt libcalls (bpf-expand-i128).
+inline constexpr llvm::StringLiteral SMul64Overflow{"__mulodi4"};
+inline constexpr llvm::StringLiteral Mul128{"__multi3"};
+inline constexpr llvm::StringLiteral UDiv128{"__udivti3"};
+inline constexpr llvm::StringLiteral URem128{"__umodti3"};
+inline constexpr llvm::StringLiteral SDiv128{"__divti3"};
+inline constexpr llvm::StringLiteral SRem128{"__modti3"};
 
 // ------------------------------------------------ compiler-rt / libm
 

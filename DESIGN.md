@@ -297,6 +297,11 @@ builtins `nosuspend`; trivial sign/subtraction wrappers remain inlineable.
 The pass replaces floating-point SSA types with equally wide integers for
 the BPF backend, preserving the source memory layout.
 
+Wide integer multiply, divide and remainder use compiler-rt too. Multiplication
+inlines into limb operations; division and remainder use ordinary managed calls,
+whose fiber-frame ABI already carries 128-bit arguments and results. No native
+multi-register return convention or arithmetic source patch is needed.
+
 `bpf-capsule-cc` uses clang to emit per-translation-unit bitcode.
 `bpf-capsule-ld` resolves the complete application, runtime, and referenced
 compiler-rt and Picolibc archive members, then performs six logical phases:

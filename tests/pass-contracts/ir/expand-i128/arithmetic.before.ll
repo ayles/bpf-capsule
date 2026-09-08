@@ -2,48 +2,11 @@ source_filename = "expand-i128.ll"
 target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
 target triple = "bpfel"
 
-%words = type { i64, i64 }
-
 ; Function Attrs: nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none)
 declare { i64, i1 } @llvm.umul.with.overflow.i64(i64, i64) #0
 
 ; Function Attrs: nocallback nocreateundeforpoison nofree nosync nounwind speculatable willreturn memory(none)
 declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64) #0
-
-define %words @__bpf_mul128(i64 %a0, i64 %a1, i64 %b0, i64 %b1) {
-entry:
-  ret %words zeroinitializer
-}
-
-define %words @__bpf_udiv128(i64 %a0, i64 %a1, i64 %b0, i64 %b1) {
-entry:
-  ret %words zeroinitializer
-}
-
-define %words @__bpf_urem128(i64 %a0, i64 %a1, i64 %b0, i64 %b1) {
-entry:
-  ret %words zeroinitializer
-}
-
-define %words @__bpf_sdiv128(i64 %a0, i64 %a1, i64 %b0, i64 %b1) {
-entry:
-  ret %words zeroinitializer
-}
-
-define %words @__bpf_srem128(i64 %a0, i64 %a1, i64 %b0, i64 %b1) {
-entry:
-  ret %words zeroinitializer
-}
-
-define %words @__bpf_umul64_overflow(i64 %lhs, i64 %rhs) {
-entry:
-  ret %words zeroinitializer
-}
-
-define %words @__bpf_smul64_overflow(i64 %lhs, i64 %rhs) {
-entry:
-  ret %words zeroinitializer
-}
 
 define i128 @arithmetic(i128 %lhs, i128 %rhs) {
 entry:

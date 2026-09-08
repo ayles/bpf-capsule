@@ -215,11 +215,48 @@ set_tests_properties(SpillContract.HelperVisibleBuffer PROPERTIES LABELS "spill-
 
 capsule_gtest_host(errors_test UNPRIVILEGED SOURCES errors/errors_test.cc)
 
-add_executable(int128_contract_test compiler-runtime/int128_contract.c ${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/int128.c)
-target_include_directories(int128_contract_test PRIVATE "${BPF_CAPSULE_INTERNAL_INCLUDE_DIR}")
+set(integer_builtins
+    multi3
+    udivmodti4
+    udivti3
+    umodti3
+    divti3
+    modti3
+    mulodi4
+)
+add_executable(int128_contract_test compiler-runtime/int128_contract.c)
+foreach(name IN LISTS integer_builtins)
+    target_sources(int128_contract_test PRIVATE "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/compiler-rt/${name}.c")
+    # Only in this test, rename explicit libcalls and their implementations:
+    # the host compiler's implicit libcalls must still use the host runtime,
+    # or a / b would compare the candidate with itself.
+    target_compile_definitions(int128_contract_test PRIVATE "__${name}=candidate___${name}")
+endforeach()
 target_compile_options(int128_contract_test PRIVATE -fno-builtin)
 add_test(NAME CompilerRuntime.Int128Contracts COMMAND int128_contract_test)
 set_tests_properties(CompilerRuntime.Int128Contracts PROPERTIES LABELS unprivileged)
+add_test(
+    NAME CompilerRuntime.IntegerMultiplyInline
+    COMMAND
+        "${CMAKE_COMMAND}" "-DBPF_CAPSULE_LD=$<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}>"
+        "-DLLVM_DIS=${BPF_CAPSULE_LLVM_DIS}" "-DBUILTINS=${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
+        "-DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/compiler-runtime/integer-multiply.ll"
+        "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/integer-multiply" -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/compiler-runtime/VerifyIntegerMultiply.cmake"
+)
+set_tests_properties(CompilerRuntime.IntegerMultiplyInline PROPERTIES LABELS unprivileged)
+
+capsule_test_object(
+    integer
+    SOURCES compiler-runtime/integer_bpf.c
+    INCLUDE_DIRECTORIES ${test_source_dir}/compiler-runtime
+)
+capsule_gtest_host(
+    integer_test
+    SOURCES compiler-runtime/integer_test.cc
+    SKELETONS integer_skeleton
+    INCLUDE_DIRECTORIES ${test_source_dir}/compiler-runtime
+)
 
 # Compile the installed standard libcalls natively and compare them with the
 # FPU. Libm remainder is checked separately through Capsule, against host libm.

@@ -165,12 +165,6 @@ install(
     PATTERN "*.h"
 )
 install(FILES src/runtime/guest/bpf_capsule.c DESTINATION "${BPF_CAPSULE_INSTALL_RUNTIME_DIR}")
-install(
-    DIRECTORY src/runtime/compiler/
-    DESTINATION "${BPF_CAPSULE_INSTALL_COMPILER_RUNTIME_DIR}"
-    FILES_MATCHING
-    PATTERN "*.c"
-)
 install(DIRECTORY src/runtime/platform/ DESTINATION "${BPF_CAPSULE_INSTALL_PLATFORM_DIR}" FILES_MATCHING PATTERN "*.c")
 install(FILES "${BPF_CAPSULE_LIBC_ARCHIVE}" DESTINATION "${BPF_CAPSULE_INSTALL_LIBC_DIR}")
 # Picolibc is configured and installed by an ExternalProject, so its generated

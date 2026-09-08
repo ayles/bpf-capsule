@@ -40,6 +40,13 @@ set(compiler_rt_sources
     fp_mode
     clzdi2
     clzsi2
+    multi3
+    udivmodti4
+    udivti3
+    umodti3
+    divti3
+    modti3
+    mulodi4
 )
 file(GLOB compiler_rt_headers "${compiler_rt_builtins}/*.h" "${compiler_rt_builtins}/*.inc")
 set(compiler_rt_objects)

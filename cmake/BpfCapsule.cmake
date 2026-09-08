@@ -268,23 +268,6 @@ function(bpf_capsule_rust_bitcode out_var)
     set(${out_var} "${cargo_bitcode}" PARENT_SCOPE)
 endfunction()
 
-# Compile the compiler runtime once per consumer directory. These are
-# operations introduced by Capsule's LLVM passes, not C library routines.
-function(_bpf_capsule_compiler_runtime_bitcode out_var)
-    get_property(bitcode DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_BITCODE)
-    get_property(target DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_TARGET)
-    if(NOT bitcode)
-        _bpf_capsule_compile_bitcode(bitcode SOURCES "${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/int128.c" COMPILE_OPTIONS -g)
-        string(MD5 target_id "${CMAKE_CURRENT_BINARY_DIR};compiler-runtime")
-        set(target "bpf_capsule_compiler_runtime_${target_id}")
-        add_custom_target(${target} DEPENDS ${bitcode})
-        set_property(DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_BITCODE "${bitcode}")
-        set_property(DIRECTORY PROPERTY BPF_CAPSULE_COMPILER_RUNTIME_TARGET "${target}")
-    endif()
-    set(${out_var} "${bitcode}" PARENT_SCOPE)
-    set(${out_var}_target "${target}" PARENT_SCOPE)
-endfunction()
-
 # Compile the Capsule-specific platform beneath Picolibc once per consumer
 # directory and allocator-lock shape. Picolibc itself remains a normal static
 # bitcode archive and is linked separately below.
@@ -431,22 +414,19 @@ function(bpf_capsule_object out_var)
     list(REMOVE_DUPLICATES platform_definitions)
 
     _bpf_capsule_runtime_bitcode(runtime_bitcode COMPILE_DEFINITIONS ${runtime_definitions})
-    _bpf_capsule_compiler_runtime_bitcode(compiler_runtime_bitcode)
     _bpf_capsule_platform_bitcode(platform_bitcode COMPILE_DEFINITIONS ${platform_definitions})
     add_custom_command(
         OUTPUT "${output}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${output_directory}"
         COMMAND
             $<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}> ${ARG_LINK_OPTIONS} -o "${output}" ${input_bitcode}
-            ${runtime_bitcode} ${compiler_runtime_bitcode} ${platform_bitcode} "${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
+            ${runtime_bitcode} ${platform_bitcode} "${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
             "${BPF_CAPSULE_LIBC_ARCHIVE}"
         DEPENDS
             ${BPF_CAPSULE_LD_TARGET}
             ${input_bitcode}
             ${runtime_bitcode}
             ${runtime_bitcode_target}
-            ${compiler_runtime_bitcode}
-            ${compiler_runtime_bitcode_target}
             "${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
             ${platform_bitcode}
             ${platform_bitcode_target}
