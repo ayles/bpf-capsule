@@ -133,7 +133,8 @@ the available budget. More direct memory avoids ARRAY lookups for accesses
 in that range; heap capacity remains a separate load-time choice.
 
 Pointer initializers are stored as displacements until initialization rebases
-them. The arena initializer applies fixups in BPF; on fixed memory the host
+them. The arena initializer applies table-driven fixups through `bpf_loop`
+callbacks, keeping its stack independent of image size; on fixed memory the host
 uses the `.rodata.bpffix` table. Neither tier runs application code before
 initialization publishes readiness.
 

@@ -11,8 +11,11 @@ target triple = "bpfel"
 @bpf_capsule_arena_control = global %arena_control zeroinitializer, section ".data.bpfctrl", align 8
 @arena = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @exchange = global [32 x i8] zeroinitializer, section ".data.exchange", align 8
+@callback = internal addrspace(1) global ptr null, align 8
 @initialized = internal addrspace(1) global i32 9, align 4
 @packed = internal addrspace(1) global %packed_pointer <{ i8 7, ptr null }>, align 1
+@__bpf_capsule_init_fixups.0.table = internal constant [1 x { i64, i64 }] [{ i64, i64 } { i64 sub (i64 ptrtoint (ptr addrspace(1) @callback to i64), i64 ptrtoint (ptr addrspace(1) @callback to i64)), i64 4311744512 }], section ".rodata.bpfinit", align 8, !dbg !5
+@__bpf_capsule_init_fixups.1.table = internal constant [1 x { i64, i64 }] [{ i64, i64 } { i64 add (i64 sub (i64 ptrtoint (ptr addrspace(1) @packed to i64), i64 ptrtoint (ptr addrspace(1) @callback to i64)), i64 1), i64 4096 }], section ".rodata.bpfinit", align 8, !dbg !11
 
 define i32 @read(i64 %index) {
 entry:
@@ -117,59 +120,154 @@ declare void @llvm.memmove.p0.p0.i64(ptr writeonly captures(none), ptr readonly 
 declare void @llvm.memset.p0.i64(ptr writeonly captures(none), i8, i64, i1 immarg) #1
 
 ; Function Attrs: noinline
-define internal i32 @__bpf_capsule_init() #2 !dbg !15 {
+define internal i32 @__bpf_capsule_init() #2 !dbg !23 {
 entry:
-  %0 = atomicrmw add ptr @bpf_capsule_arena_control, i32 0 seq_cst, align 4, !dbg !19
-  %1 = icmp eq i32 %0, 2, !dbg !19
-  br i1 %1, label %done, label %claim, !dbg !19
+  %fixup.context = alloca { i64, i64 }, align 8, !dbg !27
+  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8, !dbg !27
+  %0 = atomicrmw add ptr @bpf_capsule_arena_control, i32 0 seq_cst, align 4, !dbg !27
+  %1 = icmp eq i32 %0, 2, !dbg !27
+  br i1 %1, label %done, label %claim, !dbg !27
 
 claim:                                            ; preds = %entry
-  %2 = cmpxchg ptr @bpf_capsule_arena_control, i32 0, i32 1 seq_cst seq_cst, align 4, !dbg !19
-  %bpf.arena.init.won = extractvalue { i32, i1 } %2, 1, !dbg !19
-  %bpf.arena.init.previous = extractvalue { i32, i1 } %2, 0, !dbg !19
-  %3 = icmp eq i32 %bpf.arena.init.previous, 2, !dbg !19
-  br i1 %bpf.arena.init.won, label %allocate, label %contested, !dbg !19
+  %2 = cmpxchg ptr @bpf_capsule_arena_control, i32 0, i32 1 seq_cst seq_cst, align 4, !dbg !27
+  %bpf.arena.init.won = extractvalue { i32, i1 } %2, 1, !dbg !27
+  %bpf.arena.init.previous = extractvalue { i32, i1 } %2, 0, !dbg !27
+  %3 = icmp eq i32 %bpf.arena.init.previous, 2, !dbg !27
+  br i1 %bpf.arena.init.won, label %allocate, label %contested, !dbg !27
 
 allocate:                                         ; preds = %claim
-  %bpf.memory.end32 = load volatile i32, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 3), align 4, !dbg !19
-  %bpf.memory.end = zext i32 %bpf.memory.end32 to i64, !dbg !19
-  %4 = add i64 %bpf.memory.end, 4095, !dbg !19
-  %bpf.arena.selected.pages = lshr i64 %4, 12, !dbg !19
-  %5 = trunc i64 %bpf.arena.selected.pages to i32, !dbg !19
-  %6 = call ptr addrspace(1) @bpf_arena_alloc_pages(ptr @arena, ptr addrspace(1) null, i32 %5, i32 -1, i64 0), !dbg !19
-  %7 = icmp ne ptr addrspace(1) %6, null, !dbg !19
-  br i1 %7, label %initialize, label %failed, !dbg !19
+  %bpf.memory.end32 = load volatile i32, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 3), align 4, !dbg !27
+  %bpf.memory.end = zext i32 %bpf.memory.end32 to i64, !dbg !27
+  %4 = add i64 %bpf.memory.end, 4095, !dbg !27
+  %bpf.arena.selected.pages = lshr i64 %4, 12, !dbg !27
+  %5 = trunc i64 %bpf.arena.selected.pages to i32, !dbg !27
+  %6 = call ptr addrspace(1) @bpf_arena_alloc_pages(ptr @arena, ptr addrspace(1) null, i32 %5, i32 -1, i64 0), !dbg !27
+  %7 = icmp ne ptr addrspace(1) %6, null, !dbg !27
+  br i1 %7, label %initialize, label %failed, !dbg !27
 
 initialize:                                       ; preds = %allocate
-  %bpf.arena.base.word = ptrtoint ptr addrspace(1) %6 to i64, !dbg !19
-  store i64 %bpf.arena.base.word, ptr getelementptr inbounds nuw (%arena_control, ptr @bpf_capsule_arena_control, i32 0, i32 2), align 8, !dbg !19
-  %bpf.arena.address = add i64 %bpf.arena.base.word, 4096, !dbg !19
-  %bpf.arena.program.pointer = inttoptr i64 %bpf.arena.address to ptr, !dbg !19
-  store ptr %bpf.arena.program.pointer, ptr addrspace(1) getelementptr (i8, ptr addrspace(1) @packed, i64 1), align 1, !dbg !19
-  %8 = atomicrmw xchg ptr @bpf_capsule_arena_control, i32 2 seq_cst, align 4, !dbg !19
-  br label %done, !dbg !19
+  %bpf.arena.base.word = ptrtoint ptr addrspace(1) %6 to i64, !dbg !27
+  store i64 %bpf.arena.base.word, ptr getelementptr inbounds nuw (%arena_control, ptr @bpf_capsule_arena_control, i32 0, i32 2), align 8, !dbg !27
+  %8 = getelementptr inbounds nuw { i64, i64 }, ptr %fixup.context, i32 0, i32 0, !dbg !27
+  store i64 ptrtoint (ptr addrspace(1) @callback to i64), ptr %8, align 8, !dbg !27
+  %9 = mul i64 %bpf.view.base, 1, !dbg !27
+  %10 = add i64 0, %9, !dbg !27
+  %11 = getelementptr inbounds nuw { i64, i64 }, ptr %fixup.context, i32 0, i32 1, !dbg !27
+  store i64 %10, ptr %11, align 8, !dbg !27
+  %12 = call i64 inttoptr (i64 181 to ptr)(i32 1, ptr @__bpf_capsule_init_fixups.0, ptr %fixup.context, i64 0), !dbg !27
+  %13 = mul i64 %bpf.arena.base.word, 1, !dbg !27
+  %14 = add i64 0, %13, !dbg !27
+  %15 = getelementptr inbounds nuw { i64, i64 }, ptr %fixup.context, i32 0, i32 1, !dbg !27
+  store i64 %14, ptr %15, align 8, !dbg !27
+  %16 = call i64 inttoptr (i64 181 to ptr)(i32 1, ptr @__bpf_capsule_init_fixups.1, ptr %fixup.context, i64 0), !dbg !27
+  %17 = atomicrmw xchg ptr @bpf_capsule_arena_control, i32 2 seq_cst, align 4, !dbg !27
+  br label %done, !dbg !27
 
 busy:                                             ; preds = %contested
-  ret i32 -11, !dbg !19
+  ret i32 -11, !dbg !27
 
 failed:                                           ; preds = %allocate
-  %9 = atomicrmw xchg ptr @bpf_capsule_arena_control, i32 0 seq_cst, align 4, !dbg !19
-  ret i32 -12, !dbg !19
+  %18 = atomicrmw xchg ptr @bpf_capsule_arena_control, i32 0 seq_cst, align 4, !dbg !27
+  ret i32 -12, !dbg !27
 
 done:                                             ; preds = %contested, %initialize, %entry
-  ret i32 0, !dbg !19
+  ret i32 0, !dbg !27
 
 contested:                                        ; preds = %claim
-  br i1 %3, label %done, label %busy, !dbg !19
+  br i1 %3, label %done, label %busy, !dbg !27
 }
 
-declare !dbg !20 ptr addrspace(1) @bpf_arena_alloc_pages(ptr, ptr addrspace(1), i32, i32, i64) section ".ksyms"
+declare !dbg !28 ptr addrspace(1) @bpf_arena_alloc_pages(ptr, ptr addrspace(1), i32, i32, i64) section ".ksyms"
 
 ; Function Attrs: noinline
-define i32 @bpf_capsule_init() #2 section "syscall" !dbg !33 {
+define internal i64 @__bpf_capsule_init_fixups.0(i32 %index, ptr "bpf.capsule.stack.backing" %context) #2 !dbg !41 {
 entry:
-  %0 = call i32 @__bpf_capsule_init(), !dbg !34
-  ret i32 %0, !dbg !34
+  %0 = icmp ult i32 %index, 1, !dbg !47
+  br i1 %0, label %apply, label %done, !dbg !47
+
+apply:                                            ; preds = %entry
+  %1 = zext i32 %index to i64, !dbg !47
+  %2 = getelementptr [1 x { i64, i64 }], ptr @__bpf_capsule_init_fixups.0.table, i64 0, i64 %1, !dbg !47
+  %3 = getelementptr inbounds nuw { i64, i64 }, ptr %2, i32 0, i32 0, !dbg !47
+  %4 = mul i64 %1, 16, !dbg !47
+  %5 = add i64 0, %4, !dbg !47
+  %bpf.global.offset.visible = call i64 asm sideeffect "", "=r,0"(i64 %5), !dbg !47
+  %6 = icmp ule i64 %bpf.global.offset.visible, 8, !dbg !47
+  %bpf.global.offset.bounded = select i1 %6, i64 %bpf.global.offset.visible, i64 0, !dbg !47
+  %7 = getelementptr i8, ptr @__bpf_capsule_init_fixups.0.table, i64 %bpf.global.offset.bounded, !dbg !47
+  %8 = load i64, ptr %7, align 8, !dbg !47
+  %9 = getelementptr inbounds nuw { i64, i64 }, ptr %2, i32 0, i32 1, !dbg !47
+  %10 = mul i64 %1, 16, !dbg !47
+  %11 = add i64 8, %10, !dbg !47
+  %bpf.global.offset.visible1 = call i64 asm sideeffect "", "=r,0"(i64 %11), !dbg !47
+  %12 = icmp ule i64 %bpf.global.offset.visible1, 8, !dbg !47
+  %bpf.global.offset.bounded2 = select i1 %12, i64 %bpf.global.offset.visible1, i64 0, !dbg !47
+  %13 = getelementptr i8, ptr @__bpf_capsule_init_fixups.0.table, i64 %bpf.global.offset.bounded2, !dbg !47
+  %14 = load i64, ptr %13, align 8, !dbg !47
+  %15 = getelementptr inbounds nuw { i64, i64 }, ptr %context, i32 0, i32 0, !dbg !47
+  %16 = load i64, ptr %15, align 8, !dbg !47
+  %17 = getelementptr inbounds nuw { i64, i64 }, ptr %context, i32 0, i32 1, !dbg !47
+  %18 = load i64, ptr %17, align 8, !dbg !47
+  %19 = add i64 %16, %8, !dbg !47
+  %20 = inttoptr i64 %19 to ptr, !dbg !47
+  %.arena.word = ptrtoint ptr %20 to i64, !dbg !47
+  %.arena.span = inttoptr i64 %.arena.word to ptr addrspace(1), !dbg !47
+  %.arena = addrspacecast ptr addrspace(1) %.arena.span to ptr, !dbg !47
+  %21 = add i64 %18, %14, !dbg !47
+  store i64 %21, ptr %.arena, align 8, !dbg !47
+  br label %done, !dbg !47
+
+done:                                             ; preds = %apply, %entry
+  ret i64 0, !dbg !47
+}
+
+; Function Attrs: noinline
+define internal i64 @__bpf_capsule_init_fixups.1(i32 %index, ptr "bpf.capsule.stack.backing" %context) #2 !dbg !48 {
+entry:
+  %0 = icmp ult i32 %index, 1, !dbg !52
+  br i1 %0, label %apply, label %done, !dbg !52
+
+apply:                                            ; preds = %entry
+  %1 = zext i32 %index to i64, !dbg !52
+  %2 = getelementptr [1 x { i64, i64 }], ptr @__bpf_capsule_init_fixups.1.table, i64 0, i64 %1, !dbg !52
+  %3 = getelementptr inbounds nuw { i64, i64 }, ptr %2, i32 0, i32 0, !dbg !52
+  %4 = mul i64 %1, 16, !dbg !52
+  %5 = add i64 0, %4, !dbg !52
+  %bpf.global.offset.visible = call i64 asm sideeffect "", "=r,0"(i64 %5), !dbg !52
+  %6 = icmp ule i64 %bpf.global.offset.visible, 8, !dbg !52
+  %bpf.global.offset.bounded = select i1 %6, i64 %bpf.global.offset.visible, i64 0, !dbg !52
+  %7 = getelementptr i8, ptr @__bpf_capsule_init_fixups.1.table, i64 %bpf.global.offset.bounded, !dbg !52
+  %8 = load i64, ptr %7, align 8, !dbg !52
+  %9 = getelementptr inbounds nuw { i64, i64 }, ptr %2, i32 0, i32 1, !dbg !52
+  %10 = mul i64 %1, 16, !dbg !52
+  %11 = add i64 8, %10, !dbg !52
+  %bpf.global.offset.visible1 = call i64 asm sideeffect "", "=r,0"(i64 %11), !dbg !52
+  %12 = icmp ule i64 %bpf.global.offset.visible1, 8, !dbg !52
+  %bpf.global.offset.bounded2 = select i1 %12, i64 %bpf.global.offset.visible1, i64 0, !dbg !52
+  %13 = getelementptr i8, ptr @__bpf_capsule_init_fixups.1.table, i64 %bpf.global.offset.bounded2, !dbg !52
+  %14 = load i64, ptr %13, align 8, !dbg !52
+  %15 = getelementptr inbounds nuw { i64, i64 }, ptr %context, i32 0, i32 0, !dbg !52
+  %16 = load i64, ptr %15, align 8, !dbg !52
+  %17 = getelementptr inbounds nuw { i64, i64 }, ptr %context, i32 0, i32 1, !dbg !52
+  %18 = load i64, ptr %17, align 8, !dbg !52
+  %19 = add i64 %16, %8, !dbg !52
+  %20 = inttoptr i64 %19 to ptr, !dbg !52
+  %.arena.word = ptrtoint ptr %20 to i64, !dbg !52
+  %.arena.span = inttoptr i64 %.arena.word to ptr addrspace(1), !dbg !52
+  %.arena = addrspacecast ptr addrspace(1) %.arena.span to ptr, !dbg !52
+  %21 = add i64 %18, %14, !dbg !52
+  store i64 %21, ptr %.arena, align 1, !dbg !52
+  br label %done, !dbg !52
+
+done:                                             ; preds = %apply, %entry
+  ret i64 0, !dbg !52
+}
+
+; Function Attrs: noinline
+define i32 @bpf_capsule_init() #2 section "syscall" !dbg !53 {
+entry:
+  %0 = call i32 @__bpf_capsule_init(), !dbg !54
+  ret i32 %0, !dbg !54
 }
 
 attributes #0 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
@@ -177,40 +275,60 @@ attributes #1 = { nocallback nofree nosync nounwind willreturn memory(argmem: wr
 attributes #2 = { noinline }
 
 !llvm.dbg.cu = !{!2}
-!llvm.module.flags = !{!13, !14}
+!llvm.module.flags = !{!21, !22}
 
 !0 = !DIGlobalVariableExpression(var: !1, expr: !DIExpression())
-!1 = distinct !DIGlobalVariable(name: "arena", scope: !2, file: !3, line: 1, type: !5, isLocal: false, isDefinition: true)
+!1 = distinct !DIGlobalVariable(name: "arena", scope: !2, file: !3, line: 1, type: !13, isLocal: false, isDefinition: true)
 !2 = distinct !DICompileUnit(language: DW_LANG_C11, file: !3, producer: "pass contract", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, globals: !4)
 !3 = !DIFile(filename: "memory-arena-contract.c", directory: ".")
-!4 = !{!0}
-!5 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "arena_map", file: !3, line: 1, size: 64, elements: !6)
-!6 = !{!7}
-!7 = !DIDerivedType(tag: DW_TAG_member, name: "max_entries", scope: !5, file: !3, line: 1, baseType: !8, size: 64)
-!8 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !9, size: 64)
-!9 = !DICompositeType(tag: DW_TAG_array_type, baseType: !10, size: 160, elements: !11)
-!10 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
-!11 = !{!12}
-!12 = !DISubrange(count: 5, lowerBound: 0)
-!13 = !{i32 2, !"Dwarf Version", i32 4}
-!14 = !{i32 2, !"Debug Info Version", i32 3}
-!15 = distinct !DISubprogram(name: "__bpf_capsule_init.impl", linkageName: "__bpf_capsule_init.impl", scope: null, file: !3, type: !16, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !18)
-!16 = !DISubroutineType(types: !17)
-!17 = !{!10}
-!18 = !{}
-!19 = !DILocation(line: 0, scope: !15)
-!20 = !DISubprogram(name: "bpf_arena_alloc_pages", linkageName: "bpf_arena_alloc_pages", scope: null, file: !3, type: !21, spFlags: 0, retainedNodes: !27)
-!21 = !DISubroutineType(types: !22)
-!22 = !{!23, !23, !23, !25, !10, !26}
-!23 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !24, size: 64)
-!24 = !DIBasicType(tag: DW_TAG_unspecified_type, name: "void")
-!25 = !DIBasicType(name: "unsigned int", size: 32, encoding: DW_ATE_unsigned)
-!26 = !DIBasicType(name: "unsigned long long", size: 64, encoding: DW_ATE_unsigned)
-!27 = !{!28, !29, !30, !31, !32}
-!28 = !DILocalVariable(arg: 1, scope: !20, file: !3, type: !23)
-!29 = !DILocalVariable(arg: 2, scope: !20, file: !3, type: !23)
-!30 = !DILocalVariable(arg: 3, scope: !20, file: !3, type: !25)
-!31 = !DILocalVariable(arg: 4, scope: !20, file: !3, type: !10)
-!32 = !DILocalVariable(arg: 5, scope: !20, file: !3, type: !26)
-!33 = distinct !DISubprogram(name: "bpf_capsule_init", linkageName: "bpf_capsule_init", scope: null, file: !3, type: !16, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !18)
-!34 = !DILocation(line: 0, scope: !33)
+!4 = !{!0, !5, !11}
+!5 = !DIGlobalVariableExpression(var: !6, expr: !DIExpression())
+!6 = distinct !DIGlobalVariable(name: "__bpf_capsule_init_fixups.0.table", linkageName: "__bpf_capsule_init_fixups.0.table", scope: !2, file: !3, type: !7, isLocal: true, isDefinition: true)
+!7 = !DICompositeType(tag: DW_TAG_array_type, baseType: !8, size: 128, align: 8, elements: !9)
+!8 = !DIBasicType(name: "char", size: 8, encoding: DW_ATE_signed_char)
+!9 = !{!10}
+!10 = !DISubrange(count: 16, lowerBound: 0)
+!11 = !DIGlobalVariableExpression(var: !12, expr: !DIExpression())
+!12 = distinct !DIGlobalVariable(name: "__bpf_capsule_init_fixups.1.table", linkageName: "__bpf_capsule_init_fixups.1.table", scope: !2, file: !3, type: !7, isLocal: true, isDefinition: true)
+!13 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "arena_map", file: !3, line: 1, size: 64, elements: !14)
+!14 = !{!15}
+!15 = !DIDerivedType(tag: DW_TAG_member, name: "max_entries", scope: !13, file: !3, line: 1, baseType: !16, size: 64)
+!16 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !17, size: 64)
+!17 = !DICompositeType(tag: DW_TAG_array_type, baseType: !18, size: 160, elements: !19)
+!18 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
+!19 = !{!20}
+!20 = !DISubrange(count: 5, lowerBound: 0)
+!21 = !{i32 2, !"Dwarf Version", i32 4}
+!22 = !{i32 2, !"Debug Info Version", i32 3}
+!23 = distinct !DISubprogram(name: "__bpf_capsule_init.impl", linkageName: "__bpf_capsule_init.impl", scope: null, file: !3, type: !24, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition, unit: !2, retainedNodes: !26)
+!24 = !DISubroutineType(types: !25)
+!25 = !{!18}
+!26 = !{}
+!27 = !DILocation(line: 0, scope: !23)
+!28 = !DISubprogram(name: "bpf_arena_alloc_pages", linkageName: "bpf_arena_alloc_pages", scope: null, file: !3, type: !29, spFlags: 0, retainedNodes: !35)
+!29 = !DISubroutineType(types: !30)
+!30 = !{!31, !31, !31, !33, !18, !34}
+!31 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !32, size: 64)
+!32 = !DIBasicType(tag: DW_TAG_unspecified_type, name: "void")
+!33 = !DIBasicType(name: "unsigned int", size: 32, encoding: DW_ATE_unsigned)
+!34 = !DIBasicType(name: "unsigned long long", size: 64, encoding: DW_ATE_unsigned)
+!35 = !{!36, !37, !38, !39, !40}
+!36 = !DILocalVariable(arg: 1, scope: !28, file: !3, type: !31)
+!37 = !DILocalVariable(arg: 2, scope: !28, file: !3, type: !31)
+!38 = !DILocalVariable(arg: 3, scope: !28, file: !3, type: !33)
+!39 = !DILocalVariable(arg: 4, scope: !28, file: !3, type: !18)
+!40 = !DILocalVariable(arg: 5, scope: !28, file: !3, type: !34)
+!41 = distinct !DISubprogram(name: "__bpf_capsule_init_fixups.0", linkageName: "__bpf_capsule_init_fixups.0", scope: null, file: !3, type: !42, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition, unit: !2, retainedNodes: !44)
+!42 = !DISubroutineType(types: !43)
+!43 = !{!34, !33, !31}
+!44 = !{!45, !46}
+!45 = !DILocalVariable(name: "index", arg: 1, scope: !41, file: !3, type: !33)
+!46 = !DILocalVariable(name: "context", arg: 2, scope: !41, file: !3, type: !31)
+!47 = !DILocation(line: 0, scope: !41)
+!48 = distinct !DISubprogram(name: "__bpf_capsule_init_fixups.1", linkageName: "__bpf_capsule_init_fixups.1", scope: null, file: !3, type: !42, spFlags: DISPFlagLocalToUnit | DISPFlagDefinition, unit: !2, retainedNodes: !49)
+!49 = !{!50, !51}
+!50 = !DILocalVariable(name: "index", arg: 1, scope: !48, file: !3, type: !33)
+!51 = !DILocalVariable(name: "context", arg: 2, scope: !48, file: !3, type: !31)
+!52 = !DILocation(line: 0, scope: !48)
+!53 = distinct !DISubprogram(name: "bpf_capsule_init", linkageName: "bpf_capsule_init", scope: null, file: !3, type: !24, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !26)
+!54 = !DILocation(line: 0, scope: !53)

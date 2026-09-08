@@ -32,6 +32,8 @@
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
 #include <cerrno>
+#include <array>
+#include <map>
 #include <unordered_map>
 
 using namespace llvm;
@@ -43,6 +45,7 @@ cl::opt<unsigned> FixedDirectHeapRegions(
 
 constexpr unsigned ArenaAS = 1;
 constexpr uint64_t BpfMapLookupElemHelperId = 1;
+constexpr uint64_t BpfLoopHelperId = 181;
 
 // ---------------------------------------------------------------------------
 // bpf-memory module pass
@@ -3159,65 +3162,79 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         return b.CreateIntToPtr(address, type, "bpf.arena.program.pointer");
     }
 
-    bool ReferencesZeroGlobal(Constant* value, const ZeroOffsets& offsets) {
-        SmallPtrSet<Constant*, 16> visited;
-        SmallVector<Constant*> work{value};
-        while (!work.empty()) {
-            Constant* current = work.pop_back_val();
-            if (!visited.insert(current).second) {
-                continue;
-            }
-            if (auto* global = dyn_cast<GlobalVariable>(current); global && offsets.contains(global)) {
-                return true;
-            }
-            for (Value* operand : current->operands()) {
-                if (auto* constant = dyn_cast<Constant>(operand)) {
-                    work.push_back(constant);
-                }
-            }
-        }
-        return false;
-    }
+    // Keep address differences symbolic: LLVM's assembler resolves differences
+    // within the arena section, without a data relocation for libbpf to apply.
+    struct ArenaInitializer {
+        Constant* Addend;
+        // Sparse allocation, function-token window, initialized image.
+        std::array<int64_t, 3> Bases{};
+    };
 
-    // Turn a pointer-shaped initializer constant into instructions while
-    // substituting dynamically allocated sparse globals. SanitizeInitializer
-    // has already split aggregates, so a fixup is normally a global or a
-    // ConstantExpr chain rooted in one.
-    Value* MaterializeZeroConstant(IRBuilder<>& b, Constant* value, Value* base, const ZeroOffsets& offsets) {
+    ArenaInitializer ResolveArenaInitializer(Module& module, Constant* value, GlobalVariable* image, const ZeroOffsets& offsets, unsigned storedBits) {
+        auto* i64 = Type::getInt64Ty(module.getContext());
+        auto reject = [&]() -> ArenaInitializer {
+            std::string description;
+            raw_string_ostream out(description);
+            value->print(out);
+            report_fatal_error(Twine("bpf-arena: cannot resolve pointer initializer ") + out.str(), false);
+        };
+        if (auto* integer = dyn_cast<ConstantInt>(value)) {
+            return {ConstantInt::get(i64, integer->getValue().zextOrTrunc(64))};
+        }
+        if (isa<ConstantPointerNull>(value)) {
+            return {ConstantInt::get(i64, 0)};
+        }
         if (auto* global = dyn_cast<GlobalVariable>(value)) {
             if (auto found = offsets.find(global); found != offsets.end()) {
-                return DynamicArenaAddress(b, base, found->second, cast<PointerType>(global->getType()));
+                return {ConstantInt::get(i64, found->second), {1, 0, 0}};
+            }
+            if (global->getAddressSpace() != ArenaAS || global->hasSection()) {
+                return reject();
+            }
+            return {ConstantExpr::getSub(ConstantExpr::getPtrToInt(global, i64), ConstantExpr::getPtrToInt(image, i64)), {0, 0, 1}};
+        }
+        auto* expression = dyn_cast<ConstantExpr>(value);
+        if (!expression) {
+            return reject();
+        }
+        // A final truncation is implicit in the store. A narrower intermediate
+        // followed by widening is not affine in the bases and cannot be
+        // represented by this relocation table.
+        if (value->getType()->isIntegerTy() && value->getType()->getIntegerBitWidth() < storedBits) {
+            return reject();
+        }
+        if (expression->getOpcode() == Instruction::IntToPtr) {
+            if (auto* integer = dyn_cast<ConstantInt>(expression->getOperand(0)); integer && IsTokenDisplacement(integer->getZExtValue())) {
+                return {ConstantInt::get(i64, integer->getValue().zextOrTrunc(64)), {0, 1, 0}};
             }
         }
-        // A function token or native function id: window + displacement,
-        // with the window base read from the frozen config.
-        if (auto* ce = dyn_cast<ConstantExpr>(value); ce && ce->getOpcode() == Instruction::IntToPtr) {
-            if (auto* ci = dyn_cast<ConstantInt>(ce->getOperand(0)); ci && IsTokenDisplacement(ci->getZExtValue())) {
-                Function& function = *b.GetInsertBlock()->getParent();
-                auto* i64 = Type::getInt64Ty(function.getContext());
-                Value* window = MemoryViewBase(function);
-                Value* address = b.CreateAdd(window, ConstantInt::get(i64, ci->getZExtValue()), "capsule.token");
-                return b.CreateIntToPtr(address, value->getType(), "capsule.token.ptr");
+        ArenaInitializer result = ResolveArenaInitializer(module, expression->getOperand(0), image, offsets, storedBits);
+        if (auto* gep = dyn_cast<GEPOperator>(expression)) {
+            APInt offset(64, 0);
+            if (!gep->accumulateConstantOffset(module.getDataLayout(), offset)) {
+                return reject();
             }
+            result.Addend = ConstantExpr::getAdd(result.Addend, ConstantInt::get(i64, offset));
+            return result;
         }
-        if (!ReferencesZeroGlobal(value, offsets)) {
-            return value;
-        }
-        if (auto* expression = dyn_cast<ConstantExpr>(value)) {
-            Instruction* instruction = expression->getAsInstruction();
-            for (unsigned i = 0; i < instruction->getNumOperands(); ++i) {
-                if (auto* operand = dyn_cast<Constant>(instruction->getOperand(i)); operand && ReferencesZeroGlobal(operand, offsets)) {
-                    instruction->setOperand(i, MaterializeZeroConstant(b, operand, base, offsets));
-                }
+        unsigned opcode = expression->getOpcode();
+        if (opcode == Instruction::Add || opcode == Instruction::Sub) {
+            ArenaInitializer rhs = ResolveArenaInitializer(module, expression->getOperand(1), image, offsets, storedBits);
+            result.Addend = ConstantExpr::get(opcode, result.Addend, rhs.Addend);
+            for (unsigned index = 0; index < result.Bases.size(); ++index) {
+                result.Bases[index] += (opcode == Instruction::Add ? 1 : -1) * rhs.Bases[index];
             }
-            b.Insert(instruction);
-            return instruction;
+            return result;
         }
-
-        std::string description;
-        raw_string_ostream out(description);
-        value->print(out);
-        report_fatal_error(Twine("bpf-arena: cannot materialize sparse initializer ") + out.str());
+        if (opcode == Instruction::IntToPtr || opcode == Instruction::PtrToInt || opcode == Instruction::BitCast || opcode == Instruction::AddrSpaceCast) {
+            return result;
+        }
+        if (opcode == Instruction::Trunc) {
+            // The final store retains precisely the destination width (this
+            // includes LLVM's i32 address-difference lookup tables).
+            return result;
+        }
+        return reject();
     }
 
     void MaterializeZeroGlobalUses(Module& module, ArrayRef<GlobalVariable*> globals, const ZeroOffsets& offsets, GlobalVariable* arenaControl) {
@@ -3405,16 +3422,8 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 ConstantInt::get(Type::getInt64Ty(ctx), ~(FiberStackSize_ - 1)), "bpf.arena.base.aligned");
         }
         b.CreateStore(allocationScalar, virtualBase);
-        for (auto&& [g, fix] : fixups) {
-            auto&& [offset, value] = fix;
-            auto* slot = b.CreatePtrAdd(g, ConstantInt::get(Type::getInt64Ty(ctx), offset));
-            auto* store = b.CreateStore(MaterializeZeroConstant(b, value, allocationScalar, zeroOffsets), slot);
-            // A pointer initializer can live in a packed aggregate. The
-            // aggregate byte offset, not the pointer's natural ABI alignment,
-            // is the store contract. Preserve the strongest alignment the
-            // global base and this offset actually guarantee.
-            store->setAlignment(commonAlignment(g->getAlign().valueOrOne(), offset));
-        }
+
+        EmitArenaFixups(module, b, fixups, zeroOffsets, allocationScalar);
         b.CreateAtomicRMW(AtomicRMWInst::Xchg, ready, ConstantInt::get(readyType, 2), Align(4), AtomicOrdering::SequentiallyConsistent);
         b.CreateBr(done);
 
@@ -3461,6 +3470,101 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             BtfFunctionAddDebugInfo(debugBuilder, *entry, {BtfGetInt(debugBuilder, 32, true)});
             debugBuilder.finalize();
         }
+    }
+
+    void EmitArenaFixups(Module& module, IRBuilder<>& b, ArrayRef<std::pair<GlobalVariable*, std::pair<uint64_t, Constant*>>> fixups,
+        const ZeroOffsets& zeroOffsets, Value* allocationBase) {
+        if (fixups.empty()) {
+            return;
+        }
+        LLVMContext& ctx = module.getContext();
+        auto* i64 = Type::getInt64Ty(ctx);
+        auto* i32 = Type::getInt32Ty(ctx);
+        auto* ptr = PointerType::get(ctx, 0);
+        auto* rowType = StructType::get(ctx, {i64, i64});
+        GlobalVariable* image = fixups.front().first;
+        Constant* imageAddress = ConstantExpr::getPtrToInt(image, i64);
+
+        // A row is (destination - image, addend). Group by relocation base,
+        // width and alignment so each callback has one straight-line store.
+        // Both symbolic offsets refer to the same ELF arena section; the
+        // assembler resolves them, so the tables need no loader relocation.
+        using Group = std::array<int64_t, 5>;
+        std::map<Group, SmallVector<Constant*>> groups;
+        for (auto&& [global, fixup] : fixups) {
+            auto&& [offset, value] = fixup;
+            uint64_t width = module.getDataLayout().getTypeStoreSize(value->getType());
+            if (!isPowerOf2_64(width) || width > 8 || (value->getType()->isIntegerTy() && value->getType()->getIntegerBitWidth() != width * 8)) {
+                report_fatal_error("bpf-arena: pointer initializer must occupy 1, 2, 4 or 8 bytes", false);
+            }
+            ArenaInitializer resolved = ResolveArenaInitializer(module, value, image, zeroOffsets, width * 8);
+            Align alignment = std::min(Align(width), commonAlignment(global->getAlign().valueOrOne(), offset));
+            Constant* destination =
+                ConstantExpr::getAdd(ConstantExpr::getSub(ConstantExpr::getPtrToInt(global, i64), imageAddress), ConstantInt::get(i64, offset));
+            groups[{resolved.Bases[0], resolved.Bases[1], resolved.Bases[2], int64_t(width), int64_t(alignment.value())}].push_back(
+                ConstantStruct::get(rowType, {destination, resolved.Addend}));
+        }
+
+        // bpf_loop verifies the callback once instead of exploring thousands
+        // of iterations. It predates arena support (5.17 versus 6.9). The
+        // context and callback frame have constant size for any image size.
+        auto* contextType = StructType::get(ctx, {i64, i64});
+        IRBuilder<> entryBuilder(&*b.GetInsertBlock()->getParent()->getEntryBlock().getFirstInsertionPt());
+        Value* context = entryBuilder.CreateAlloca(contextType, nullptr, "fixup.context");
+        b.CreateStore(imageAddress, b.CreateStructGEP(contextType, context, 0));
+        Value* bases[] = {allocationBase, MemoryViewBase(*b.GetInsertBlock()->getParent()), imageAddress};
+        auto* callbackType = FunctionType::get(i64, {i32, ptr}, false);
+        auto* loopType = FunctionType::get(i64, {i32, ptr, ptr, i64}, false);
+        Constant* loop = ConstantExpr::getIntToPtr(ConstantInt::get(i64, BpfLoopHelperId), ptr);
+        unsigned index = 0;
+        for (auto&& [group, rows] : groups) {
+            if (rows.size() > (1u << 23)) {
+                report_fatal_error("bpf-arena: pointer initializer table exceeds bpf_loop's iteration limit", false);
+            }
+            std::string name = (Twine("__bpf_capsule_init_fixups.") + Twine(index++)).str();
+            auto* tableType = ArrayType::get(rowType, rows.size());
+            auto* table = new GlobalVariable(module, tableType, true, GlobalValue::InternalLinkage, ConstantArray::get(tableType, rows), name + ".table");
+            table->setSection(".rodata.bpfinit");
+            table->setAlignment(Align(8));
+            AttachGlobalDebugInfo(module, *table, table->getName());
+            Value* relocationBase = ConstantInt::get(i64, 0);
+            for (unsigned base = 0; base < 3; ++base) {
+                if (group[base]) {
+                    relocationBase = b.CreateAdd(relocationBase, b.CreateMul(bases[base], ConstantInt::getSigned(i64, group[base])));
+                }
+            }
+            b.CreateStore(relocationBase, b.CreateStructGEP(contextType, context, 1));
+
+            auto* callback = Function::Create(callbackType, Function::InternalLinkage, name, module);
+            callback->addFnAttr(Attribute::NoInline);
+            callback->getArg(0)->setName("index");
+            callback->getArg(1)->setName("context");
+            callback->getArg(1)->addAttr(Attribute::get(ctx, bpf::md::StackBacking));
+            auto* entry = BasicBlock::Create(ctx, "entry", callback);
+            auto* apply = BasicBlock::Create(ctx, "apply", callback);
+            auto* done = BasicBlock::Create(ctx, "done", callback);
+            IRBuilder<> cb(entry);
+            cb.CreateCondBr(cb.CreateICmpULT(callback->getArg(0), ConstantInt::get(i32, rows.size())), apply, done);
+            cb.SetInsertPoint(apply);
+            Value* row = cb.CreateGEP(tableType, table, {ConstantInt::get(i64, 0), cb.CreateZExt(callback->getArg(0), i64)});
+            Value* destination = cb.CreateLoad(i64, cb.CreateStructGEP(rowType, row, 0));
+            Value* addend = cb.CreateLoad(i64, cb.CreateStructGEP(rowType, row, 1));
+            Value* imageBase = cb.CreateLoad(i64, cb.CreateStructGEP(contextType, callback->getArg(1), 0));
+            Value* valueBase = cb.CreateLoad(i64, cb.CreateStructGEP(contextType, callback->getArg(1), 1));
+            Value* address = cb.CreateIntToPtr(cb.CreateAdd(imageBase, destination), ptr);
+            cb.CreateAlignedStore(cb.CreateTrunc(cb.CreateAdd(valueBase, addend), IntegerType::get(ctx, group[3] * 8)), address, Align(group[4]));
+            cb.CreateBr(done);
+            cb.SetInsertPoint(done);
+            cb.CreateRet(ConstantInt::get(i64, 0));
+            if (!module.debug_compile_units().empty()) {
+                DIBuilder db(module, false, *module.debug_compile_units_begin());
+                auto* opaque = db.createPointerType(db.createUnspecifiedType("void"), 64);
+                BtfFunctionAddDebugInfo(db, *callback, {BtfGetInt(db, 64, false), BtfGetInt(db, 32, false), opaque});
+                db.finalize();
+            }
+            b.CreateCall(loopType, loop, {ConstantInt::get(i32, rows.size()), callback, context, ConstantInt::get(i64, 0)});
+        }
+        bpf::stats() << "bpf-arena: " << fixups.size() << " pointer initializer fixups in " << groups.size() << " table callbacks\n";
     }
 
     void CastUnsafeAccesses(Function& func) {

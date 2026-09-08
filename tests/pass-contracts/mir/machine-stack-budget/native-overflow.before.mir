@@ -1,0 +1,83 @@
+--- |
+  source_filename = "machine-stack-budget-contract.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i32 @entry() section "syscall" {
+  entry:
+    %result = call i32 @initialize()
+    ret i32 %result
+  }
+  
+  define i32 @initialize() {
+  entry:
+    %result = call i32 @fixups()
+    ret i32 %result
+  }
+  
+  define i32 @fixups() {
+  entry:
+    ret i32 0
+  }
+...
+---
+name:            entry
+alignment:       1
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       8
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 1, $r10, -8
+    JAL @initialize, csr, implicit $r11, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+...
+---
+name:            initialize
+alignment:       1
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       64
+  maxAlignment:    8
+  adjustsStack:    true
+  hasCalls:        true
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 1, $r10, -64
+    JAL @fixups, csr, implicit $r11, implicit-def $r11, implicit-def $w0
+    RET implicit $w0
+...
+---
+name:            fixups
+alignment:       1
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           false
+noVRegs:         true
+hasFakeUses:     false
+frameInfo:
+  stackSize:       448
+  maxAlignment:    8
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    STD_imm 1, $r10, -448
+    $w0 = MOV_ri_32 0
+    RET implicit $w0
+...

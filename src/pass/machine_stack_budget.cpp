@@ -115,7 +115,7 @@ StringRef nodeName(const Node& node) {
     return node.Members.front()->getName();
 }
 
-std::string printPath(ArrayRef<Node> nodes, ArrayRef<unsigned> path) {
+std::string printPath(ArrayRef<Node> nodes, ArrayRef<unsigned> path, bool frameBytes = false) {
     std::string result;
     raw_string_ostream out(result);
     for (auto&& [index, node] : enumerate(path)) {
@@ -123,6 +123,9 @@ std::string printPath(ArrayRef<Node> nodes, ArrayRef<unsigned> path) {
             out << " -> ";
         }
         out << nodeName(nodes[node]);
+        if (frameBytes) {
+            out << '(' << nodes[node].FixedFloor << " bytes)";
+        }
     }
     return result;
 }
@@ -377,7 +380,7 @@ struct BPFMachineStackBudget final : ModulePass {
             if (prefix[node] != Invalid && prefix[node] > KernelStackBytes) {
                 SmallVector<unsigned, 16> path = prefixPath(node, prefixPredecessor);
                 report_fatal_error(Twine("bpf-machine-stack-budget: native BPF call path uses ") + Twine(prefix[node]) + " stack bytes; kernel limit is " +
-                        Twine(KernelStackBytes) + ": " + printPath(nodes, path),
+                        Twine(KernelStackBytes) + ": " + printPath(nodes, path, /*frameBytes=*/true),
                     /*gen_crash_diag=*/false);
             }
             if (prefix[node] == Invalid) {

@@ -11,6 +11,7 @@ target triple = "bpfel"
 @bpf_capsule_arena_control = global %arena_control zeroinitializer, section ".data.bpfctrl", align 8
 @arena = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @bpf_call_stack = internal global [4096 x i8] zeroinitializer, align 8, !bpf.fiber.stack.size !13
+@callback = internal global ptr @read, align 8
 @initialized = internal global i32 9, align 4
 @sparse = internal global [16 x i8] zeroinitializer, align 8
 @sparse_first = internal global i64 0, align 8

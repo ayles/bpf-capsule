@@ -330,6 +330,11 @@ capsule_mir_pass_contract(
     machine-stack-budget/nested-native
     ""
 )
+capsule_mir_pass_diagnostic(
+    machine-stack-budget-native-overflow
+    "bpf-machine-stack-budget"
+    machine-stack-budget/native-overflow
+)
 capsule_mir_pass_contract(machine-flatten-terminal-units "bpf-machine-flatten" machine-flatten/terminal-units "")
 capsule_mir_pass_contract(
     machine-flatten-finalize-local-returns
@@ -433,6 +438,7 @@ capsule_ir_pass_diagnostic(
     "--direct-map-regions=1"
 )
 capsule_ir_pass_diagnostic(memory-arena-layout-overflow "bpf-memory-arena" memory-arena/rejected-layout-overflow)
+capsule_ir_pass_diagnostic(memory-arena-narrow-initializer "bpf-memory-arena" memory-arena/rejected-narrow-initializer)
 capsule_ir_pass_diagnostic(memory-arena-control-state "bpf-memory-arena" memory-arena/rejected-control-state)
 capsule_ir_pass_diagnostic(memory-arena-stack-abi "bpf-memory-arena" memory-arena/rejected-stack-abi)
 capsule_ir_pass_diagnostic(stackify-native-yield "bpf-stackify" stackify/rejected-native-yield)

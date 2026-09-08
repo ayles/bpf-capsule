@@ -1,0 +1,1 @@
+bpf-machine-stack-budget: native BPF call path uses 544 stack bytes; kernel limit is 512: entry(32 bytes) -> initialize(64 bytes) -> fixups(448 bytes)

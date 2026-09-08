@@ -354,8 +354,11 @@ DIType* BtfGetByteArrayPointer(DIBuilder& builder, uint64_t sizeBytes) {
 void BtfFunctionAddDebugInfo(DIBuilder& debugBuilder, Function& func, ArrayRef<Metadata*> paramTypes) {
     auto debugCU = *func.getParent()->debug_compile_units_begin();
     auto debugType = debugBuilder.createSubroutineType(debugBuilder.getOrCreateTypeArray(paramTypes));
-    auto debugFunction = debugBuilder.createFunction(debugCU, func.getName(), func.getName(), debugCU->getFile(), 0, debugType, 0, DINode::FlagZero,
-        func.isDeclaration() ? DISubprogram::SPFlagZero : DISubprogram::SPFlagDefinition);
+    auto flags = func.isDeclaration() ? DISubprogram::SPFlagZero : DISubprogram::SPFlagDefinition;
+    if (func.hasLocalLinkage()) {
+        flags |= DISubprogram::SPFlagLocalToUnit;
+    }
+    auto debugFunction = debugBuilder.createFunction(debugCU, func.getName(), func.getName(), debugCU->getFile(), 0, debugType, 0, DINode::FlagZero, flags);
     SmallVector<Metadata*> retainedArguments;
     for (auto&& [i, arg] : enumerate(func.args())) {
         if (i + 1 >= debugFunction->getType()->getTypeArray().size()) {
