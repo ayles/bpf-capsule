@@ -6,9 +6,11 @@ target triple = "bpfel"
 @capsule_state = global i32 2
 @shared_state = global i32 3, section ".data.shared"
 @callback_table = global [1 x ptr] [ptr @capsule_callback]
+@native_callback_table = global [1 x ptr] [ptr @native_callback]
 
-define i32 @entry(i32 %value) section "xdp" {
+define i32 @entry(i32 %value, ptr %callback) section "xdp" {
 entry:
+  %called = call i64 %callback(i64 7)
   %native = load i32, ptr @native_state, align 4
   %managed = call i32 @capsule_root(i32 %value) [ "bpf.capsule.call"(i32 0) ]
   %shared = load i32, ptr @shared_state, align 4
@@ -36,4 +38,14 @@ define i32 @capsule_callback(i32 %value) {
 entry:
   %result = add i32 %value, 1
   ret i32 %result
+}
+
+define i64 @native_callback(i64 %value) {
+entry:
+  ret i64 %value
+}
+
+define i64 @direct_only(i64 %value) {
+entry:
+  ret i64 %value
 }

@@ -18,6 +18,7 @@
 #include "common.h"
 #include "runtime_symbols.h"
 
+#include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/IR/Constants.h>
@@ -39,10 +40,12 @@ bool IsBoundaryCall(const CallBase& call) {
     return call.getOperandBundle(bpf::md::CallBundle).has_value();
 }
 
-void AddIndirectTargets(Module& module, CallBase& call, SmallVectorImpl<Function*>& work) {
-    FunctionType* wanted = call.getFunctionType();
+using IndirectTargets = DenseMap<FunctionType*, SmallVector<Function*, 4>>;
+
+IndirectTargets FindIndirectTargets(Module& module) {
+    IndirectTargets targets;
     for (Function& candidate : module) {
-        if (candidate.isDeclaration() || bpf::IsEntryProgram(candidate) || IsCompilerDriver(candidate) || candidate.getFunctionType() != wanted) {
+        if (candidate.isDeclaration() || bpf::IsEntryProgram(candidate) || IsCompilerDriver(candidate)) {
             continue;
         }
         // A direct-only function cannot be the value in this indirect call.
@@ -51,8 +54,9 @@ void AddIndirectTargets(Module& module, CallBase& call, SmallVectorImpl<Function
                 /*IgnoreLLVMUsed=*/true)) {
             continue;
         }
-        work.push_back(&candidate);
+        targets[candidate.getFunctionType()].push_back(&candidate);
     }
+    return targets;
 }
 
 void AddReferencedFunctions(Value* value, SmallVectorImpl<Function*>& work, SmallPtrSetImpl<Value*>& seen) {
@@ -77,7 +81,7 @@ void AddReferencedFunctions(Value* value, SmallVectorImpl<Function*>& work, Smal
     }
 }
 
-bool Reach(Module& module, ArrayRef<Function*> roots, bool native, SmallPtrSetImpl<Function*>& reached) {
+bool Reach(const IndirectTargets& targets, ArrayRef<Function*> roots, bool native, SmallPtrSetImpl<Function*>& reached) {
     SmallVector<Function*> work(roots.begin(), roots.end());
     while (!work.empty()) {
         Function* func = work.pop_back_val();
@@ -114,7 +118,10 @@ bool Reach(Module& module, ArrayRef<Function*> roots, bool native, SmallPtrSetIm
                 // A numbered BPF helper is represented as a call through a
                 // constant inttoptr. It is not an indirect C call and cannot
                 // target any address-taken function in this module.
-                AddIndirectTargets(module, *call, work);
+                auto found = targets.find(call->getFunctionType());
+                if (found != targets.end()) {
+                    work.append(found->second.begin(), found->second.end());
+                }
             }
         }
     }
@@ -185,7 +192,10 @@ struct CapsuleDomainsPass : public PassInfoMixin<CapsuleDomainsPass> {
 
         SmallPtrSet<Function*, 32> native;
         SmallPtrSet<Function*, 32> capsule;
-        if (!Reach(module, nativeRoots, /*native=*/true, native)) {
+        // Reachability does not change the IR. Index once for both closures,
+        // retaining module order within each type's list of possible callees.
+        IndirectTargets targets = FindIndirectTargets(module);
+        if (!Reach(targets, nativeRoots, /*native=*/true, native)) {
             return PreservedAnalyses::all();
         }
 
@@ -205,7 +215,7 @@ struct CapsuleDomainsPass : public PassInfoMixin<CapsuleDomainsPass> {
                 capsuleRoots.push_back(&func);
             }
         }
-        if (!Reach(module, capsuleRoots, /*native=*/false, capsule)) {
+        if (!Reach(targets, capsuleRoots, /*native=*/false, capsule)) {
             return PreservedAnalyses::all();
         }
 
