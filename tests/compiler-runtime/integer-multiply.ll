@@ -12,3 +12,10 @@ define {i64, i1} @multiply_overflow(i64 %a, i64 %b) {
   %product = call {i64, i1} @llvm.umul.with.overflow.i64(i64 %a, i64 %b)
   ret {i64, i1} %product
 }
+
+declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)
+
+define {i64, i1} @multiply_signed_overflow(i64 %a, i64 %b) {
+  %product = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %a, i64 %b)
+  ret {i64, i1} %product
+}

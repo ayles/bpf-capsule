@@ -9,9 +9,13 @@
 __attribute__((always_inline)) __int128 __multi3(__int128, __int128);
 __attribute__((always_inline)) static __int128 __mulddi3(uint64_t, uint64_t);
 
+// Keep both layers of checked signed multiplication call-free as well.
+__attribute__((always_inline)) int64_t __mulodi4(int64_t, int64_t, int*);
+__attribute__((always_inline)) static int64_t __muloXi4(int64_t, int64_t, int*);
+
 // Wide division stays managed: BPF returns only r0, not an i128 pair;
-// __udivmodti4 and __mulodi4 also have output pointers that our global scalar
-// nosuspend ABI cannot accept. compiler-rt's division loops pay managed
+// __udivmodti4 also has an output pointer that our global scalar nosuspend
+// ABI cannot accept. compiler-rt's division loops pay managed
 // dispatches; the integer mix measured ~5%/10% slower on arena/fixed than the
 // former loop-free helpers. Revisit with a real wide-integer workload.
 

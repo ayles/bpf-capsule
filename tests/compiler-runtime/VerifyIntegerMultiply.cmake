@@ -10,6 +10,6 @@ execute_process(
 )
 execute_process(COMMAND "${LLVM_DIS}" "${WORK}/multiply.bc" -o "${WORK}/multiply.ll" COMMAND_ERROR_IS_FATAL ANY)
 file(READ "${WORK}/multiply.ll" ir)
-if(ir MATCHES "call[^\n]*@__(multi3|mulddi3)" OR ir MATCHES "mul i128")
-    message(FATAL_ERROR "Wide multiplication still needs a call: ${WORK}/multiply.ll")
+if(ir MATCHES "call[^\n]*@__(multi3|mulddi3|mulodi4|muloXi4)" OR ir MATCHES "mul i128")
+    message(FATAL_ERROR "Multiplication still needs a call: ${WORK}/multiply.ll")
 endif()
