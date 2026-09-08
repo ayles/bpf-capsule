@@ -625,28 +625,16 @@ struct FinalizeAtomicsPass : public PassInfoMixin<FinalizeAtomicsPass> {
 } // namespace
 
 bool RegisterAtomicsPasses(llvm::StringRef name, llvm::FunctionPassManager& manager) {
-    if (name == "bpf-lower-managed-atomics") {
-        manager.addPass(LowerManagedAtomicsPass());
+    if (name == "bpf-lower-managed-atomics" || name == "bpf-lower-managed-atomics<fixed>") {
+        manager.addPass(LowerManagedAtomicsPass(name != "bpf-lower-managed-atomics<fixed>"));
         return true;
     }
-    if (name == "bpf-lower-managed-atomics-fixed") {
-        manager.addPass(LowerManagedAtomicsPass(false));
+    if (name == "bpf-validate-atomics" || name == "bpf-validate-atomics<managed>") {
+        manager.addPass(ValidateAtomicsPass(name == "bpf-validate-atomics<managed>"));
         return true;
     }
-    if (name == "bpf-validate-atomics") {
-        manager.addPass(ValidateAtomicsPass());
-        return true;
-    }
-    if (name == "bpf-validate-managed-atomics") {
-        manager.addPass(ValidateAtomicsPass(true));
-        return true;
-    }
-    if (name == "bpf-finalize-atomics") {
-        manager.addPass(FinalizeAtomicsPass());
-        return true;
-    }
-    if (name == "bpf-finalize-atomics-legacy") {
-        manager.addPass(FinalizeAtomicsPass(true));
+    if (name == "bpf-finalize-atomics" || name == "bpf-finalize-atomics<legacy>") {
+        manager.addPass(FinalizeAtomicsPass(name == "bpf-finalize-atomics<legacy>"));
         return true;
     }
     return false;

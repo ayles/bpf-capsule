@@ -129,21 +129,21 @@ capsule_ir_pass_contract(lower-sdiv "bpf-lower-sdiv" lower-sdiv/basic)
 capsule_ir_pass_contract(lower-arena-sext "function(bpf-lower-arena-sext)" lower-arena-sext/basic)
 capsule_ir_pass_contract(internalize "bpf-internalize" internalize/basic)
 capsule_ir_pass_contract(finalize-atomics "function(bpf-finalize-atomics)" atomics/finalize-load-store)
-capsule_ir_pass_contract(finalize-atomics-legacy "function(bpf-finalize-atomics-legacy)" atomics/finalize-legacy)
+capsule_ir_pass_contract(finalize-atomics-legacy "function(bpf-finalize-atomics<legacy>)" atomics/finalize-legacy)
 capsule_ir_pass_diagnostic(
     finalize-atomics-legacy-fetch
-    "function(bpf-finalize-atomics-legacy)"
+    "function(bpf-finalize-atomics<legacy>)"
     atomics/rejected-legacy-fetch
 )
 capsule_ir_pass_diagnostic(
     finalize-atomics-legacy-cas
-    "function(bpf-finalize-atomics-legacy)"
+    "function(bpf-finalize-atomics<legacy>)"
     atomics/rejected-legacy-cas
 )
 capsule_ir_pass_contract(lower-managed-atomics "function(bpf-lower-managed-atomics)" atomics/lower-managed)
 capsule_ir_pass_contract(
     lower-managed-atomics-fixed
-    "function(bpf-lower-managed-atomics-fixed)"
+    "function(bpf-lower-managed-atomics<fixed>)"
     atomics/lower-managed-fixed
 )
 capsule_ir_pass_contract(scalarize-agg "function(bpf-scalarize-agg)" scalarize-agg/nested)
@@ -153,7 +153,7 @@ capsule_ir_pass_contract(remove-suspend-barriers "bpf-remove-suspend-barriers" s
 capsule_ir_pass_contract(validate-atomics-accepted "function(bpf-validate-atomics)" atomics/validate-accepted)
 capsule_ir_pass_diagnostic(
     validate-atomics-sectioned-subword
-    "function(bpf-lower-managed-atomics,bpf-validate-managed-atomics)"
+    "function(bpf-lower-managed-atomics,bpf-validate-atomics<managed>)"
     atomics/rejected-sectioned-subword
 )
 capsule_ir_pass_contract(validate-no-float-accepted "function(bpf-validate-no-float)" validate-no-float/accepted)
@@ -364,7 +364,7 @@ capsule_ir_pass_diagnostic(validate-atomics-ordering "function(bpf-validate-atom
 capsule_ir_pass_diagnostic(validate-atomics-alignment "function(bpf-validate-atomics)" atomics/rejected-alignment)
 capsule_ir_pass_diagnostic(
     validate-managed-atomics-alignment
-    "function(bpf-validate-managed-atomics)"
+    "function(bpf-validate-atomics<managed>)"
     atomics/rejected-managed-alignment
 )
 capsule_ir_pass_diagnostic(validate-no-float-rejected "function(bpf-validate-no-float)" validate-no-float/rejected)

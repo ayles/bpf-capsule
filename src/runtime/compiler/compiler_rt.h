@@ -9,6 +9,12 @@
 __attribute__((always_inline)) __int128 __multi3(__int128, __int128);
 __attribute__((always_inline)) static __int128 __mulddi3(uint64_t, uint64_t);
 
+// Wide division stays managed: BPF returns only r0, not an i128 pair;
+// __udivmodti4 and __mulodi4 also have output pointers that our global scalar
+// nosuspend ABI cannot accept. compiler-rt's division loops pay managed
+// dispatches; the integer mix measured ~5%/10% slower on arena/fixed than the
+// former loop-free helpers. Revisit with a real wide-integer workload.
+
 #define CAPSULE_BUILTIN __attribute__((annotate("capsule.nosuspend"), noinline))
 
 // Subtraction and negation stay inlineable: upstream implements them as a

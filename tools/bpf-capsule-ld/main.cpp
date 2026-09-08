@@ -151,9 +151,9 @@ std::string capsuleFinalPipeline() {
     std::string pipeline = "function(bpf-expand-mem),bpf-internalize,globaldce,function(bpf-validate-no-float),"
                            "function(bpf-normalize-irreducible,fix-irreducible),bpf-capsule-domains,bpf-remove-suspend-barriers,";
     if (ManagedAtomics) {
-        pipeline += arena ? "function(bpf-lower-managed-atomics)," : "function(bpf-lower-managed-atomics-fixed),";
+        pipeline += arena ? "function(bpf-lower-managed-atomics)," : "function(bpf-lower-managed-atomics<fixed>),";
     }
-    pipeline += "function(" + std::string(ManagedAtomics ? "bpf-validate-managed-atomics" : "bpf-validate-atomics") + "),";
+    pipeline += "function(" + std::string(ManagedAtomics ? "bpf-validate-atomics<managed>" : "bpf-validate-atomics") + "),";
     pipeline += arena ? (IndirectJumps ? "bpf-stackify-indirect," : "bpf-stackify,") : "bpf-stackify-fixed,";
     pipeline +=
         // Stackify introduces the entry-to-driver call after whole-program O2.
@@ -172,7 +172,7 @@ std::string capsuleFinalPipeline() {
     if (arena && !NativeArenaSignedLoads) {
         pipeline += "function(bpf-lower-arena-sext),";
     }
-    pipeline += ManagedAtomics || AllocatorLock == AllocatorLockMode::Atomic ? "function(bpf-finalize-atomics)," : "function(bpf-finalize-atomics-legacy),";
+    pipeline += ManagedAtomics || AllocatorLock == AllocatorLockMode::Atomic ? "function(bpf-finalize-atomics)," : "function(bpf-finalize-atomics<legacy>),";
     if (!NativeShift63) {
         pipeline += "function(bpf-split-shift63),";
     }
