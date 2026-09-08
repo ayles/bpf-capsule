@@ -215,11 +215,13 @@ extern int __bpf_capsule_trampoline_step(uint32_t fiber, struct __bpf_capsule_fi
 // calls use a parallel typed driver that keeps the exact verifier provenance
 // in BPF registers/native spills through every global subprogram call. The
 // compiler supplies the step definition and selects this driver only for an
-// explicit capsule_call_ctx/capsule_continue_ctx boundary.
+// explicit capsule_call_ctx/capsule_continue_ctx boundary. The context's
+// real BTF type comes from the entry that lends it; stackify rebuilds these
+// signatures with it, so the C declarations name it as an untyped pointer.
 #if BPF_CAPSULE_FEATURE_ARENA
-extern int __bpf_capsule_trampoline_ctx_step(struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control);
+extern int __bpf_capsule_trampoline_ctx_step(void* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control);
 #else
-extern int __bpf_capsule_trampoline_ctx_step(struct xdp_md* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, void* stack_base);
+extern int __bpf_capsule_trampoline_ctx_step(void* ctx, uint32_t fiber, struct __bpf_capsule_fiber_control* fiber_control, void* stack_base);
 #endif
 
 // Iteration out of nothing but a bounded loop and a global function.
@@ -324,8 +326,7 @@ __BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((always_inline)) int 
 // the ordinary optimizer and global DCE have run. Pin the typed pair until
 // that decision; Stackify removes the unused pair from the final object.
 __BPF_CAPSULE_FN_CLASS("capsule.trampoline")
-__attribute__((used, noinline)) int __bpf_capsule_trampoline_ctx_l1(
-    struct xdp_md* ctx, uint32_t fiber __BPF_CAPSULE_CONTROL_PARAMETER __BPF_CAPSULE_STACK_PARAMETER) {
+__attribute__((used, noinline)) int __bpf_capsule_trampoline_ctx_l1(void* ctx, uint32_t fiber __BPF_CAPSULE_CONTROL_PARAMETER __BPF_CAPSULE_STACK_PARAMETER) {
     for (int i = 0; i < BPF_CAPSULE_DRIVE_LEVEL; i++) {
         int status = __bpf_capsule_trampoline_ctx_step(ctx, fiber __BPF_CAPSULE_CONTROL_ARGUMENT __BPF_CAPSULE_STACK_ARGUMENT);
         if (status) {
@@ -335,7 +336,7 @@ __attribute__((used, noinline)) int __bpf_capsule_trampoline_ctx_l1(
     return 0;
 }
 
-__BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((used, always_inline)) int __bpf_capsule_trampoline_ctx(struct xdp_md* ctx, uint32_t fiber) {
+__BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((used, always_inline)) int __bpf_capsule_trampoline_ctx(void* ctx, uint32_t fiber) {
     struct __bpf_capsule_fiber_control* fiber_control = __bpf_capsule_fiber_control(fiber);
 #if !BPF_CAPSULE_FEATURE_ARENA
     void* stack_base = __bpf_capsule_stack_base(fiber, fiber_control);
@@ -739,7 +740,7 @@ __attribute__((always_inline)) struct capsule_result __bpf_capsule_continue_ctx(
     if (!__bpf_capsule_prepare_continue(&result, continuation, &fiber)) {
         return result;
     }
-    (void)__bpf_capsule_trampoline_ctx((struct xdp_md*)context, fiber);
+    (void)__bpf_capsule_trampoline_ctx(context, fiber);
     return __bpf_capsule_finish_continue(result, fiber, output, output_size, output_alignment);
 }
 

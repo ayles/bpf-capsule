@@ -235,7 +235,7 @@ void embedFreplaceRoots(Module& module) {
         }
     }
     if (roots.empty()) {
-        fail("--freplace needs a program large enough to have physical managed step roots");
+        fail("--freplace requires managed code");
     }
 
     for (Function* target : roots) {

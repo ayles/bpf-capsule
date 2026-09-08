@@ -14,9 +14,6 @@ execute_process(
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "cannot inspect ${OBJECT}: ${error}")
 endif()
-if(relocations MATCHES "bpf_spill_scratch")
-    message(FATAL_ERROR "large-pressure object revived the removed spill-scratch map")
-endif()
 if(
     NOT relocations MATCHES "bpf_call_stack"
     AND NOT relocations MATCHES "bpf_capsule_arena_control"

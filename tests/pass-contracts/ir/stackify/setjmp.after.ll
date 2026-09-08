@@ -79,50 +79,22 @@ entry:
 }
 
 ; Function Attrs: noinline
-define i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr "bpf.capsule.control" %fiber_control) #2 !bpf.capsule !2 !bpf.capsule.allocation.unit !3 !bpf.capsule.stack.size !0 {
+define i32 @bpf.unit.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !bpf.capsule !2 !bpf.capsule.allocation.unit !3 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !4 {
 unit.entry:
-  %0 = icmp ne ptr %fiber_control, null
-  br i1 %0, label %unit.control.ready, label %unit.control.missing
-
-step.lifecycle:                                   ; preds = %unit.control.ready
-  %fiber.resume.region.id1 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  %resume.region.id = load i32, ptr %fiber.resume.region.id1, align 4
-  %1 = icmp eq i32 %resume.region.id, -1
-  %2 = icmp eq i32 %resume.region.id, 0
-  %3 = or i1 %2, %1
-  br i1 %3, label %step.terminal, label %unit.dispatch
-
-step.terminal:                                    ; preds = %step.lifecycle
-  br i1 %1, label %step.completed, label %step.stop
-
-step.completed:                                   ; preds = %step.terminal
-  store i32 0, ptr %fiber.resume.region.id1, align 4
-  br label %step.stop
-
-step.stop:                                        ; preds = %step.completed, %step.terminal
-  ret i32 1
-
-unit.dispatch:                                    ; preds = %step.lifecycle
-  %fiber.resume.region.id2 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  %resume.region.id3 = load i32, ptr %fiber.resume.region.id2, align 4
-  %region.key = and i32 %resume.region.id3, 16776960
-  br label %unit.dispatch4
-
-unit.control.ready:                               ; preds = %unit.entry
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   %frame.fp = load i64, ptr %fiber.fp, align 8
   %frame.addr = inttoptr i64 %frame.fp to ptr
   call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %fiber_control)
-  br label %step.lifecycle
+  br label %unit.dispatch
 
-unit.control.missing:                             ; preds = %unit.entry
-  ret i32 1
+unit.dispatch:                                    ; preds = %unit.entry
+  br label %unit.dispatch1
 
 root.prologue:                                    ; preds = %unit.test.left
   %frame.sp = sub i64 %frame.fp, 48
   %slice.offset = and i64 %frame.fp, 262143
-  %4 = icmp ult i64 %slice.offset, 131120
-  br i1 %4, label %root.prologue.overflow, label %entry
+  %0 = icmp ult i64 %slice.offset, 131120
+  br i1 %0, label %root.prologue.overflow, label %entry
 
 entry:                                            ; preds = %root.prologue
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
@@ -130,32 +102,32 @@ entry:                                            ; preds = %root.prologue
   %env.slot1 = getelementptr i8, ptr %frame.addr, i64 -48
   %setjmp.slot = getelementptr i8, ptr %frame.addr, i64 -16
   store i32 0, ptr %setjmp.slot, align 4
-  %5 = getelementptr i8, ptr %env.slot1, i64 0
-  store i32 512, ptr %5, align 4
+  %1 = getelementptr i8, ptr %env.slot1, i64 0
+  store i32 512, ptr %1, align 4
   %fiber.sp4 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
-  %6 = load i64, ptr %fiber.sp4, align 8
-  %7 = getelementptr i8, ptr %env.slot1, i64 8
-  store i64 %6, ptr %7, align 8
-  %8 = getelementptr i8, ptr %env.slot1, i64 16
-  store i64 %frame.fp, ptr %8, align 8
-  %9 = ptrtoint ptr %setjmp.slot to i64
-  %10 = getelementptr i8, ptr %env.slot1, i64 24
-  store i64 %9, ptr %10, align 8
+  %2 = load i64, ptr %fiber.sp4, align 8
+  %3 = getelementptr i8, ptr %env.slot1, i64 8
+  store i64 %2, ptr %3, align 8
+  %4 = getelementptr i8, ptr %env.slot1, i64 16
+  store i64 %frame.fp, ptr %4, align 8
+  %5 = ptrtoint ptr %setjmp.slot to i64
+  %6 = getelementptr i8, ptr %env.slot1, i64 24
+  store i64 %5, ptr %6, align 8
   br label %entry.setjmp.resume
 
 entry.setjmp.resume:                              ; preds = %unit.test.right, %entry
-  %11 = getelementptr i8, ptr %frame.addr, i64 -16
-  %setjmp.result = load i32, ptr %11, align 4
+  %7 = getelementptr i8, ptr %frame.addr, i64 -16
+  %setjmp.result = load i32, ptr %7, align 4
   %first = icmp eq i32 %setjmp.result, 0
   br i1 %first, label %jump, label %done
 
 done:                                             ; preds = %entry.setjmp.resume
   %result.slot = getelementptr i8, ptr %frame.addr, i64 16
   store i32 %setjmp.result, ptr %result.slot, align 8
-  %12 = getelementptr i8, ptr %frame.addr, i64 8
-  %return.region.id = load i32, ptr %12, align 4
-  %13 = getelementptr i8, ptr %frame.addr, i64 0
-  %saved.fp = load i64, ptr %13, align 8
+  %8 = getelementptr i8, ptr %frame.addr, i64 8
+  %return.region.id = load i32, ptr %8, align 4
+  %9 = getelementptr i8, ptr %frame.addr, i64 0
+  %saved.fp = load i64, ptr %9, align 8
   %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   store i32 %return.region.id, ptr %fiber.resume.region.id, align 4
   %return.sp = add i64 %frame.fp, 16
@@ -167,42 +139,112 @@ done:                                             ; preds = %entry.setjmp.resume
 
 jump:                                             ; preds = %entry.setjmp.resume
   %env.slot = getelementptr i8, ptr %frame.addr, i64 -48
-  %14 = getelementptr i8, ptr %frame.addr, i64 24
-  %value = load i32, ptr %14, align 4
-  %15 = icmp eq i32 %value, 0
-  %longjmp.value = select i1 %15, i32 1, i32 %value
-  %16 = getelementptr i8, ptr %env.slot, i64 24
-  %17 = load i64, ptr %16, align 8
-  %18 = inttoptr i64 %17 to ptr
-  store i32 %longjmp.value, ptr %18, align 4
-  %19 = getelementptr i8, ptr %env.slot, i64 8
-  %20 = load i64, ptr %19, align 8
+  %10 = getelementptr i8, ptr %frame.addr, i64 24
+  %value = load i32, ptr %10, align 4
+  %11 = icmp eq i32 %value, 0
+  %longjmp.value = select i1 %11, i32 1, i32 %value
+  %12 = getelementptr i8, ptr %env.slot, i64 24
+  %13 = load i64, ptr %12, align 8
+  %14 = inttoptr i64 %13 to ptr
+  store i32 %longjmp.value, ptr %14, align 4
+  %15 = getelementptr i8, ptr %env.slot, i64 8
+  %16 = load i64, ptr %15, align 8
   %fiber.sp5 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
-  store i64 %20, ptr %fiber.sp5, align 8
-  %21 = getelementptr i8, ptr %env.slot, i64 16
-  %22 = load i64, ptr %21, align 8
+  store i64 %16, ptr %fiber.sp5, align 8
+  %17 = getelementptr i8, ptr %env.slot, i64 16
+  %18 = load i64, ptr %17, align 8
   %fiber.fp6 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
-  store i64 %22, ptr %fiber.fp6, align 8
-  %23 = getelementptr i8, ptr %env.slot, i64 0
-  %24 = load i32, ptr %23, align 4
+  store i64 %18, ptr %fiber.fp6, align 8
+  %19 = getelementptr i8, ptr %env.slot, i64 0
+  %20 = load i32, ptr %19, align 4
   %fiber.resume.region.id7 = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
-  store i32 %24, ptr %fiber.resume.region.id7, align 4
+  store i32 %20, ptr %fiber.resume.region.id7, align 4
   ret i32 0
 
 root.prologue.overflow:                           ; preds = %root.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %25 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
+  %21 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069)
   ret i32 1
 
-unit.dispatch4:                                   ; preds = %unit.dispatch
-  %26 = icmp ult i32 %region.key, 512
-  br i1 %26, label %unit.test.left, label %unit.test.right
+unit.dispatch1:                                   ; preds = %unit.dispatch
+  %22 = icmp ult i32 %region, 512
+  br i1 %22, label %unit.test.left, label %unit.test.right
 
-unit.test.left:                                   ; preds = %unit.dispatch4
+unit.test.left:                                   ; preds = %unit.dispatch1
   br label %root.prologue
 
-unit.test.right:                                  ; preds = %unit.dispatch4
+unit.test.right:                                  ; preds = %unit.dispatch1
   br label %entry.setjmp.resume
+}
+
+; Function Attrs: noinline
+define i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr "bpf.capsule.control" %fiber_control) #2 {
+entry:
+  %0 = icmp ne ptr %fiber_control, null
+  br i1 %0, label %control.ready, label %control.missing
+
+iterate:                                          ; preds = %control.ready
+  %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
+  %resume.region.id = load i32, ptr %fiber.resume.region.id, align 4
+  %1 = icmp eq i32 %resume.region.id, -1
+  %2 = icmp eq i32 %resume.region.id, 0
+  %3 = or i1 %2, %1
+  br i1 %3, label %terminal, label %route
+
+control.ready:                                    ; preds = %entry
+  br label %iterate
+
+control.missing:                                  ; preds = %entry
+  ret i32 1
+
+route:                                            ; preds = %iterate
+  br label %dispatch
+
+dispatch:                                         ; preds = %route
+  %step.index = and i32 %resume.region.id, 255
+  %region.key = and i32 %resume.region.id, 16776960
+  switch i32 %step.index, label %bad.id [
+    i32 0, label %bpf.dispatch.output.scalar.0
+  ]
+
+bpf.dispatch.output.scalar.0:                     ; preds = %dispatch
+  %4 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region.key)
+  ret i32 %4
+
+terminal:                                         ; preds = %iterate
+  br i1 %1, label %completed, label %done
+
+completed:                                        ; preds = %terminal
+  store i32 0, ptr %fiber.resume.region.id, align 4
+  br label %done
+
+done:                                             ; preds = %completed, %terminal
+  ret i32 1
+
+bad.id:                                           ; preds = %dispatch
+  %5 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
+  ret i32 1
+}
+
+; Function Attrs: noinline
+define i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !bpf.capsule.flatten.root !4 {
+entry:
+  %0 = icmp ne ptr %fiber_control, null
+  br i1 %0, label %dispatch, label %bad.id
+
+dispatch:                                         ; preds = %entry
+  br label %unit.route
+
+unit.route:                                       ; preds = %dispatch
+  br label %bpf.unit.0
+
+bad.id:                                           ; preds = %entry
+  %1 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
+  ret i32 1
+
+bpf.unit.0:                                       ; preds = %unit.route
+  %2 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region)
+  ret i32 %2
 }
 
 attributes #0 = { "capsule.trampoline" }
@@ -215,3 +257,4 @@ attributes #2 = { noinline "capsule.trampoline" }
 !1 = !{i32 1, !"bpf.capsule.classes", i32 1}
 !2 = !{}
 !3 = !{i32 0}
+!4 = !{i32 2}

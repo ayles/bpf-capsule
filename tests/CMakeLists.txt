@@ -129,13 +129,25 @@ set(test_source_dir "${CMAKE_CURRENT_SOURCE_DIR}")
 # software stack), proving cc -> ld -> skeleton -> configure -> load -> run.
 # ============================================================================
 
-capsule_test_object(smoke SOURCES pipeline-smoke/smoke_bpf.c INCLUDE_DIRECTORIES ${test_source_dir}/pipeline-smoke)
+set(smoke_link_options)
+if(BPF_CAPSULE_TEST_FREPLACE)
+    list(APPEND smoke_link_options --freplace)
+endif()
+capsule_test_object(
+    smoke
+    SOURCES pipeline-smoke/smoke_bpf.c
+    INCLUDE_DIRECTORIES ${test_source_dir}/pipeline-smoke
+    LINK_OPTIONS ${smoke_link_options}
+)
 capsule_gtest_host(
     smoke_test
     SOURCES pipeline-smoke/smoke_test.cc
     SKELETONS smoke_skeleton
     INCLUDE_DIRECTORIES ${test_source_dir}/pipeline-smoke
 )
+if(BPF_CAPSULE_TEST_FREPLACE)
+    target_compile_definitions(smoke_test PRIVATE BPF_CAPSULE_TEST_FREPLACE=1)
+endif()
 
 # Source-level adversarial register pressure. The generated function keeps
 # 1,200 scalar values live across a late load, so the ordinary BPF allocator

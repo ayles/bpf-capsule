@@ -67,7 +67,6 @@ inline constexpr llvm::StringLiteral FreplaceRoots{"bpf.capsule.freplace.roots"}
 inline constexpr llvm::StringLiteral FiberStackSize{"bpf.fiber.stack.size"};
 inline constexpr llvm::StringLiteral OutcomeStore{"bpf.capsule.outcome.store"};
 inline constexpr llvm::StringLiteral SectionedBounded{"bpf.capsule.sectioned.bounded"};
-inline constexpr llvm::StringLiteral Init{"bpf.capsule.init"};
 
 } // namespace bpf::md
 

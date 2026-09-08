@@ -14,6 +14,11 @@ TEST(PipelineSmoke, RecursiveFibComputesInKernel) {
     config.fiber_count = 1;
     ASSERT_EQ(bpf_capsule_configure(&capsule, skeleton->obj, config), 0) << strerror(errno);
     ASSERT_EQ(smoke__load(skeleton), 0) << "smoke object did not load: " << strerror(errno);
+#if BPF_CAPSULE_TEST_FREPLACE
+    ASSERT_EQ(bpf_capsule_initialize(&capsule), -1);
+    ASSERT_EQ(errno, ENOLINK);
+    ASSERT_EQ(bpf_capsule_attach_freplace(&capsule, skeleton->skeleton->data, skeleton->skeleton->data_sz), 0) << strerror(errno);
+#endif
     ASSERT_EQ(bpf_capsule_initialize(&capsule), 0) << strerror(errno);
 
     volatile auto* state = &skeleton->data_smoke->smoke_state;

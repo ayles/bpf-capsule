@@ -28,7 +28,6 @@ void run_pool_phase(struct bpf_object* object, const char* name) {
 }
 
 void expect_backend_layout(struct bpf_object* object, unsigned int fiber_count) {
-    ASSERT_EQ(bpf_object__find_map_by_name(object, "bpf_capsule_stack_backing"), nullptr);
     struct bpf_map* config_map = bpf_object__find_map_by_name(object, BPF_CAPSULE_SECTION_CONFIG);
     size_t config_size = 0;
     const struct __bpf_capsule_object_config* config =

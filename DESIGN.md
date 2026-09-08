@@ -353,9 +353,9 @@ allocates registers, and lowers frames for each unit independently. The units
 are compiler temporaries: MachineFlatten removes their calls, symbols, BTF
 records, and function slots before the object is emitted.
 
-The final owners are **merge roots**, which are real BPF subprograms. A small
-verifier-ABI class merges directly into its public step. For a large class, the
-compiler derives a balanced power-of-two root count from total lowered size,
+The final owners are **merge roots**, which are real BPF subprograms. Every
+public step dispatches to roots, including programs with a single allocation
+unit. The compiler derives a balanced power-of-two root count from lowered size,
 capped by the units and remaining kernel function slots. This is necessary
 because the kernel's stack-liveness fixed point revisits the whole containing
 subprogram as new stack marks appear; one huge

@@ -114,9 +114,6 @@ constexpr uint64_t MaxUnitLoad = 3500;
 constexpr unsigned ChunkTripLimit = 8;
 constexpr unsigned NativeLinearTripLimit = 64;
 
-cl::opt<bool> TestSuspendAllLoops(
-    "bpf-test-suspend-all-loops", cl::desc("Force every managed loop through a suspension edge for tests"), cl::init(false), cl::Hidden);
-
 bool IsLateMemoryIntrinsic(const Function& func) {
     return func.getName() == bpf::sym::HeapStart || func.getName() == bpf::sym::HeapSize;
 }
@@ -346,7 +343,6 @@ struct AllocationUnit {
     Function* Func = nullptr;
     DISubprogram* Subprogram = nullptr;
     BasicBlock* Dispatch = nullptr;
-    bool Merged = false; // this unit IS the dispatcher step for its class
     Value* Fp = nullptr;
     Value* Frame = nullptr;
     SmallVector<ManagedFunction::State> States;
@@ -1213,16 +1209,6 @@ private:
         return true;
     }
 
-    bool IsCapsuleRoot(Function& func) const {
-        for (Use& use : func.uses()) {
-            auto* call = dyn_cast<CallBase>(use.getUser());
-            if (call && call->isCallee(&use) && call->getOperandBundle(bpf::md::CallBundle)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     // Everything that survives inlining becomes managed. The only ordinary
     // scalar subprograms left are explicitly proven nosuspend operations and
     // the generated runtime machinery.
@@ -1845,46 +1831,16 @@ private:
         Units_.resize(unitCount);
         for (auto&& [idx, unit] : enumerate(Units_)) {
             unit.BorrowedContext = idx >= scalarUnits;
-            // A class with a single unit takes over the dispatcher's step
-            // symbol outright: it has the step's exact signature, so the
-            // driver loop calls it directly — one call level, one BPF
-            // frame, and one routing layer less per dispatch. Its lifecycle
-            // preamble is added when the dispatch is finished.
-            // Merging is legal only when the merged unit is the sole
-            // unit its driver can dispatch. The scalar step never
-            // dispatches borrowed units, so a lone scalar unit always
-            // merges; the borrowed step dispatches every unit (that is how
-            // ctx-driven computations reach scalar regions), so the
-            // borrowed unit merges only when it is the only unit at all.
-            unit.Merged = unit.BorrowedContext ? (borrowedUnits == 1 && scalarUnits == 0) : (scalarUnits == 1);
-            StringRef stepName = unit.BorrowedContext ? bpf::sym::TrampolineCtxStep : bpf::sym::TrampolineStep;
-            Function* stepDecl = nullptr;
-            if (unit.Merged) {
-                stepDecl = Module_.getFunction(stepName);
-                if (stepDecl && !stepDecl->isDeclaration()) {
-                    report_fatal_error(Twine("stackify: ") + stepName + " already defined");
-                }
-                if (stepDecl) {
-                    stepDecl->setName((Twine(stepName) + ".decl").str());
-                }
-            }
-            std::string unitName = unit.Merged ? stepName.str() : (bpf::sym::AllocationUnitPrefix + Twine(idx)).str();
+            std::string unitName = (bpf::sym::AllocationUnitPrefix + Twine(idx)).str();
             // The backend needs an ordinary function through register
             // allocation. MachineFlatten consumes its MachineFunction before
             // object emission, so this symbol and its BTF record never spend
             // a kernel subprogram slot.
             SmallVector<Type*, 5> parameters = StepParameterTypes(unit.BorrowedContext);
-            if (!unit.Merged) {
-                parameters.push_back(I32_);
-            }
+            parameters.push_back(I32_);
             unit.Func = Function::Create(FunctionType::get(I32_, parameters, false), Function::ExternalLinkage, unitName, Module_);
             unit.Func->setCallingConv(CallingConv::C);
             unit.Func->addFnAttr(Attribute::NoInline);
-            if (unit.Merged) {
-                // A merged unit IS the step driver; it carries the class
-                // exactly like a separately built one.
-                unit.Func->addFnAttr(bpf::cls::Trampoline);
-            }
             unit.Func->setMetadata(bpf::md::Capsule, MDNode::get(Ctx_, {}));
             unit.Func->setMetadata(bpf::md::AllocationUnit, MDNode::get(Ctx_, ConstantAsMetadata::get(ConstantInt::get(I32_, unit.BorrowedContext ? 1 : 0))));
             unit.Func->setMetadata(bpf::md::StackSize, MDNode::get(Ctx_, ConstantAsMetadata::get(ConstantInt::get(I64_, FiberStackSize_))));
@@ -1905,9 +1861,7 @@ private:
                     backingDebugType = BtfGetByteArrayPointer(db, FiberStackSize_);
                     signature.push_back(backingDebugType);
                 }
-                if (!unit.Merged) {
-                    signature.push_back(BtfGetInt(db, 32, false));
-                }
+                signature.push_back(BtfGetInt(db, 32, false));
                 auto* type = db.createSubroutineType(db.getOrCreateTypeArray(signature));
                 DISubprogram::DISPFlags subprogramFlags = DISubprogram::SPFlagDefinition;
                 if (FreplaceRoots_) {
@@ -1929,9 +1883,7 @@ private:
                 if (backingDebugType) {
                     db.createParameterVariable(unit.Subprogram, "stack_base", unit.BorrowedContext ? 4 : 3, cu->getFile(), 0, backingDebugType, true);
                 }
-                if (!unit.Merged) {
-                    db.createParameterVariable(unit.Subprogram, "region", unit.Func->arg_size(), cu->getFile(), 0, BtfGetInt(db, 32, false), true);
-                }
+                db.createParameterVariable(unit.Subprogram, "region", unit.Func->arg_size(), cu->getFile(), 0, BtfGetInt(db, 32, false), true);
                 db.finalize();
             }
 
@@ -1944,32 +1896,7 @@ private:
             // root has been dissolved into physical units.
             StepAbi abi = ConfigureStepAbi(*unit.Func, unit.BorrowedContext);
             Value* fiberControl = abi.Control;
-            if (!unit.Merged) {
-                unit.Func->getArg(unit.Func->arg_size() - 1)->setName("region");
-            }
-            if (unit.Merged) {
-                // A merged unit is the public step and must validate its own
-                // ABI. Every other unit is reachable only through BuildStep,
-                // after that root has validated the same typed arguments.
-                // Repeating these guards in every temporary region function
-                // bloats a machine-flattened program without adding a path.
-                auto* controlReady = BasicBlock::Create(Ctx_, "unit.control.ready", unit.Func);
-                auto* controlMissing = BasicBlock::Create(Ctx_, "unit.control.missing", unit.Func);
-                b.CreateCondBr(b.CreateICmpNE(fiberControl, ConstantPointerNull::get(PointerType::get(Ctx_, 0))), controlReady, controlMissing);
-                IRBuilder<> cmb(controlMissing);
-                cmb.CreateRet(ConstantInt::get(I32_, 1));
-                b.SetInsertPoint(controlReady);
-            }
-            if (FixedMemory_ && unit.Merged) {
-                Value* stackBacking = unit.Func->getArg(StackBackingArgumentIndex(unit.BorrowedContext));
-                auto* stackReady = BasicBlock::Create(Ctx_, "unit.stack.ready", unit.Func);
-                auto* stackMissing = BasicBlock::Create(Ctx_, "unit.stack.missing", unit.Func);
-                b.CreateCondBr(b.CreateICmpNE(stackBacking, ConstantPointerNull::get(PointerType::get(Ctx_, 0))), stackReady, stackMissing);
-                IRBuilder<> smb(stackMissing);
-                EmitAbort(smb, CAPSULE_ERROR_MEMORY_FAULT, unit.Func->getArg(FiberArgumentIndex(unit.BorrowedContext)));
-                smb.CreateRet(ConstantInt::get(I32_, 1));
-                b.SetInsertPoint(stackReady);
-            }
+            unit.Func->getArg(unit.Func->arg_size() - 1)->setName("region");
             LoadFrameAnchor(b, unit.Func->getArg(FiberArgumentIndex(unit.BorrowedContext)), unit.Fp, unit.Frame);
             // Give the post-RA spill mover the native pointer from which it
             // can recover the fiber slice. On the fixed tier that is the
@@ -1984,10 +1911,6 @@ private:
                 b.CreateCall(anchor, {stackBase});
             }
             b.CreateBr(dispatch);
-            if (stepDecl) {
-                stepDecl->replaceAllUsesWith(unit.Func);
-                stepDecl->eraseFromParent();
-            }
         }
     }
 
@@ -2558,28 +2481,12 @@ private:
         };
         SmallVector<RootClass, 2> rootClasses;
         auto addRootClass = [&](unsigned begin, unsigned count, unsigned& roots) {
-            // A sole unit already owns its public step directly and needs no
-            // second call level. A borrowed unit can do that only when there
-            // is no scalar class for its driver to route into.
-            bool merged = begin == 0 ? count == 1 : count == 1 && scalarUnitCount == 0;
-            if (!count || merged) {
+            if (!count) {
                 return;
             }
             uint64_t total = 0;
             for (unsigned index = begin; index < begin + count; ++index) {
                 total += load[index];
-            }
-            // A class whose complete load fits one root gains nothing from
-            // the funnel layer: every unit would get a 1:1 wrapper call. The
-            // whole class merges into its public step instead — the single
-            // fast function small programs always had. Only a class too big
-            // for one verifier-checked function pays for output roots — and
-            // a mixed object always does: the borrowed step routes into the
-            // scalar class, and two merged (physical) frames cannot nest, so
-            // both classes keep thin public steps over roots.
-            bool aloneInObject = begin == 0 ? borrowedUnitCount == 0 : scalarUnitCount == 0;
-            if (total <= RootLoadTarget && aloneInObject) {
-                return;
             }
             rootClasses.push_back({begin, count, total, &roots});
         };
@@ -2595,8 +2502,8 @@ private:
         // Derive each class root count from its load: the largest power of two
         // not exceeding the target-derived count (which keeps the pre-step
         // dispatch tree balanced), clamped by units, remaining slots, and a
-        // hard cap. A one-root class merges into its public step and pays no
-        // routing at all. The kernel's stack liveness analysis re-sweeps the
+        // hard cap. Even a one-unit class has a distinct output root. The
+        // kernel's stack liveness analysis re-sweeps the
         // whole containing subprogram per stack-mark update, so load time
         // grows with (updates x root size)
         // - measured 5.9s at 24 roots vs 41.1s at one root for lua - while
@@ -2745,48 +2652,8 @@ private:
             if (!entry) {
                 report_fatal_error("stackify: physical unit has no dispatch entry");
             }
-            if (unit.Merged) {
-                // The merged unit performs the dispatcher's lifecycle
-                // checks itself: idle or completed (sweeping the sentinel to
-                // idle) stops the driver loop; any other region ID dispatches.
-                // Abort paths stop their physical step directly, so checking
-                // the outcome word here would only tax every ordinary step.
-                auto* lifecycle = BasicBlock::Create(Ctx_, "step.lifecycle", unit.Func, entry);
-                auto* terminal = BasicBlock::Create(Ctx_, "step.terminal", unit.Func, entry);
-                auto* completed = BasicBlock::Create(Ctx_, "step.completed", unit.Func, entry);
-                auto* stop = BasicBlock::Create(Ctx_, "step.stop", unit.Func, entry);
-                SmallVector<BasicBlock*, 2> entryPredecessors(predecessors(entry));
-                if (entryPredecessors.empty()) {
-                    report_fatal_error("stackify: merged step dispatch has no entry predecessor");
-                }
-                for (BasicBlock* predecessor : entryPredecessors) {
-                    predecessor->getTerminator()->replaceSuccessorWith(entry, lifecycle);
-                }
-                IRBuilder<> lb(lifecycle);
-                Value* resumeRegionIdPtr = ResumeRegionIdPtr(lb);
-                Value* resumeRegionId = lb.CreateLoad(I32_, resumeRegionIdPtr, "resume.region.id");
-                Value* isCompleted = lb.CreateICmpEQ(resumeRegionId, DoneRegionId());
-                Value* isIdle = lb.CreateICmpEQ(resumeRegionId, ConstantInt::get(I32_, 0));
-                Value* stopped = lb.CreateOr(isIdle, isCompleted);
-                lb.CreateCondBr(stopped, terminal, entry);
-                IRBuilder<> tlb(terminal);
-                tlb.CreateCondBr(isCompleted, completed, stop);
-                IRBuilder<> clb(completed);
-                clb.CreateStore(ConstantInt::get(I32_, 0), resumeRegionIdPtr);
-                clb.CreateBr(stop);
-                IRBuilder<> slb(stop);
-                slb.CreateRet(ConstantInt::get(I32_, 1));
-            }
             IRBuilder<> b(entry);
-            Value* region = nullptr;
-            if (unit.Merged) {
-                Value* regionId = b.CreateLoad(I32_, ResumeRegionIdPtr(b), "resume.region.id");
-                region = DispatchRegionKey(b, regionId);
-            } else {
-                region = unit.Func->getArg(unit.Func->arg_size() - 1);
-            }
-
-            Value* regionIndex = region;
+            Value* regionIndex = unit.Func->getArg(unit.Func->arg_size() - 1);
             uint32_t firstIndex = UINT32_MAX;
             uint32_t lastIndex = 0;
             for (const ManagedFunction::State& state : unit.States) {
@@ -3132,7 +2999,7 @@ private:
                 // backedge still multiplies verifier work, so admission is
                 // subject to the same local expansion budget as chunking.
                 bool guardedCost = trips && verifierCost(trips) <= LoopVerifierCostLimit;
-                bool keepNative = !TestSuspendAllLoops && nativeShape && !managedCall && trips <= maxNativeTrips && guardedCost;
+                bool keepNative = nativeShape && !managedCall && trips <= maxNativeTrips && guardedCost;
                 if (!keepNative) {
                     if (!nativeShape) {
                         rejectedShape++;
@@ -3228,11 +3095,6 @@ private:
         DenseMap<Function*, BasicBlock*> bailByFunction;
         for (auto guard : guards) {
             GuardNativeLoop(guard.Header, guard.Latch, guard.Preheader, guard.Trips, bailByFunction);
-        }
-
-        if (TestSuspendAllLoops) {
-            virtualized += chunks.size();
-            chunks.clear();
         }
 
         // A monolithic BPF load has a finite cumulative verifier budget, even
@@ -3997,10 +3859,6 @@ private:
     // sign-extended -1 immediate instead of a two-instruction 64-bit load.
     Constant* DoneRegionId() {
         return ConstantInt::get(I32_, BPF_CAPSULE_REGION_ID_DONE);
-    }
-
-    Value* ArenaFrameArgument(IRBuilder<>& b, Value* frame) {
-        return b.CreateAddrSpaceCast(frame, PointerType::get(Ctx_, 1), "frame.arena");
     }
 
     // The dispatch anchor: fp is the running frame's boundary — a full
@@ -4814,13 +4672,8 @@ private:
         // Generated drivers carry the trampoline class from birth, exactly
         // like their C-defined callers: pointer-parameter ABI, typed BTF.
         step->addFnAttr(bpf::cls::Trampoline);
-        unsigned flattenClass = borrowed ? 1 : 0;
         const unsigned physicalRoots = borrowed ? PhysicalBorrowedRoots_ : PhysicalScalarRoots_;
         const unsigned physicalClassBase = 2 + (borrowed ? PhysicalScalarRoots_ : 0);
-        const bool physicalRootMode = physicalRoots != 0;
-        if (!physicalRootMode) {
-            MarkFlattenClass(*step, bpf::md::FlattenRoot, flattenClass);
-        }
         StepAbi stepAbi = ConfigureStepAbi(*step, borrowed);
         Value* fiber = stepAbi.Fiber;
         Value* fiberControl = stepAbi.Control;
@@ -4895,133 +4748,129 @@ private:
         SmallVector<Function*, 32> rootFunctions;
         SmallVector<Value*, 32> rootControls;
         SmallVector<Value*, 32> rootStackBackings;
-        if (physicalRootMode) {
-            sw = b.CreateSwitch(stepKey, trap, physicalRoots + (borrowed ? ScalarStepCount_ : 0));
-            rootDispatches.reserve(physicalRoots);
-            rootTraps.reserve(physicalRoots);
-            rootRouteKeys.reserve(physicalRoots);
-            rootRoutes.resize(physicalRoots);
-            rootSwitches.resize(physicalRoots);
-            rootFunctions.reserve(physicalRoots);
-            SmallVector<Type*> rootParameters;
-            if (FreplaceRoots_) {
-                if (borrowed) {
-                    rootParameters.push_back(parameters.front());
-                }
-                rootParameters.push_back(I32_);
-            } else {
-                rootParameters.append(parameters.begin(), parameters.end());
+        sw = b.CreateSwitch(stepKey, trap, physicalRoots + (borrowed ? ScalarStepCount_ : 0));
+        rootDispatches.reserve(physicalRoots);
+        rootTraps.reserve(physicalRoots);
+        rootRouteKeys.reserve(physicalRoots);
+        rootRoutes.resize(physicalRoots);
+        rootSwitches.resize(physicalRoots);
+        rootFunctions.reserve(physicalRoots);
+        SmallVector<Type*> rootParameters;
+        if (FreplaceRoots_) {
+            if (borrowed) {
+                rootParameters.push_back(parameters.front());
             }
             rootParameters.push_back(I32_);
-            auto* rootType = FunctionType::get(I32_, rootParameters, false);
-            for (unsigned root = 0; root < physicalRoots; ++root) {
-                std::string rootName = (bpf::sym::DispatchRouterPrefix + (borrowed ? "output.ctx." : "output.scalar.") + Twine(root)).str();
-                Function* output = Function::Create(rootType, Function::ExternalLinkage, rootName, Module_);
-                output->setCallingConv(CallingConv::C);
-                output->addFnAttr(Attribute::NoInline);
-                MarkFlattenClass(*output, bpf::md::FlattenRoot, physicalClassBase + root);
-                Argument* outputContext = nullptr;
-                Argument* outputFiber = nullptr;
-                Argument* outputDispatchKey = nullptr;
-                if (FreplaceRoots_) {
-                    if (borrowed) {
-                        outputContext = output->getArg(0);
-                        outputContext->setName("ctx");
-                        outputContext->addAttr(Attribute::get(Ctx_, bpf::md::Borrowed));
-                    }
-                    outputFiber = output->getArg(borrowed ? 1 : 0);
-                    outputFiber->setName("fiber");
-                    outputDispatchKey = output->getArg(borrowed ? 2 : 1);
-                } else {
-                    StepAbi outputAbi = ConfigureStepAbi(*output, borrowed);
-                    outputContext = borrowed ? output->getArg(0) : nullptr;
-                    outputFiber = outputAbi.Fiber;
-                    outputDispatchKey = output->getArg(parameters.size());
-                }
-                outputDispatchKey->setName("region");
-
-                BasicBlock* outputEntry = BasicBlock::Create(Ctx_, "entry", output);
-                BasicBlock* outputDispatch = BasicBlock::Create(Ctx_, "dispatch", output);
-                BasicBlock* outputTrap = BasicBlock::Create(Ctx_, "bad.id", output);
-                IRBuilder<> outputBuilder(outputEntry);
-                // The public step has already separated the packed region ID
-                // into its step and region fields. Keep the region in its
-                // masked representation so dispatch needs no shift or second
-                // mask at the root boundary.
-                rootRouteKeys.push_back(outputDispatchKey);
-                if (FreplaceRoots_ && ArenaTier_) {
-                    GlobalVariable* arena = Module_.getNamedGlobal(bpf::sym::ArenaMap);
-                    if (!arena) {
-                        report_fatal_error("stackify: freplace root is missing the arena map");
-                    }
-                    // An extension program which reaches arena memory only
-                    // through addr_space_cast still needs one ELF map
-                    // relocation so the verifier associates that program
-                    // with the shared arena. The empty assembly emits no BPF
-                    // operation; materializing its operand is the relocation.
-                    auto* anchor = InlineAsm::get(FunctionType::get(Type::getVoidTy(Ctx_), {arena->getType()}, false), "# bpf.capsule.freplace.arena", "r",
-                        /*hasSideEffects=*/true);
-                    outputBuilder.CreateCall(anchor, {arena});
-                }
-                Value* outputControl = FreplaceRoots_ ? FiberControlPtr(outputBuilder, outputFiber) : output->getArg(ControlArgumentIndex(borrowed));
-                rootControls.push_back(outputControl);
-                Value* outputStackBacking = nullptr;
-                Value* outputStackRegion = nullptr;
-                if (FixedMemory_) {
-                    if (FreplaceRoots_) {
-                        Function* stackRegion = Module_.getFunction(bpf::sym::StackRegion);
-                        Function* stackOffset = Module_.getFunction(bpf::sym::StackOffset);
-                        if (!stackRegion || !stackOffset) {
-                            report_fatal_error("stackify: fixed-memory freplace root is missing the stack-backing intrinsics");
-                        }
-                        outputStackRegion = outputBuilder.CreateCall(stackRegion, {outputFiber}, "stack.region");
-                        Value* offset = outputBuilder.CreateCall(stackOffset, {outputFiber}, "stack.offset");
-                        outputStackBacking = outputBuilder.CreateGEP(I8_, outputStackRegion, outputBuilder.CreateZExt(offset, I64_), "stack.base");
-                    } else {
-                        outputStackBacking = output->getArg(StackBackingArgumentIndex(borrowed));
-                    }
-                }
-                rootStackBackings.push_back(outputStackBacking);
-                BasicBlock* pointerReady = outputDispatch;
-                if (FixedMemory_) {
-                    pointerReady = BasicBlock::Create(Ctx_, "stack.check", output, outputDispatch);
-                }
-                outputBuilder.CreateCondBr(outputBuilder.CreateIsNotNull(outputControl), pointerReady, outputTrap);
-                if (FixedMemory_) {
-                    IRBuilder<> stackCheck(pointerReady);
-                    Value* checkedStack = FreplaceRoots_ ? outputStackRegion : outputStackBacking;
-                    stackCheck.CreateCondBr(stackCheck.CreateIsNotNull(checkedStack), outputDispatch, outputTrap);
-                }
-                outputBuilder.SetInsertPoint(outputDispatch);
-                rootDispatches.push_back(outputDispatch);
-                rootTraps.push_back(outputTrap);
-                if (IndirectDispatch_) {
-                    rootSwitches[root] = IRBuilder<>(outputDispatch).CreateSwitch(outputDispatchKey, outputTrap);
-                }
-                IRBuilder<> bad(outputTrap);
-                PublishExit(bad, outputFiber, CAPSULE_ERROR_INVALID_DISPATCH);
-                bad.CreateRet(ConstantInt::get(I32_, 1));
-
-                BasicBlock* routeRoot = BasicBlock::Create(Ctx_, rootName, step, terminal);
-                IRBuilder<> routeBuilder(routeRoot);
-                SmallVector<Value*, 4> rootArguments;
-                if (FreplaceRoots_) {
-                    if (borrowed) {
-                        rootArguments.push_back(step->getArg(0));
-                    }
-                    rootArguments.push_back(fiber);
-                } else {
-                    for (Argument& argument : step->args()) {
-                        rootArguments.push_back(&argument);
-                    }
-                }
-                rootArguments.push_back(regionKey);
-                routeBuilder.CreateRet(routeBuilder.CreateCall(output, rootArguments));
-                sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), (borrowed ? ScalarStepCount_ : 0) + root), routeRoot);
-                rootFunctions.push_back(output);
-            }
         } else {
-            sw = b.CreateSwitch(regionKey, trap, NextRegionId_);
+            rootParameters.append(parameters.begin(), parameters.end());
+        }
+        rootParameters.push_back(I32_);
+        auto* rootType = FunctionType::get(I32_, rootParameters, false);
+        for (unsigned root = 0; root < physicalRoots; ++root) {
+            std::string rootName = (bpf::sym::DispatchRouterPrefix + (borrowed ? "output.ctx." : "output.scalar.") + Twine(root)).str();
+            Function* output = Function::Create(rootType, Function::ExternalLinkage, rootName, Module_);
+            output->setCallingConv(CallingConv::C);
+            output->addFnAttr(Attribute::NoInline);
+            MarkFlattenClass(*output, bpf::md::FlattenRoot, physicalClassBase + root);
+            Argument* outputContext = nullptr;
+            Argument* outputFiber = nullptr;
+            Argument* outputDispatchKey = nullptr;
+            if (FreplaceRoots_) {
+                if (borrowed) {
+                    outputContext = output->getArg(0);
+                    outputContext->setName("ctx");
+                    outputContext->addAttr(Attribute::get(Ctx_, bpf::md::Borrowed));
+                }
+                outputFiber = output->getArg(borrowed ? 1 : 0);
+                outputFiber->setName("fiber");
+                outputDispatchKey = output->getArg(borrowed ? 2 : 1);
+            } else {
+                StepAbi outputAbi = ConfigureStepAbi(*output, borrowed);
+                outputContext = borrowed ? output->getArg(0) : nullptr;
+                outputFiber = outputAbi.Fiber;
+                outputDispatchKey = output->getArg(parameters.size());
+            }
+            outputDispatchKey->setName("region");
+
+            BasicBlock* outputEntry = BasicBlock::Create(Ctx_, "entry", output);
+            BasicBlock* outputDispatch = BasicBlock::Create(Ctx_, "dispatch", output);
+            BasicBlock* outputTrap = BasicBlock::Create(Ctx_, "bad.id", output);
+            IRBuilder<> outputBuilder(outputEntry);
+            // The public step has already separated the packed region ID
+            // into its step and region fields. Keep the region in its
+            // masked representation so dispatch needs no shift or second
+            // mask at the root boundary.
+            rootRouteKeys.push_back(outputDispatchKey);
+            if (FreplaceRoots_ && ArenaTier_) {
+                GlobalVariable* arena = Module_.getNamedGlobal(bpf::sym::ArenaMap);
+                if (!arena) {
+                    report_fatal_error("stackify: freplace root is missing the arena map");
+                }
+                // An extension program which reaches arena memory only
+                // through addr_space_cast still needs one ELF map
+                // relocation so the verifier associates that program
+                // with the shared arena. The empty assembly emits no BPF
+                // operation; materializing its operand is the relocation.
+                auto* anchor = InlineAsm::get(FunctionType::get(Type::getVoidTy(Ctx_), {arena->getType()}, false), "# bpf.capsule.freplace.arena", "r",
+                    /*hasSideEffects=*/true);
+                outputBuilder.CreateCall(anchor, {arena});
+            }
+            Value* outputControl = FreplaceRoots_ ? FiberControlPtr(outputBuilder, outputFiber) : output->getArg(ControlArgumentIndex(borrowed));
+            rootControls.push_back(outputControl);
+            Value* outputStackBacking = nullptr;
+            Value* outputStackRegion = nullptr;
+            if (FixedMemory_) {
+                if (FreplaceRoots_) {
+                    Function* stackRegion = Module_.getFunction(bpf::sym::StackRegion);
+                    Function* stackOffset = Module_.getFunction(bpf::sym::StackOffset);
+                    if (!stackRegion || !stackOffset) {
+                        report_fatal_error("stackify: fixed-memory freplace root is missing the stack-backing intrinsics");
+                    }
+                    outputStackRegion = outputBuilder.CreateCall(stackRegion, {outputFiber}, "stack.region");
+                    Value* offset = outputBuilder.CreateCall(stackOffset, {outputFiber}, "stack.offset");
+                    outputStackBacking = outputBuilder.CreateGEP(I8_, outputStackRegion, outputBuilder.CreateZExt(offset, I64_), "stack.base");
+                } else {
+                    outputStackBacking = output->getArg(StackBackingArgumentIndex(borrowed));
+                }
+            }
+            rootStackBackings.push_back(outputStackBacking);
+            BasicBlock* pointerReady = outputDispatch;
+            if (FixedMemory_) {
+                pointerReady = BasicBlock::Create(Ctx_, "stack.check", output, outputDispatch);
+            }
+            outputBuilder.CreateCondBr(outputBuilder.CreateIsNotNull(outputControl), pointerReady, outputTrap);
+            if (FixedMemory_) {
+                IRBuilder<> stackCheck(pointerReady);
+                Value* checkedStack = FreplaceRoots_ ? outputStackRegion : outputStackBacking;
+                stackCheck.CreateCondBr(stackCheck.CreateIsNotNull(checkedStack), outputDispatch, outputTrap);
+            }
+            outputBuilder.SetInsertPoint(outputDispatch);
+            rootDispatches.push_back(outputDispatch);
+            rootTraps.push_back(outputTrap);
+            if (IndirectDispatch_) {
+                rootSwitches[root] = IRBuilder<>(outputDispatch).CreateSwitch(outputDispatchKey, outputTrap);
+            }
+            IRBuilder<> bad(outputTrap);
+            PublishExit(bad, outputFiber, CAPSULE_ERROR_INVALID_DISPATCH);
+            bad.CreateRet(ConstantInt::get(I32_, 1));
+
+            BasicBlock* routeRoot = BasicBlock::Create(Ctx_, rootName, step, terminal);
+            IRBuilder<> routeBuilder(routeRoot);
+            SmallVector<Value*, 4> rootArguments;
+            if (FreplaceRoots_) {
+                if (borrowed) {
+                    rootArguments.push_back(step->getArg(0));
+                }
+                rootArguments.push_back(fiber);
+            } else {
+                for (Argument& argument : step->args()) {
+                    rootArguments.push_back(&argument);
+                }
+            }
+            rootArguments.push_back(regionKey);
+            routeBuilder.CreateRet(routeBuilder.CreateCall(output, rootArguments));
+            sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), (borrowed ? ScalarStepCount_ : 0) + root), routeRoot);
+            rootFunctions.push_back(output);
         }
 
         // A context entry may resume scalar code after a managed call.  The
@@ -5029,9 +4878,6 @@ private:
         // that root directly instead of repeating lifecycle checks and the
         // low-byte dispatch in the scalar step.
         if (borrowed && ScalarStepCount_) {
-            if (!physicalRootMode) {
-                report_fatal_error("stackify: mixed verifier ABIs require physical dispatch roots");
-            }
             for (unsigned scalar = 0; scalar < ScalarStepCount_; ++scalar) {
                 std::string rootName = (bpf::sym::DispatchRouterPrefix + "output.scalar." + Twine(scalar)).str();
                 Function* root = Module_.getFunction(rootName);
@@ -5062,13 +4908,11 @@ private:
                 continue;
             }
 
-            Function* owner = physicalRootMode ? rootFunctions[unit.OutputRoot] : step;
-            Value* ownerFiber = physicalRootMode ? owner->getArg(FreplaceRoots_ ? (borrowed ? 1 : 0) : FiberArgumentIndex(borrowed))
-                                                 : owner->getArg(FiberArgumentIndex(borrowed));
-            Value* ownerControl = physicalRootMode ? rootControls[unit.OutputRoot] : owner->getArg(ControlArgumentIndex(borrowed));
-            Value* ownerStack =
-                physicalRootMode ? rootStackBackings[unit.OutputRoot] : (FixedMemory_ ? owner->getArg(StackBackingArgumentIndex(borrowed)) : nullptr);
-            Value* ownerRegion = physicalRootMode ? rootRouteKeys[unit.OutputRoot] : regionKey;
+            Function* owner = rootFunctions[unit.OutputRoot];
+            Value* ownerFiber = owner->getArg(FreplaceRoots_ ? (borrowed ? 1 : 0) : FiberArgumentIndex(borrowed));
+            Value* ownerControl = rootControls[unit.OutputRoot];
+            Value* ownerStack = rootStackBackings[unit.OutputRoot];
+            Value* ownerRegion = rootRouteKeys[unit.OutputRoot];
             auto functionArguments = [&]() {
                 SmallVector<Value*, 4> arguments;
                 if (unit.BorrowedContext) {
@@ -5083,36 +4927,27 @@ private:
                 return arguments;
             };
 
-            if (unit.Merged) {
-                continue;
-            }
-            MarkFlattenClass(*unit.Func, bpf::md::FlattenUnit, physicalRootMode ? physicalClassBase + unit.OutputRoot : flattenClass);
+            MarkFlattenClass(*unit.Func, bpf::md::FlattenUnit, physicalClassBase + unit.OutputRoot);
             auto* caseBlock = BasicBlock::Create(Ctx_, unit.Func->getName(), owner);
             IRBuilder<> cb(caseBlock);
             cb.CreateRet(cb.CreateCall(unit.Func, functionArguments()));
-            if (physicalRootMode) {
-                if (IndirectDispatch_) {
-                    for (const ManagedFunction::State& state : unit.States) {
-                        rootSwitches[unit.OutputRoot]->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Id)), caseBlock);
-                    }
-                    continue;
-                }
-                uint32_t begin = UINT32_MAX;
-                uint32_t end = 0;
+            if (IndirectDispatch_) {
                 for (const ManagedFunction::State& state : unit.States) {
-                    uint32_t index = DispatchRegionKey(state.Id);
-                    begin = std::min(begin, index);
-                    end = std::max(end, index);
+                    rootSwitches[unit.OutputRoot]->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Id)), caseBlock);
                 }
-                if ((end - begin) / (1u << BPF_CAPSULE_REGION_ID_STEP_BITS) + 1 != unit.States.size()) {
-                    report_fatal_error("stackify: allocation-unit region range is not contiguous");
-                }
-                rootRoutes[unit.OutputRoot].push_back({begin, end, caseBlock});
-            } else {
-                for (const ManagedFunction::State& state : unit.States) {
-                    sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), DispatchRegionKey(state.Id)), caseBlock);
-                }
+                continue;
             }
+            uint32_t begin = UINT32_MAX;
+            uint32_t end = 0;
+            for (const ManagedFunction::State& state : unit.States) {
+                uint32_t index = DispatchRegionKey(state.Id);
+                begin = std::min(begin, index);
+                end = std::max(end, index);
+            }
+            if ((end - begin) / (1u << BPF_CAPSULE_REGION_ID_STEP_BITS) + 1 != unit.States.size()) {
+                report_fatal_error("stackify: allocation-unit region range is not contiguous");
+            }
+            rootRoutes[unit.OutputRoot].push_back({begin, end, caseBlock});
         }
 
         // Select one allocation unit by an explicit balanced range tree.
@@ -5176,20 +5011,18 @@ private:
                 signature.push_back(BtfGetByteArrayPointer(debugBuilder, FiberStackSize_));
             }
             BtfFunctionAddDebugInfo(debugBuilder, *step, signature);
-            if (physicalRootMode) {
-                SmallVector<Metadata*> outputSignature{BtfGetInt(debugBuilder, 32, true)};
-                if (FreplaceRoots_) {
-                    if (borrowed) {
-                        outputSignature.push_back(BorrowedDebugType_);
-                    }
-                    outputSignature.push_back(BtfGetInt(debugBuilder, 32, false));
-                } else {
-                    outputSignature.append(signature.begin() + 1, signature.end());
+            SmallVector<Metadata*> outputSignature{BtfGetInt(debugBuilder, 32, true)};
+            if (FreplaceRoots_) {
+                if (borrowed) {
+                    outputSignature.push_back(BorrowedDebugType_);
                 }
                 outputSignature.push_back(BtfGetInt(debugBuilder, 32, false));
-                for (Function* output : rootFunctions) {
-                    BtfFunctionAddDebugInfo(debugBuilder, *output, outputSignature);
-                }
+            } else {
+                outputSignature.append(signature.begin() + 1, signature.end());
+            }
+            outputSignature.push_back(BtfGetInt(debugBuilder, 32, false));
+            for (Function* output : rootFunctions) {
+                BtfFunctionAddDebugInfo(debugBuilder, *output, outputSignature);
             }
             debugBuilder.finalize();
         }
@@ -5245,13 +5078,6 @@ private:
         // than creating a second, differently-named function beside it.
         Function* decl = Module_.getFunction(stepName);
         if (decl && !decl->isDeclaration()) {
-            // A single-unit class already took the step symbol over: the
-            // unit is the step, and no separate dispatcher is built.
-            for (AllocationUnit& unit : Units_) {
-                if (unit.Merged && unit.Func == decl) {
-                    return driver0;
-                }
-            }
             report_fatal_error(Twine("stackify: ") + stepName + " already defined");
         }
         if (decl) {
@@ -5298,23 +5124,16 @@ private:
             if (!unusedLevel->use_empty()) {
                 report_fatal_error(Twine("stackify: unused Capsule driver level remains reachable: ") + levelName);
             }
-            // Removing L1 releases the declaration (or merged definition) of
-            // this verifier-ABI class's step.
+            // Removing L1 releases this verifier-ABI class's step declaration.
             unusedLevel->dropAllReferences();
             unusedLevel->eraseFromParent();
         }
         if (unusedStep) {
             unusedStep->removeDeadConstantUsers();
-            // A merged unit carries this class's step name but holds live
-            // region code that the other class's step dispatches into; it is
-            // never a removable driver leftover.
-            bool merged = llvm::any_of(Units_, [&](const AllocationUnit& g) { return g.Merged && g.Func == unusedStep; });
-            if (!merged) {
-                if (!unusedStep->use_empty()) {
-                    report_fatal_error(Twine("stackify: unused Capsule step remains reachable: ") + stepName);
-                }
-                unusedStep->eraseFromParent();
+            if (!unusedStep->use_empty()) {
+                report_fatal_error(Twine("stackify: unused Capsule step remains reachable: ") + stepName);
             }
+            unusedStep->eraseFromParent();
         }
     }
 

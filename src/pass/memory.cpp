@@ -3296,10 +3296,6 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         auto* func = Function::Create(initType, Function::InternalLinkage, name + ".impl", module);
         func->setCallingConv(CallingConv::C);
         func->addFnAttr(Attribute::NoInline);
-        // Late physical spill relocation may use lane zero here. The 0->1->2
-        // state transition below excludes every managed entry until this
-        // function has returned, so it cannot overlap a fiber-zero step.
-        func->setMetadata(bpf::md::Init, MDNode::get(ctx, {}));
 
         auto* block = BasicBlock::Create(ctx, "entry", func);
         auto* claim = BasicBlock::Create(ctx, "claim", func);

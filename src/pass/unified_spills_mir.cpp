@@ -28,10 +28,9 @@
 //    with unbounded smin is rejected at the add: track AND-masks (including
 //    alignment masks from shifts) and re-apply the mask after the fill —
 //    identity on the value, umin/umax for the verifier;
-//  - a mask can still be too wide for an access at [ptr + disp]: at a
-//    pointer-add the masked tainted addend becomes a pending obligation with
-//    budget = region_size - mask, checked against disp+width at every access
-//    through that pointer; a violation pins the source word to the stack;
+//  - a word that may hold a verifier pointer (anything the lattice cannot
+//    prove scalar, masked, rematerializable or an arena address) stays on
+//    the native stack;
 //  - storing a maybe-uninitialized register is itself rejected: the borrow
 //    register at each spill site must be definitely written.
 //

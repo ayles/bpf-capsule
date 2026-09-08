@@ -2,9 +2,6 @@
 // The yield protocol: suspension and resumption round-trips, single-use and
 // generation-checked continuations, host access to a suspended fiber's stack
 // state, reset semantics, and pool release on the corrupt-state path.
-// (The reference host also timed 1000-rep benchmark loops; that was perf
-// reporting, deliberately dropped here. The one-shot benchmark-body runs stay
-// because their outputs are correctness assertions.)
 #include "capsule_gtest.h"
 
 #include "bpf_capsule_host.h"

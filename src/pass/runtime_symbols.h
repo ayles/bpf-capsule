@@ -60,13 +60,6 @@ inline constexpr llvm::StringLiteral HeapSize{"__bpf_capsule_heap_size"};
 inline constexpr llvm::StringLiteral StackRegion{"__bpf_capsule_stack_region"};
 inline constexpr llvm::StringLiteral StackOffset{"__bpf_capsule_stack_offset"};
 
-// Runtime call glue with pointer arguments; must fold into its entry program
-// because a global subprogram cannot accept the entry's native stack
-// pointers. Each keeps its alwaysinline from the runtime source.
-inline constexpr llvm::StringLiteral FinishExited{"__bpf_capsule_finish_exited"};
-inline constexpr llvm::StringLiteral Continue{"__bpf_capsule_continue"};
-inline constexpr llvm::StringLiteral Reset{"__bpf_capsule_reset"};
-
 // Runtime globals the passes locate by name.
 inline constexpr llvm::StringLiteral FiberControls{BPF_CAPSULE_SYMBOL_FIBER_CONTROLS};
 inline constexpr llvm::StringLiteral Config{BPF_CAPSULE_SYMBOL_CONFIG};
@@ -119,17 +112,14 @@ inline constexpr llvm::StringLiteral RuntimePrefix{"__bpf_"};
 // inlinable (a call at every access clobbers the caller-saved registers and
 // spills the caller past its 512-byte frame).
 inline constexpr llvm::StringLiteral HeapPrefix{"bpf_heap_"};
-inline constexpr llvm::StringLiteral HeapCommitPrefix{"bpf_heap_commit_"};
 inline constexpr llvm::StringLiteral StackAccessorPrefix{"bpf_stack_"};
 
 // ----------------------------------------------- arithmetic (compiler runtime)
 
-// Wide multiplication, defined in the runtime (bpf-expand-i128).
-inline constexpr llvm::StringLiteral Mul64Wide{"__bpf_mul64_wide"};
+// 64-bit overflow multiply and i128 arithmetic, defined in compiler-runtime
+// int128.c (bpf-expand-i128).
 inline constexpr llvm::StringLiteral UMul64Overflow{"__bpf_umul64_overflow"};
 inline constexpr llvm::StringLiteral SMul64Overflow{"__bpf_smul64_overflow"};
-
-// i128 arithmetic, defined in compiler-runtime int128.c (bpf-expand-i128).
 inline constexpr llvm::StringLiteral Mul128{"__bpf_mul128"};
 inline constexpr llvm::StringLiteral UDiv128{"__bpf_udiv128"};
 inline constexpr llvm::StringLiteral URem128{"__bpf_urem128"};
@@ -163,16 +153,5 @@ inline constexpr llvm::StringLiteral F2I{"__bpf_f2i"};
 inline constexpr llvm::StringLiteral F2U{"__bpf_f2u"};
 inline constexpr llvm::StringLiteral D2I{"__bpf_d2i"};
 inline constexpr llvm::StringLiteral D2U{"__bpf_d2u"};
-
-// Value-computing helpers written in C that must keep their always_inline
-// through bpf-inline-policy: expanded into their call sites during post-link
-// O2 they cost nothing once constants fold, while surviving as real
-// subprograms multiplies verifier state at every arithmetic site.
-inline bool IsAlwaysInlineArithmeticHelper(llvm::StringRef name) {
-    // Division/remainder helpers deliberately stay out of this set: their
-    // loops are too verifier-expensive to duplicate into every caller.
-    return name == Mul64Wide || name == UMul64Overflow || name == SMul64Overflow || name == Mul128 || name == SDiv128 || name == SRem128 || name == FNeg ||
-        name == DNeg;
-}
 
 } // namespace bpf::sym

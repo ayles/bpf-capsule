@@ -78,7 +78,7 @@ entry:
 }
 
 ; Function Attrs: noinline
-define i32 @bpf.unit.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !bpf.capsule !2 !bpf.capsule.allocation.unit !3 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !3 {
+define i32 @bpf.unit.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !bpf.capsule !2 !bpf.capsule.allocation.unit !3 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !4 {
 unit.entry:
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   %frame.fp = load i64, ptr %fiber.fp, align 8
@@ -149,7 +149,7 @@ unit.test.right:                                  ; preds = %unit.dispatch1
 }
 
 ; Function Attrs: noinline
-define i32 @bpf.unit.1(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !bpf.capsule !2 !bpf.capsule.allocation.unit !3 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !3 {
+define i32 @bpf.unit.1(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !bpf.capsule !2 !bpf.capsule.allocation.unit !3 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !4 {
 unit.entry:
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   %frame.fp = load i64, ptr %fiber.fp, align 8
@@ -194,7 +194,7 @@ unit.dispatch1:                                   ; preds = %unit.dispatch
 }
 
 ; Function Attrs: noinline
-define i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr "bpf.capsule.control" %fiber_control) #2 !bpf.capsule.flatten.root !3 {
+define i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr "bpf.capsule.control" %fiber_control) #2 {
 entry:
   %0 = icmp ne ptr %fiber_control, null
   br i1 %0, label %control.ready, label %control.missing
@@ -219,11 +219,13 @@ route:                                            ; preds = %iterate
 dispatch:                                         ; preds = %route
   %step.index = and i32 %resume.region.id, 255
   %region.key = and i32 %resume.region.id, 16776960
-  switch i32 %region.key, label %bad.id [
-    i32 256, label %bpf.unit.0
-    i32 512, label %bpf.unit.0
-    i32 768, label %bpf.unit.1
+  switch i32 %step.index, label %bad.id [
+    i32 0, label %bpf.dispatch.output.scalar.0
   ]
+
+bpf.dispatch.output.scalar.0:                     ; preds = %dispatch
+  %4 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region.key)
+  ret i32 %4
 
 terminal:                                         ; preds = %iterate
   br i1 %1, label %completed, label %done
@@ -236,16 +238,40 @@ done:                                             ; preds = %completed, %termina
   ret i32 1
 
 bad.id:                                           ; preds = %dispatch
-  %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
+  %5 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
+  ret i32 1
+}
+
+; Function Attrs: noinline
+define i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !bpf.capsule.flatten.root !4 {
+entry:
+  %0 = icmp ne ptr %fiber_control, null
+  br i1 %0, label %dispatch, label %bad.id
+
+dispatch:                                         ; preds = %entry
+  br label %unit.route
+
+unit.route:                                       ; preds = %dispatch
+  %1 = icmp ult i32 %region, 768
+  br i1 %1, label %unit.route.left, label %unit.route.right
+
+unit.route.left:                                  ; preds = %unit.route
+  br label %bpf.unit.0
+
+unit.route.right:                                 ; preds = %unit.route
+  br label %bpf.unit.1
+
+bad.id:                                           ; preds = %entry
+  %2 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
   ret i32 1
 
-bpf.unit.0:                                       ; preds = %dispatch, %dispatch
-  %5 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region.key)
-  ret i32 %5
+bpf.unit.0:                                       ; preds = %unit.route.left
+  %3 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region)
+  ret i32 %3
 
-bpf.unit.1:                                       ; preds = %dispatch
-  %6 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region.key)
-  ret i32 %6
+bpf.unit.1:                                       ; preds = %unit.route.right
+  %4 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region)
+  ret i32 %4
 }
 
 attributes #0 = { "capsule.trampoline" }
@@ -258,3 +284,4 @@ attributes #2 = { noinline "capsule.trampoline" }
 !1 = !{i32 1, !"bpf.capsule.classes", i32 1}
 !2 = !{}
 !3 = !{i32 0}
+!4 = !{i32 2}

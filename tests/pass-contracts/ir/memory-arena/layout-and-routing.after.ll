@@ -91,7 +91,7 @@ declare void @llvm.memmove.p0.p0.i64(ptr writeonly captures(none), ptr readonly 
 declare void @llvm.memset.p0.i64(ptr writeonly captures(none), i8, i64, i1 immarg) #1
 
 ; Function Attrs: noinline
-define internal i32 @__bpf_capsule_init() #2 !dbg !15 !bpf.capsule.init !18 {
+define internal i32 @__bpf_capsule_init() #2 !dbg !15 {
 entry:
   %0 = atomicrmw add ptr @bpf_capsule_arena_control, i32 0 seq_cst, align 4, !dbg !19
   %1 = icmp eq i32 %0, 2, !dbg !19

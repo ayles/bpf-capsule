@@ -41,7 +41,7 @@ execute_process(
 if(NOT result EQUAL 0)
     message(FATAL_ERROR "cannot inspect native-zero.o: ${error}")
 endif()
-if(relocations MATCHES "bpf_spill_scratch" OR relocations MATCHES "bpf_call_stack")
+if(relocations MATCHES "bpf_call_stack")
     message(FATAL_ERROR "native entry without a leased fiber was relocated into fiber storage")
 endif()
 
