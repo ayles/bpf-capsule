@@ -221,6 +221,23 @@ target_compile_options(int128_contract_test PRIVATE -fno-builtin)
 add_test(NAME CompilerRuntime.Int128Contracts COMMAND int128_contract_test)
 set_tests_properties(CompilerRuntime.Int128Contracts PROPERTIES LABELS unprivileged)
 
+# The soft-float routines are plain C over integers: compile them for the
+# host and compare every operation bit for bit with the host FPU. Contraction
+# is disabled so the reference never fuses a multiply-add.
+add_executable(
+    softfloat_contract_test
+    compiler-runtime/softfloat_contract.c
+    ${BPF_CAPSULE_COMPILER_RUNTIME_DIR}/softfloat.c
+)
+target_include_directories(
+    softfloat_contract_test
+    PRIVATE "${BPF_CAPSULE_INCLUDE_DIR}" "${BPF_CAPSULE_INTERNAL_INCLUDE_DIR}"
+)
+target_compile_options(softfloat_contract_test PRIVATE -fno-builtin -ffp-contract=off)
+target_link_libraries(softfloat_contract_test PRIVATE m)
+add_test(NAME CompilerRuntime.SoftFloatContracts COMMAND softfloat_contract_test)
+set_tests_properties(CompilerRuntime.SoftFloatContracts PROPERTIES LABELS unprivileged)
+
 # ============================================================================
 # Runtime semantics: fibers, suspension, memory.
 # ============================================================================

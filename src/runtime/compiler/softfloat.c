@@ -10,10 +10,18 @@
 // Add, subtract and multiply have direct binary32 implementations. Widening
 // to binary64 first is exact, but needlessly pays for two conversions and the
 // much wider significand arithmetic at every operation. The less frequent
-// single-precision operations still share the binary64 implementation below;
-// divide can therefore double-round and differ from hardware by one ulp.
+// single-precision operations still share the binary64 implementation below.
+// That is still correctly rounded: binary64 carries 53 significand bits,
+// more than the 2*24+2 needed for double rounding of a division to be
+// harmless, and remainder and comparison are exact in either format.
+//
+// Every routine without a data-dependent loop is CAPSULE_NOSUSPEND: it
+// compiles to one global BPF subprogram, verified once, and costs a plain
+// call from managed code instead of two dispatcher round trips. Remainder
+// keeps a loop over the exponent gap and stays managed.
 
 #include "bpf_capsule.h"
+#include "bpf_capsule_arithmetic.h"
 
 typedef unsigned long long u64;
 typedef long long i64;
@@ -33,9 +41,8 @@ typedef unsigned int u32;
 // below the most-significant one, then popcount the saturated word with SWAR;
 // 64 - popcount is clz (and naturally returns 64 for zero).  A six-branch
 // binary-search version looks cheaper, but two calls produce up to 64 verifier
-// states.  Carrying all of them through division's 56 iterations exhausts the
-// one-million-insn analysis limit even when the division body is branchless.
-static __attribute__((always_inline)) int __bpf_nlz64(u64 x) {
+// states. Carrying them through later arithmetic can multiply verifier work.
+static inline __attribute__((always_inline)) int __bpf_nlz64(u64 x) {
     x |= x >> 1;
     x |= x >> 2;
     x |= x >> 4;
@@ -51,7 +58,7 @@ static __attribute__((always_inline)) int __bpf_nlz64(u64 x) {
     return 64 - (int)(x & 0x7f);
 }
 
-static __attribute__((always_inline)) u64 __bpf_d_make(u64 sign, i64 exp, u64 man) {
+static inline __attribute__((always_inline)) u64 __bpf_d_make(u64 sign, i64 exp, u64 man) {
     if (exp >= 0x7ff) {
         return (sign << 63) | (EXP_BITS << MAN_BITS); // overflow
     }
@@ -69,7 +76,7 @@ static __attribute__((always_inline)) u64 __bpf_d_make(u64 sign, i64 exp, u64 ma
 
 // Round a 55-bit significand (52 value bits plus guard, round and sticky in
 // the low three) to nearest, ties to even.
-static __attribute__((always_inline)) void __bpf_d_round(u64* man, i64* exp) {
+static inline __attribute__((always_inline)) void __bpf_d_round(u64* man, i64* exp) {
     u64 low = *man & 7;
     *man >>= 3;
     if (low > 4 || (low == 4 && (*man & 1))) {
@@ -85,7 +92,7 @@ static __attribute__((always_inline)) void __bpf_d_round(u64* man, i64* exp) {
 // (52 value bits plus guard, round and sticky). Underflow has to denormalize
 // *before* rounding, or the rounding decision is made at the wrong bit and
 // the answer differs from hardware by one unit in the last place.
-static __attribute__((always_inline)) u64 __bpf_d_pack(u64 sign, i64 exp, u64 man) {
+static inline __attribute__((always_inline)) u64 __bpf_d_pack(u64 sign, i64 exp, u64 man) {
     if (exp <= 0) {
         i64 sh = 1 - exp;
         if (sh > 62) {
@@ -101,6 +108,11 @@ static __attribute__((always_inline)) u64 __bpf_d_pack(u64 sign, i64 exp, u64 ma
         if (!exp) {
             exp = 1;
         }
+    } else {
+        // No hidden bit: a subnormal result. Subnormal inputs arrive with
+        // exponent one and no hidden bit, so the exponent field must be
+        // forced to zero here rather than inherited from them.
+        exp = 0;
     }
     if (!(man | (u64)exp)) {
         return sign << 63;
@@ -111,17 +123,17 @@ static __attribute__((always_inline)) u64 __bpf_d_pack(u64 sign, i64 exp, u64 ma
     return (sign << 63) | ((u64)exp << MAN_BITS) | (man & MAN_MASK);
 }
 
-static __attribute__((always_inline)) int __bpf_d_isnan(u64 x) {
+static inline __attribute__((always_inline)) int __bpf_d_isnan(u64 x) {
     return ((x >> MAN_BITS) & EXP_BITS) == EXP_BITS && (x & MAN_MASK);
 }
-static __attribute__((always_inline)) int __bpf_d_isinf(u64 x) {
+static inline __attribute__((always_inline)) int __bpf_d_isinf(u64 x) {
     return ((x >> MAN_BITS) & EXP_BITS) == EXP_BITS && !(x & MAN_MASK);
 }
 
 // Assemble a binary32 value from a significand with its leading bit at bit 26
 // (23 value bits plus guard, round and sticky).  Keeping the intermediate in
 // u64 makes every variable shift defined even for a large exponent gap.
-static __attribute__((always_inline)) u32 __bpf_f_pack(u32 sign, i64 exp, u64 man) {
+static inline __attribute__((always_inline)) u32 __bpf_f_pack(u32 sign, i64 exp, u64 man) {
     if (exp <= 0) {
         i64 sh = 1 - exp;
         if (sh > 63) {
@@ -156,15 +168,15 @@ static __attribute__((always_inline)) u32 __bpf_f_pack(u32 sign, i64 exp, u64 ma
     return (sign << 31) | ((u32)exp << F_MAN_BITS) | (u32)man;
 }
 
-static __attribute__((always_inline)) int __bpf_f_isnan(u32 x) {
+static inline __attribute__((always_inline)) int __bpf_f_isnan(u32 x) {
     return ((x >> F_MAN_BITS) & F_EXP_BITS) == F_EXP_BITS && (x & F_MAN_MASK);
 }
 
-static __attribute__((always_inline)) int __bpf_f_isinf(u32 x) {
+static inline __attribute__((always_inline)) int __bpf_f_isinf(u32 x) {
     return ((x >> F_MAN_BITS) & F_EXP_BITS) == F_EXP_BITS && !(x & F_MAN_MASK);
 }
 
-__attribute__((noinline)) u64 __bpf_dadd(u64 a, u64 b) {
+CAPSULE_NOSUSPEND u64 __bpf_dadd(u64 a, u64 b) {
     if (__bpf_d_isnan(a)) {
         return a | (1ull << 51);
     }
@@ -255,7 +267,7 @@ __attribute__((noinline)) u64 __bpf_dadd(u64 a, u64 b) {
     return __bpf_d_pack(sign, ea, man);
 }
 
-__attribute__((always_inline)) u64 __bpf_dneg(u64 a) {
+extern inline __attribute__((always_inline)) u64 __bpf_dneg(u64 a) {
     return a ^ (1ull << 63);
 }
 u64 __bpf_dsub(u64 a, u64 b) {
@@ -263,7 +275,7 @@ u64 __bpf_dsub(u64 a, u64 b) {
 }
 
 // 64x64 -> 128 multiply, in halves.
-static __attribute__((always_inline)) void __bpf_mul64(u64 a, u64 b, u64* hi, u64* lo) {
+static inline __attribute__((always_inline)) void __bpf_mul64(u64 a, u64 b, u64* hi, u64* lo) {
     u64 al = a & 0xffffffffull, ah = a >> 32;
     u64 bl = b & 0xffffffffull, bh = b >> 32;
     u64 ll = al * bl, lh = al * bh, hl = ah * bl, hh = ah * bh;
@@ -272,7 +284,7 @@ static __attribute__((always_inline)) void __bpf_mul64(u64 a, u64 b, u64* hi, u6
     *hi = hh + (lh >> 32) + (hl >> 32) + (mid >> 32);
 }
 
-__attribute__((noinline)) u64 __bpf_dmul(u64 a, u64 b) {
+CAPSULE_NOSUSPEND u64 __bpf_dmul(u64 a, u64 b) {
     if (__bpf_d_isnan(a)) {
         return a | (1ull << 51);
     }
@@ -334,7 +346,7 @@ __attribute__((noinline)) u64 __bpf_dmul(u64 a, u64 b) {
     return __bpf_d_pack(sign, exp, man);
 }
 
-__attribute__((noinline)) u64 __bpf_ddiv(u64 a, u64 b) {
+CAPSULE_NOSUSPEND u64 __bpf_ddiv(u64 a, u64 b) {
     if (__bpf_d_isnan(a)) {
         return a | (1ull << 51);
     }
@@ -362,65 +374,41 @@ __attribute__((noinline)) u64 __bpf_ddiv(u64 a, u64 b) {
     if (ea) {
         ma |= HIDDEN;
     } else {
-        ea = 1;
+        int sh = __bpf_nlz64(ma) - 11;
+        ma <<= sh;
+        ea = 1 - sh;
     }
     if (eb) {
         mb |= HIDDEN;
     } else {
-        eb = 1;
-    }
-    {
-        int sh = __bpf_nlz64(ma) - 11;
-        ma <<= sh;
-        ea -= sh;
-    }
-    {
         int sh = __bpf_nlz64(mb) - 11;
         mb <<= sh;
-        eb -= sh;
+        eb = 1 - sh;
     }
 
-    // Long division producing 56 quotient bits.
+    // 56 quotient bits (53 significand bits plus guard, round and sticky) in
+    // one 128/64 division: floor(ma * 2^55 / mb). The numerator's high word
+    // ma >> 9 is below the normalized divisor, which is the helper's
+    // precondition, and a nonzero remainder is the sticky bit. Both
+    // significands have their leading bit at 52, so clz(mb) is exactly 11.
     i64 exp = ea - eb + 1023;
-    u64 rem = ma, quo = 0;
-    // Really branchless unsigned subtract.  Writing `rem >= mb` looks like a
-    // mask in LLVM IR, but BPF has no condition-code/cmov instruction and its
-    // backend lowers the materialized comparison back to a branch.  That
-    // forks verifier state on every one of the 56 iterations and exhausts the
-    // million-insn analysis budget.  The top bit of this standard borrow
-    // identity gives the same all-zero/all-one mask using integer operations
-    // only, so the JIT and verifier both see one path through the loop.
-    for (int i = 0; i < MAN_BITS + 4; i++) {
-        quo <<= 1;
-        u64 diff = rem - mb;
-        u64 borrow = ((~rem & mb) | (~(rem ^ mb) & diff)) >> 63;
-        u64 ge = borrow - 1; // all ones when rem >= mb
-        rem -= mb & ge;
-        quo |= 1u & ge;
-        rem <<= 1;
-    }
+    u64 rem;
+    u64 quo = __bpf_udiv_128_by_64(ma >> 9, ma << 55, mb, 11, &rem);
     quo |= (rem != 0); // sticky
-    if (quo >> (MAN_BITS + 4)) {
-        u64 s = quo & 1;
-        quo = (quo >> 1) | s;
-        exp++;
-    } else {
-        int sh = __bpf_nlz64(quo) - 8;
-        if (sh > (int)(exp - 1)) {
-            sh = (int)(exp - 1);
-        }
-        if (sh > 0) {
-            quo <<= sh;
-            exp -= sh;
-        }
+    // ma/mb is in [0.5, 2), so the quotient's leading bit is 54 or 55.
+    // No general leading-zero count is needed to normalize it.
+    if (quo < (1ull << 55)) {
+        quo <<= 1;
+        exp--;
     }
     return __bpf_d_pack(sign, exp, quo);
 }
 
-// -1 less, 0 equal, 1 greater, 2 unordered. Keep this out of line: inlining
-// the comparison body has reproduced a post-Stackify optimizer miscompile in
-// the Rust workload on both instruction tiers.
-__attribute__((noinline)) int __bpf_dcmp(u64 a, u64 b) {
+// -1 less, 0 equal, 1 greater, 2 unordered. Before this became a nosuspend
+// subprogram, letting the optimizer inline its body reproduced a
+// post-Stackify miscompile in the Rust workload on both instruction tiers;
+// the root cause has not yet been isolated.
+CAPSULE_NOSUSPEND int __bpf_dcmp(u64 a, u64 b) {
     if (__bpf_d_isnan(a) || __bpf_d_isnan(b)) {
         return 2;
     }
@@ -493,15 +481,21 @@ CAPSULE_NOSUSPEND i64 __bpf_d2i(u64 a) {
     return (a >> 63) ? -v : v;
 }
 
+// Negative and NaN inputs give zero; magnitudes of 2^64 or more saturate.
 CAPSULE_NOSUSPEND u64 __bpf_d2u(u64 a) {
-    if (a >> 63) {
+    i64 exp = (i64)((a >> MAN_BITS) & EXP_BITS) - 1023;
+    if ((a >> 63) || __bpf_d_isnan(a) || exp < 0) {
         return 0;
     }
-    return (u64)__bpf_d2i(a);
+    if (exp > 63) {
+        return 0xffffffffffffffffull;
+    }
+    u64 man = (a & MAN_MASK) | HIDDEN;
+    return exp >= MAN_BITS ? man << (exp - MAN_BITS) : man >> (MAN_BITS - exp);
 }
 
 // Singles: widen, operate, narrow.
-__attribute__((noinline)) u64 __bpf_f2d(u32 f) {
+CAPSULE_NOSUSPEND u64 __bpf_f2d(u32 f) {
     u64 sign = f >> 31;
     i64 exp = (f >> 23) & 0xff;
     u64 man = f & 0x7fffff;
@@ -523,7 +517,7 @@ __attribute__((noinline)) u64 __bpf_f2d(u32 f) {
     return (sign << 63) | ((u64)(exp - 127 + 1023) << MAN_BITS) | (man << 29);
 }
 
-__attribute__((noinline)) u32 __bpf_d2f(u64 a) {
+CAPSULE_NOSUSPEND u32 __bpf_d2f(u64 a) {
     u64 sign = a >> 63;
     i64 exp = (i64)((a >> MAN_BITS) & EXP_BITS);
     u64 man = a & MAN_MASK;
@@ -566,7 +560,7 @@ __attribute__((noinline)) u32 __bpf_d2f(u64 a) {
     return (u32)((sign << 31) | ((u64)exp << 23) | m);
 }
 
-__attribute__((noinline)) u32 __bpf_fadd(u32 a, u32 b) {
+CAPSULE_NOSUSPEND u32 __bpf_fadd(u32 a, u32 b) {
     if (__bpf_f_isnan(a)) {
         return (a & 0x80000000u) | 0x7fc00000u;
     }
@@ -657,14 +651,14 @@ __attribute__((noinline)) u32 __bpf_fadd(u32 a, u32 b) {
     return __bpf_f_pack(sign, ea, man);
 }
 
-__attribute__((always_inline)) u32 __bpf_fneg(u32 a) {
+extern inline __attribute__((always_inline)) u32 __bpf_fneg(u32 a) {
     return a ^ 0x80000000u;
 }
 u32 __bpf_fsub(u32 a, u32 b) {
     return __bpf_fadd(a, __bpf_fneg(b));
 }
 
-__attribute__((noinline)) u32 __bpf_fmul(u32 a, u32 b) {
+CAPSULE_NOSUSPEND u32 __bpf_fmul(u32 a, u32 b) {
     if (__bpf_f_isnan(a)) {
         return (a & 0x80000000u) | 0x7fc00000u;
     }
@@ -723,27 +717,53 @@ __attribute__((noinline)) u32 __bpf_fmul(u32 a, u32 b) {
     return __bpf_f_pack(sign, exp, man);
 }
 
-__attribute__((noinline)) u32 __bpf_fdiv(u32 a, u32 b) {
+CAPSULE_NOSUSPEND u32 __bpf_fdiv(u32 a, u32 b) {
     return __bpf_d2f(__bpf_ddiv(__bpf_f2d(a), __bpf_f2d(b)));
 }
-// This boundary is independently load-bearing for the same reason as dcmp.
-__attribute__((noinline)) int __bpf_fcmp(u32 a, u32 b) {
+// The same out-of-line history as dcmp applies here.
+CAPSULE_NOSUSPEND int __bpf_fcmp(u32 a, u32 b) {
     return __bpf_dcmp(__bpf_f2d(a), __bpf_f2d(b));
 }
-u32 __bpf_i2f(i64 v) {
-    return __bpf_d2f(__bpf_i2d(v));
+
+// Integers wider than 24 bits round directly to binary32. Going through
+// binary64 first would round twice, and the second rounding can move a tie.
+static inline __attribute__((always_inline)) u32 __bpf_f_from_u64(u32 sign, u64 u) {
+    if (!u) {
+        return 0;
+    }
+    i64 exp = 127 + 63;
+    {
+        int sh = __bpf_nlz64(u);
+        u <<= sh;
+        exp -= sh;
+    }
+    u64 man = (u >> 37) | ((u & ((1ull << 37) - 1)) != 0); // 27 bits: 24 + guard bits
+    return __bpf_f_pack(sign, exp, man);
 }
-u32 __bpf_u2f(u64 v) {
-    return __bpf_d2f(__bpf_u2d(v));
+
+CAPSULE_NOSUSPEND u32 __bpf_i2f(i64 v) {
+    u64 u = (u64)v;
+    u32 sign = 0;
+    if (v < 0) {
+        sign = 1;
+        u = 0 - u;
+    }
+    return __bpf_f_from_u64(sign, u);
 }
-i64 __bpf_f2i(u32 f) {
+CAPSULE_NOSUSPEND u32 __bpf_u2f(u64 v) {
+    return __bpf_f_from_u64(0, v);
+}
+CAPSULE_NOSUSPEND i64 __bpf_f2i(u32 f) {
     return __bpf_d2i(__bpf_f2d(f));
 }
-u64 __bpf_f2u(u32 f) {
+CAPSULE_NOSUSPEND u64 __bpf_f2u(u32 f) {
     return __bpf_d2u(__bpf_f2d(f));
 }
 
-// Remainder, for the frem the C '%' on doubles turns into.
+// Remainder, for the frem the C '%' on doubles turns into: exactly
+// a - trunc(a/b)*b, with the sign of a and a magnitude below |b|. Computed
+// on the integer significands, so no intermediate rounding can occur; the
+// exponent gap is consumed 63 bits per step through the 128/64 division.
 __attribute__((noinline)) u64 __bpf_drem(u64 a, u64 b) {
     if (__bpf_d_isnan(a) || __bpf_d_isnan(b) || __bpf_d_isinf(a) || !(b << 1)) {
         return 0x7ff8000000000000ull;
@@ -751,9 +771,49 @@ __attribute__((noinline)) u64 __bpf_drem(u64 a, u64 b) {
     if (__bpf_d_isinf(b) || !(a << 1)) {
         return a;
     }
-    u64 q = __bpf_ddiv(a, b);
-    i64 iq = __bpf_d2i(q); // truncate toward zero
-    return __bpf_dsub(a, __bpf_dmul(__bpf_i2d(iq), b));
+    u64 sign = a >> 63;
+    i64 ea = (i64)((a >> MAN_BITS) & EXP_BITS), eb = (i64)((b >> MAN_BITS) & EXP_BITS);
+    u64 ma = a & MAN_MASK, mb = b & MAN_MASK;
+    // Normalize both significands to [2^52, 2^53). A subnormal's exponent
+    // drops below one; the i64 exponent represents that directly.
+    if (ea) {
+        ma |= HIDDEN;
+    } else {
+        int sh = __bpf_nlz64(ma) - 11;
+        ma <<= sh;
+        ea = 1 - sh;
+    }
+    if (eb) {
+        mb |= HIDDEN;
+    } else {
+        int sh = __bpf_nlz64(mb) - 11;
+        mb <<= sh;
+        eb = 1 - sh;
+    }
+    if (ea < eb || (ea == eb && ma < mb)) {
+        return a; // |a| < |b|
+    }
+    // rem = ma * 2^(ea - eb) mod mb. Each step folds up to 63 exponent bits
+    // in; rem < mb < 2^53 keeps the helper's precondition (high word below
+    // the divisor) on every step, and the last step also handles a gap of
+    // zero as rem mod mb.
+    i64 gap = ea - eb;
+    u64 rem = ma;
+    do {
+        i64 k = gap > 63 ? 63 : gap;
+        u64 hi = k ? rem >> (64 - k) : 0;
+        u64 lo = rem << k;
+        (void)__bpf_udiv_128_by_64(hi, lo, mb, 11, &rem);
+        gap -= k;
+    } while (gap > 0);
+    if (!rem) {
+        return sign << 63;
+    }
+    // The result is exactly representable: renormalize and pack without
+    // rounding. An exponent at or below zero is a subnormal result whose
+    // discarded low bits are all zero.
+    int sh = __bpf_nlz64(rem) - 11;
+    return __bpf_d_make(sign, eb - sh, rem << sh);
 }
 __attribute__((noinline)) u32 __bpf_frem(u32 a, u32 b) {
     return __bpf_d2f(__bpf_drem(__bpf_f2d(a), __bpf_f2d(b)));

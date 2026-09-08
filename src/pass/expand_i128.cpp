@@ -120,9 +120,7 @@ struct ExpandI128Pass : public PassInfoMixin<ExpandI128Pass> {
     std::pair<Value*, Value*> EmitHelperCall(Module& module, IRBuilder<>& b, StringRef name, ArrayRef<Value*> args, Instruction* site) {
         Function* helper = module.getFunction(name);
         if (!helper || helper->isDeclaration()) {
-            report_fatal_error(Twine("bpf-expand-i128: ") + name +
-                " needed but the source defining it (bpf_capsule.c for 64-bit overflow multiply, "
-                "compiler-runtime int128.c for i128 arithmetic) is not linked in");
+            report_fatal_error(Twine("bpf-expand-i128: ") + name + " needed but the compiler runtime defining it (int128.c) is not linked in");
         }
         Value* pair = nullptr;
         if (helper->arg_size() > args.size() && helper->getArg(0)->hasStructRetAttr()) {

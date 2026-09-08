@@ -12,9 +12,14 @@ struct bpf_u128_pair __bpf_urem128(unsigned long long nlo, unsigned long long nh
 struct bpf_u128_pair __bpf_sdiv128(unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi);
 struct bpf_u128_pair __bpf_srem128(unsigned long long nlo, unsigned long long nhi, unsigned long long dlo, unsigned long long dhi);
 
-struct bpf_u128_pair __bpf_mul64_wide(unsigned long long a, unsigned long long b) {
+static int check_mul64_wide(uint64_t a, uint64_t b) {
     u128 product = (u128)a * b;
-    return (struct bpf_u128_pair){(uint64_t)product, (uint64_t)(product >> 64)};
+    struct bpf_u128_pair got = __bpf_mul64_wide(a, b);
+    if (got.lo == (uint64_t)product && got.hi == (uint64_t)(product >> 64)) {
+        return 0;
+    }
+    fprintf(stderr, "wide multiplication contract failed\n");
+    return 1;
 }
 
 static u128 join(struct bpf_u128_pair value) {
@@ -69,6 +74,13 @@ int main(void) {
         u128 divisor = ((u128)(1 + next_random() % 65536) << 64) | next_random();
         failures += check_unsigned(dividend, divisor);
         failures += check_signed(((u128)next_random() << 64) | next_random(), ((u128)next_random() << 64) | next_random());
+        failures += check_mul64_wide(next_random(), next_random());
+        // Divisors that fit 64 bits take the two-digit path, including its
+        // correction steps; the high dividend word must exercise both sides
+        // of the "nhi < dlo" split.
+        uint64_t narrow = 1 + (next_random() >> (next_random() & 63));
+        failures += check_unsigned(((u128)next_random() << 64) | next_random(), narrow);
+        failures += check_unsigned(((u128)(narrow - 1) << 64) | next_random(), narrow);
     }
     return failures ? 1 : 0;
 }

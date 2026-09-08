@@ -25,7 +25,6 @@
 
 #include "bpf_capsule.h"
 #include "bpf_capsule_abi.h"
-#include "bpf_capsule_arithmetic.h"
 #include "bpf_capsule_alloc.h"
 #include "bpf_capsule_names.h"
 
@@ -818,48 +817,4 @@ int BPF_CAPSULE_ALLOC_PROGRAM(struct __bpf_capsule_alloc_request* request) {
         request->output.error = output.error;
     }
     return 0;
-}
-
-// ---------------------------------------------------------------------------
-// Wide multiplication, here rather than int128.c because the overflow
-// intrinsics appear in ordinary 64-bit code (TLSF's allocator math), so the
-// helpers must be present whenever the runtime is. bpf-expand-i128 routes
-// llvm.umul/smul.with.overflow here; always_inline folds them back into each
-// site after the whole-program link.
-// ---------------------------------------------------------------------------
-
-// 64x64 -> 128 as {lo, hi}, in 64-bit arithmetic only.
-__attribute__((always_inline)) struct bpf_u128_pair __bpf_mul64_wide(unsigned long long a, unsigned long long b) {
-    unsigned long long a0 = a & 0xffffffffull, a1 = a >> 32;
-    unsigned long long b0 = b & 0xffffffffull, b1 = b >> 32;
-    unsigned long long p00 = a0 * b0, p01 = a0 * b1;
-    unsigned long long p10 = a1 * b0, p11 = a1 * b1;
-    unsigned long long lo1 = p00 + ((p01 & 0xffffffffull) << 32);
-    unsigned long long c1 = lo1 < p00;
-    unsigned long long lo2 = lo1 + ((p10 & 0xffffffffull) << 32);
-    unsigned long long c2 = lo2 < lo1;
-    struct bpf_u128_pair r;
-    r.lo = lo2;
-    r.hi = p11 + (p01 >> 32) + (p10 >> 32) + c1 + c2;
-    return r;
-}
-
-// {value, overflowed} for the 64-bit overflow-multiply intrinsics.
-__attribute__((always_inline)) struct bpf_u128_pair __bpf_umul64_overflow(unsigned long long a, unsigned long long b) {
-    struct bpf_u128_pair p = __bpf_mul64_wide(a, b);
-    struct bpf_u128_pair r;
-    r.lo = p.lo;
-    r.hi = p.hi != 0;
-    return r;
-}
-
-__attribute__((always_inline)) struct bpf_u128_pair __bpf_smul64_overflow(unsigned long long a, unsigned long long b) {
-    struct bpf_u128_pair p = __bpf_mul64_wide(a, b);
-    // Signed high half: adjust the unsigned one, then the product fits iff
-    // it equals the sign-extension of the low half.
-    unsigned long long shi = p.hi - (((long long)a < 0) ? b : 0) - (((long long)b < 0) ? a : 0);
-    struct bpf_u128_pair r;
-    r.lo = p.lo;
-    r.hi = shi != (unsigned long long)((long long)p.lo >> 63);
-    return r;
 }

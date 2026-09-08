@@ -79,10 +79,10 @@ import ./run.nix {
     run_example rust 'Rust panic: status=exited code=101' 0 ${examples.rust}/bin/rust
 
     story='text: Once upon a time, there was a little girl named Lily. She loved to play outside in the park.'
-    run_example llama2 "$story" 11 env BPF_CAPSULE_MAX_DRAINS=11 \
+    run_example llama2 "$story" 0 \
       ${examples.llama2}/bin/llama2 ${llamaModel} 32 ${llamaTokenizer}
     [[ "$example_output" == *'native reference: match'* ]]
-    run_example llama2-q8 "$story" 6 env BPF_CAPSULE_MAX_DRAINS=6 \
+    run_example llama2-q8 "$story" 0 \
       ${examples.llama2}/bin/llama2-q8 ${llamaQ8Model} 32 ${llamaTokenizer}
     [[ "$example_output" == *'native reference: match'* ]]
 
