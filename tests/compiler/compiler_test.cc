@@ -204,6 +204,18 @@ TEST_F(CompilerTest, FiberIsolation) {
     // Each fiber's addressable local survived the other fiber's execution.
     EXPECT_EQ(fibers->other_value, 0xa5u);
     EXPECT_EQ(fibers->resumed_value, 0x5au);
+
+    // Thread-local storage: the value packs a function-scope call counter
+    // above a file-scope counter that starts at 0x100 on every fiber.
+    for (unsigned int i = 0; i < 4; ++i) {
+        EXPECT_EQ(fibers->local_status[i], (unsigned)CAPSULE_OK) << "thread-local call " << i;
+    }
+    EXPECT_EQ(fibers->local_values[0], (1u << 16) | 0x101u) << "first call on the free slot";
+    EXPECT_EQ(fibers->local_values[1], (2u << 16) | 0x102u) << "the second call on that slot sees the persisting instance";
+    EXPECT_EQ(fibers->local_pending_status, (unsigned)CAPSULE_PENDING) << "the pending body must occupy the bumped slot";
+    EXPECT_EQ(fibers->local_values[2], (1u << 16) | 0x101u) << "the other slot has its own untouched instance";
+    EXPECT_EQ(fibers->local_reset_status, (unsigned)CAPSULE_OK);
+    EXPECT_EQ(fibers->local_values[3], (1u << 16) | 0x101u) << "capsule_reset restored the cancelled slot's block";
 }
 
 struct allocator_gate {

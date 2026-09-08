@@ -611,6 +611,26 @@ static void compiler_fiber_body(unsigned int value, unsigned int other) {
     }
 }
 
+// Thread-local storage is fiber-local: each fiber owns an instance that
+// persists across the calls made on it and is restored by capsule_reset.
+static _Thread_local unsigned int compiler_local_counter = 0x100;
+
+static unsigned int compiler_local_bump_body(void) {
+    static _Thread_local unsigned int calls;
+    ++calls;
+    ++compiler_local_counter;
+    return (calls << 16) | compiler_local_counter;
+}
+
+static void compiler_local_pending_body(void) {
+    ++compiler_local_counter;
+    volatile unsigned char scratch[8] = {0};
+    void (*volatile touch)(volatile unsigned char*) = compiler_fiber_touch_leaf;
+    for (unsigned int i = 0; i < 200; ++i) {
+        touch(&scratch[7]);
+    }
+}
+
 static unsigned int compiler_fiber_short_body(void) {
     compiler_fiber_spin = 0x51;
     return capsule_fiber_index();
@@ -733,6 +753,22 @@ int compiler_fiber_resume(void) {
         compiler_fibers.reset_fiber = pending.continuation;
         unsigned int after_reset_fiber = ~0u;
         struct capsule_result after_reset = capsule_call(&after_reset_fiber, compiler_fiber_short_body);
+
+        // Two calls on the same free slot see one persisting counter; a
+        // simultaneous computation on the other slot sees its own; cancelling
+        // the pending one restores that slot's block to the initial image.
+        for (unsigned int i = 0; i < 2; ++i) {
+            struct capsule_result bumped = capsule_call(&compiler_fibers.local_values[i], compiler_local_bump_body);
+            compiler_fibers.local_status[i] = bumped.status;
+        }
+        struct capsule_result local_pending = capsule_call_void(compiler_local_pending_body);
+        struct capsule_result other_bumped = capsule_call(&compiler_fibers.local_values[2], compiler_local_bump_body);
+        compiler_fibers.local_status[2] = other_bumped.status;
+        struct capsule_result local_reset = capsule_reset(local_pending.continuation);
+        struct capsule_result reset_bumped = capsule_call(&compiler_fibers.local_values[3], compiler_local_bump_body);
+        compiler_fibers.local_status[3] = reset_bumped.status;
+        compiler_fibers.local_pending_status = local_pending.status;
+        compiler_fibers.local_reset_status = local_reset.status;
         compiler_fibers.after_reset_status = after_reset.status;
         compiler_fibers.after_reset_fiber = after_reset_fiber;
     }

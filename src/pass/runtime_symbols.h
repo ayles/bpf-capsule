@@ -53,6 +53,8 @@ inline constexpr llvm::StringLiteral ActiveFiberCount{"__bpf_capsule_active_fibe
 inline constexpr llvm::StringLiteral OutcomePointer{"__bpf_capsule_outcome_ptr"};
 inline constexpr llvm::StringLiteral CurrentCtx{"__bpf_capsule_current_ctx"};
 inline constexpr llvm::StringLiteral VaArg{"__bpf_capsule_va_arg"};
+// Runtime hook whose body bpf-fiber-local defines once thread-locals exist.
+inline constexpr llvm::StringLiteral FiberLocalReset{"__bpf_capsule_fiber_local_reset"};
 
 // Late memory intrinsics: lowered by bpf-memory after layout is known.
 inline constexpr llvm::StringLiteral HeapStart{"__bpf_capsule_heap_start"};

@@ -61,6 +61,10 @@ struct compiler_fiber_result {
     int64_t paused_code;
     uint64_t other_value;
     uint64_t resumed_value;
+    unsigned int local_values[4];
+    unsigned int local_status[4];
+    unsigned int local_pending_status;
+    unsigned int local_reset_status;
 };
 
 struct compiler_allocator_result {

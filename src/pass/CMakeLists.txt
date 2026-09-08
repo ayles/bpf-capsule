@@ -15,6 +15,7 @@ add_library(
     expand_i128.cpp
     expand_mem.cpp
     expand_sret.cpp
+    fiber_local.cpp
     internalize.cpp
     validate_no_float.cpp
     lower_arena_sext.cpp

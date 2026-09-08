@@ -184,7 +184,9 @@ The Capsule environment has a C library but no operating system:
 - OS-facing functions such as `open`, `fork`, and `clock_gettime` fail with an
   ordinary error by default; their weak platform definitions can be replaced
   by an application-provided in-memory or context-backed implementation;
-- there are no processes, threads, or general TLS;
+- there are no processes or threads; `_Thread_local` storage is fiber-local:
+  each fiber owns an instance that persists across the calls made on it and
+  is restored to its initial value by `capsule_reset`;
 - `errno` is fiber-local and the allocator is concurrency-safe, but other
   libc interfaces with implicit mutable state (for example `strtok` or
   `localtime`) must not be shared by simultaneously running fibers;

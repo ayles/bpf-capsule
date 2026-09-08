@@ -121,7 +121,7 @@ cl::list<std::string> RunPasses(
 // JIT-architecture policy.
 std::string capsulePreparationPipeline() {
     bool v4 = CPU == "v4";
-    std::string pipeline = "bpf-expand-sret,"
+    std::string pipeline = "bpf-fiber-local,bpf-expand-sret,"
                            "bpf-lower-capsule-call,bpf-capsule-domains,bpf-lower-capsule-exit,bpf-add-suspend-barriers,";
     if (!ManagedAtomics) {
         pipeline += "function(bpf-validate-atomics),";

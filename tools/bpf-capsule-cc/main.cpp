@@ -143,6 +143,11 @@ int main(int argc, char** argv) {
         // double. Clang's BPF target does not publish either spelling.
         "-D__IEEE_LITTLE_ENDIAN",
         "-D_LDBL_EQ_DBL",
+        // The BPF target rejects thread-local storage in the frontend. Mark
+        // the definitions instead; bpf-capsule-ld gives each fiber its own
+        // instance (bpf-fiber-local).
+        "-D_Thread_local=__attribute__((annotate(\"capsule.fiber_local\")))",
+        "-D__thread=__attribute__((annotate(\"capsule.fiber_local\")))",
         // Codegen-quality IR without running the generic pipeline here; all
         // optimization happens whole-program inside bpf-capsule-ld.
         "-O2",

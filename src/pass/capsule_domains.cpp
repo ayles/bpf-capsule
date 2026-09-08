@@ -245,7 +245,7 @@ struct CapsuleDomainsPass : public PassInfoMixin<CapsuleDomainsPass> {
             bool usedNative = false;
             bool usedCapsule = false;
             FindGlobalOwners(global, native, capsule, usedNative, usedCapsule);
-            if (usedNative && usedCapsule && !global.hasSection()) {
+            if (usedNative && usedCapsule && !global.hasSection() && !global.getMetadata(bpf::md::CapsuleOwned)) {
                 global.getContext().emitError(Twine("bpf-capsule-domains: unsectioned global ") + global.getName() +
                     " is shared by native and Capsule code; put "
                     "deliberately shared storage in an ELF section");

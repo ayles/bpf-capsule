@@ -743,6 +743,15 @@ __attribute__((always_inline)) struct capsule_result __bpf_capsule_continue_ctx(
     return __bpf_capsule_finish_continue(result, fiber, output, output_size, output_alignment);
 }
 
+// Thread-local storage: the compiler gives every _Thread_local variable one
+// instance per fiber (bpf-fiber-local) and replaces this body with a copy of
+// the initial image when the program has any. A fiber's block is restored
+// when capsule_reset cancels its computation, before the fiber returns to the
+// pool; ordinary completion leaves the block for the slot's next call.
+__attribute__((weak, noinline)) void __bpf_capsule_fiber_local_reset(uint32_t fiber) {
+    (void)fiber;
+}
+
 // Cancel a computation and release its fiber; contract in bpf_capsule.h.
 __BPF_CAPSULE_FN_CLASS("capsule.entry-glue") __attribute__((always_inline)) struct capsule_result __bpf_capsule_reset(uint64_t continuation) {
     struct capsule_result result = {
@@ -766,6 +775,7 @@ __BPF_CAPSULE_FN_CLASS("capsule.entry-glue") __attribute__((always_inline)) stru
         __bpf_capsule_finish_exited(&result, fiber);
         return result;
     }
+    __bpf_capsule_fiber_local_reset(fiber);
     if (__bpf_capsule_fiber_cancel(fiber)) {
         result.code = CAPSULE_ERROR_POOL_CORRUPT;
     } else {

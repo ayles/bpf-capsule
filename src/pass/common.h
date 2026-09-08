@@ -26,6 +26,10 @@ namespace bpf::md {
 // Domain markers established by bpf-capsule-domains on functions and globals.
 inline constexpr llvm::StringLiteral Capsule{"bpf.capsule"};
 inline constexpr llvm::StringLiteral Native{"bpf.native"};
+// Compiler-owned storage that lives in Capsule memory by design while native
+// runtime code also touches it (through routed accesses), such as the
+// fiber-local block table; exempt from the unsectioned-sharing check.
+inline constexpr llvm::StringLiteral CapsuleOwned{"bpf.capsule.owned"};
 
 // The capsule_call boundary: an operand bundle on the crossing call.
 inline constexpr llvm::StringLiteral CallBundle{"bpf.capsule.call"};

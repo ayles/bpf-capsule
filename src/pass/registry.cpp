@@ -3,6 +3,7 @@
 // function for bpf-capsule-ld (which links the passes statically — there is
 // no opt plugin). The pipeline itself is composed by bpf-capsule-ld: which
 // passes run, and in what order, is that tool's statement about the target.
+#include "fiber_local.h"
 #include "registry.h"
 
 #include "atomics.h"
@@ -38,7 +39,7 @@ void RegisterCapsulePipelineCallbacks(llvm::PassBuilder& PB) {
         if (RegisterMemoryPass(Name, PM) || RegisterExpandSretPass(Name, PM) || RegisterExpandI128Pass(Name, PM) || RegisterSanitizeBtfNamesPass(Name, PM) ||
             RegisterLowerSDivPass(Name, PM) || RegisterLowerCapsuleCallPass(Name, PM) || RegisterCapsuleDomainsPass(Name, PM) ||
             RegisterLowerCapsuleExitPass(Name, PM) || RegisterSuspendBarrierPasses(Name, PM) || RegisterStackifyPass(Name, PM) ||
-            RegisterSoftFloatPass(Name, PM) || RegisterInternalizePass(Name, PM)) {
+            RegisterSoftFloatPass(Name, PM) || RegisterInternalizePass(Name, PM) || RegisterFiberLocalPass(Name, PM)) {
             return true;
         }
         return false;

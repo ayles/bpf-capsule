@@ -307,9 +307,11 @@ multi-register return convention or arithmetic source patch is needed.
 `bpf-capsule-ld` resolves the complete application, runtime, and referenced
 compiler-rt and Picolibc archive members, then performs six logical phases:
 
-1. **Normalize the source ABI.** Aggregate returns, `capsule_call`, exits,
-   unsupported i128 operations, and floating point are lowered. Supported
-   atomics retain their original semantics through whole-program optimization.
+1. **Normalize the source ABI.** Thread-local variables become one block per
+   fiber, indexed by the fiber the physical step carries. Aggregate returns,
+   `capsule_call`, exits, unsupported i128 operations, and floating point are
+   lowered. Supported atomics retain their original semantics through
+   whole-program optimization.
 2. **Optimize the whole program.** The native and managed domains are checked,
    suspension barriers bracket ordinary LLVM O2, and the call graph is checked
    again after optimization has reshaped it. If O2 introduces another library
