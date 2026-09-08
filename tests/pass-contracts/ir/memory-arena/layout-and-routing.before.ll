@@ -13,6 +13,8 @@ target triple = "bpfel"
 @bpf_call_stack = internal global [4096 x i8] zeroinitializer, align 8, !bpf.fiber.stack.size !13
 @initialized = internal global i32 9, align 4
 @sparse = internal global [16 x i8] zeroinitializer, align 8
+@sparse_first = internal global i64 0, align 8
+@sparse_last = internal global i64 0, align 8
 @packed = internal global %packed_pointer <{ i8 7, ptr @sparse }>, align 1
 @exchange = global [32 x i8] zeroinitializer, section ".data.exchange", align 8
 
@@ -30,6 +32,16 @@ define i1 @is_sparse(ptr %candidate) {
 entry:
   %same = icmp eq ptr %candidate, @sparse
   ret i1 %same
+}
+
+define i64 @sparse_addresses_in_module_order() {
+entry:
+  %last = load volatile i64, ptr @sparse_last, align 8
+  %middle = load volatile i64, ptr @sparse, align 8
+  %first = load volatile i64, ptr @sparse_first, align 8
+  %a = add i64 %last, %middle
+  %b = add i64 %a, %first
+  ret i64 %b
 }
 
 define i32 @late_copies(ptr %destination, ptr %source, i32 %count) {

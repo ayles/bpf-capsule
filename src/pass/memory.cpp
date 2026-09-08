@@ -3239,7 +3239,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
             convertUsersOfConstantsToInstructions(constants, &function, /*RemoveDeadConstants=*/false);
 
-            DenseMap<GlobalVariable*, SmallVector<Use*>> uses;
+            // Emit address materializations in module order, not pointer-hash
+            // order: their order influences register allocation and code size.
+            MapVector<GlobalVariable*, SmallVector<Use*>> uses;
             for (GlobalVariable* global : globals) {
                 for (Use& use : global->uses()) {
                     auto* instruction = dyn_cast<Instruction>(use.getUser());

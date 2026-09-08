@@ -7,7 +7,7 @@ target triple = "bpfel"
 %map = type { ptr }
 %packed_pointer = type <{ i8, ptr }>
 
-@bpf_capsule_config = constant %config { i32 4112, i32 4096, i32 12288, i32 16384, i32 1, i32 4096, i32 1, i32 1, i32 1, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
+@bpf_capsule_config = constant %config { i32 4128, i32 4096, i32 12288, i32 16384, i32 1, i32 4096, i32 1, i32 1, i32 1, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_capsule_arena_control = global %arena_control zeroinitializer, section ".data.bpfctrl", align 8
 @arena = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @exchange = global [32 x i8] zeroinitializer, section ".data.exchange", align 8
@@ -39,6 +39,32 @@ entry:
   %bpf.arena.program.pointer = inttoptr i64 %bpf.arena.address to ptr
   %same = icmp eq ptr %candidate, %bpf.arena.program.pointer
   ret i1 %same
+}
+
+define i64 @sparse_addresses_in_module_order() {
+entry:
+  %bpf.arena.base = load i64, ptr getelementptr inbounds nuw (%arena_control, ptr @bpf_capsule_arena_control, i32 0, i32 2), align 8
+  %bpf.arena.address = add i64 %bpf.arena.base, 4096
+  %bpf.arena.program.pointer = inttoptr i64 %bpf.arena.address to ptr
+  %bpf.arena.program.pointer.arena.word = ptrtoint ptr %bpf.arena.program.pointer to i64
+  %bpf.arena.program.pointer.arena.span = inttoptr i64 %bpf.arena.program.pointer.arena.word to ptr addrspace(1)
+  %bpf.arena.program.pointer.arena = addrspacecast ptr addrspace(1) %bpf.arena.program.pointer.arena.span to ptr
+  %bpf.arena.address1 = add i64 %bpf.arena.base, 4112
+  %bpf.arena.program.pointer2 = inttoptr i64 %bpf.arena.address1 to ptr
+  %bpf.arena.program.pointer2.arena.word = ptrtoint ptr %bpf.arena.program.pointer2 to i64
+  %bpf.arena.program.pointer2.arena.span = inttoptr i64 %bpf.arena.program.pointer2.arena.word to ptr addrspace(1)
+  %bpf.arena.program.pointer2.arena = addrspacecast ptr addrspace(1) %bpf.arena.program.pointer2.arena.span to ptr
+  %bpf.arena.address3 = add i64 %bpf.arena.base, 4120
+  %bpf.arena.program.pointer4 = inttoptr i64 %bpf.arena.address3 to ptr
+  %bpf.arena.program.pointer4.arena.word = ptrtoint ptr %bpf.arena.program.pointer4 to i64
+  %bpf.arena.program.pointer4.arena.span = inttoptr i64 %bpf.arena.program.pointer4.arena.word to ptr addrspace(1)
+  %bpf.arena.program.pointer4.arena = addrspacecast ptr addrspace(1) %bpf.arena.program.pointer4.arena.span to ptr
+  %last = load volatile i64, ptr %bpf.arena.program.pointer4.arena, align 8
+  %middle = load volatile i64, ptr %bpf.arena.program.pointer.arena, align 8
+  %first = load volatile i64, ptr %bpf.arena.program.pointer2.arena, align 8
+  %a = add i64 %last, %middle
+  %b = add i64 %a, %first
+  ret i64 %b
 }
 
 define i32 @late_copies(ptr %destination, ptr %source, i32 %count) {
