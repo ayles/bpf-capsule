@@ -355,6 +355,9 @@ Loops then get one of three fates, priced against an explicit verifier budget
   continues. The compiler derives the count from body size, branch paths,
   and the selected memory representation's later expansion. Expensive bodies
   get shorter chunks; a body too large for two iterations is virtualized.
+  A shared expansion budget prioritizes chunks by estimated dispatches saved
+  per unit of verifier cost, using call sites and loop nesting to estimate
+  frequency. This selects loop chunks, not the physical placement of regions.
 - **Virtualized**: suspend at every backedge — the universal fallback;
   suspension itself is the verifier boundary.
 

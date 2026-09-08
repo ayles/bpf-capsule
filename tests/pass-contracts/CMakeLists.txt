@@ -207,6 +207,14 @@ capsule_ir_pass_contract(stackify-helper-alloca-select "bpf-stackify" stackify/h
 capsule_ir_pass_contract(stackify-borrowed-context "bpf-stackify" stackify/borrowed-context)
 capsule_ir_pass_contract(stackify-native-loop "bpf-stackify" stackify/native-loop)
 capsule_ir_pass_contract(stackify-chunked-loop "bpf-stackify" stackify/chunked-loop)
+add_test(
+    NAME PassContract.ChunkBudget
+    COMMAND
+        "${CMAKE_COMMAND}" "-DBPF_CAPSULE_LD=$<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}>"
+        "-DLLVM_DIS=${BPF_CAPSULE_LLVM_DIS}" "-DBEFORE=${CMAKE_CURRENT_SOURCE_DIR}/ir/stackify/chunk-budget.before.ll"
+        "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/chunk-budget" -P "${CMAKE_CURRENT_SOURCE_DIR}/RunChunkBudgetCase.cmake"
+)
+set_tests_properties(PassContract.ChunkBudget PROPERTIES LABELS "pass-contract;unprivileged")
 capsule_ir_pass_contract(stackify-branching-loop "bpf-stackify" stackify/branching-loop)
 capsule_ir_pass_contract(stackify-virtualized-loop "bpf-stackify" stackify/virtualized-loop)
 capsule_ir_pass_contract(stackify-terminating-helper "bpf-stackify" stackify/terminating-helper)
