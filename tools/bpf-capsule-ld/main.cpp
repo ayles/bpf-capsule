@@ -380,11 +380,15 @@ int main(int argc, char** argv) {
     };
 
     std::unique_ptr<Module> module;
+    std::unique_ptr<Linker> moduleLinker;
     std::vector<ArchiveInput> archives;
     auto linkModule = [&](std::unique_ptr<Module> next, const Twine& what) {
         if (!module) {
             module = std::move(next);
-        } else if (Linker::linkModules(*module, std::move(next))) {
+            // Keep LLVM's type map across archive members. Recreating an
+            // IRMover for each member repeatedly scans the growing module.
+            moduleLinker = std::make_unique<Linker>(*module);
+        } else if (moduleLinker->linkInModule(std::move(next))) {
             fail("cannot link " + what);
         }
     };
@@ -669,6 +673,7 @@ int main(int argc, char** argv) {
             saveModule(*module, std::string(OutputFilename) + ".linked.bc");
         }
         resolveExternalWeak(*module);
+        moduleLinker.reset();
         runPipeline(*module, PipelineOverride);
     } else {
         // O2 may introduce an ordinary C-library call (for example, replacing
@@ -692,6 +697,7 @@ int main(int argc, char** argv) {
             if (SaveTemps) {
                 saveModule(*module, std::string(OutputFilename) + ".linked.bc");
             }
+            moduleLinker.reset();
             module = std::move(prepared);
             break;
         }
