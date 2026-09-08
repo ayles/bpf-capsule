@@ -175,6 +175,14 @@ static void libc_test_body(void) {
         output->failures |= 1ull << 36;
     }
     errno = 0;
+    if (sysconf(_SC_CLK_TCK) != CLOCKS_PER_SEC || errno) {
+        output->failures |= 1ull << 40;
+    }
+    errno = 0;
+    if (sysconf(-1) != -1 || errno != ENOSYS) {
+        output->failures |= 1ull << 40;
+    }
+    errno = 0;
     if (isatty(STDOUT_FILENO) || errno != ENOTTY) {
         output->failures |= 1ull << 37;
     }

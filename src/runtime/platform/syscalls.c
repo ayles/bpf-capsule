@@ -321,7 +321,9 @@ CAPSULE_PLATFORM_WEAK int setgroups(int count, const gid_t* groups) {
 }
 
 CAPSULE_PLATFORM_WEAK long sysconf(int name) {
-    (void)name;
+    if (name == _SC_CLK_TCK) {
+        return CLOCKS_PER_SEC;
+    }
     errno = ENOSYS;
     return -1;
 }
