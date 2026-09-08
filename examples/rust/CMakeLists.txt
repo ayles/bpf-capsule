@@ -28,3 +28,6 @@ target_link_libraries(rust PRIVATE BpfCapsule::host rust_skeleton)
 
 install(TARGETS rust RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${rust_bpf}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+# rustc links compiler-builtins into the staticlib whose bitcode becomes part
+# of the object, so its license accompanies this example, not the SDK.
+install(FILES compiler-builtins-LICENSE.txt DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule-rust")

@@ -195,9 +195,6 @@ install(
     FILES_MATCHING
     PATTERN "*.rs"
 )
-install(
-    FILES src/rust/compiler-builtins-LICENSE.txt "${picolibc_SOURCE_DIR}/COPYING.picolibc"
-    DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule"
-)
+install(FILES "${picolibc_SOURCE_DIR}/COPYING.picolibc" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule")
 install(FILES LICENSE DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule")
 install(FILES README.md DESIGN.md PLATFORM.md DESTINATION "${CMAKE_INSTALL_DOCDIR}")

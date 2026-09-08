@@ -14,7 +14,9 @@ extern const char* lua_pushfstring(struct lua_State* L, const char* fmt, ...);
 extern int lua_gc(struct lua_State* L, int what, ...);
 extern int luaL_error(struct lua_State* L, const char* fmt, ...);
 
-void lua_capsule_write(const char* text, unsigned long length);
+#include <stddef.h>
+
+void lua_capsule_write(const char* text, size_t length);
 
 #define lua_writestring(s, l) lua_capsule_write((s), (l))
 #define lua_writeline() lua_capsule_write("\n", 1)

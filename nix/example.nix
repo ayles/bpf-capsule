@@ -140,7 +140,7 @@ stdenv.mkDerivation {
         ];
         llama2 = [ mit ];
         quickjs = [ mit ];
-        rust = [ ];
+        rust = [ mit ];
         doom = [ gpl2Only ];
       }
       .${example};
