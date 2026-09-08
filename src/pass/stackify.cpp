@@ -7,6 +7,7 @@
 #include "target.h"
 #include "bpf_capsule_abi.h"
 
+#include <llvm/ADT/BitVector.h>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SCCIterator.h>
@@ -141,29 +142,51 @@ bool IsStackifiable(Function& func) {
 
 // A value crossing a managed call must live in memory: after the transform the
 // code before and after the call runs in two separate invocations.
+// One instance describes one IR snapshot; demotion and loop rewriting must
+// rebuild it rather than reusing live sets across those mutations.
 class LivenessAnalysis {
 public:
     explicit LivenessAnalysis(Function& func) {
+        for (Argument& argument : func.args()) {
+            ValueIds_[&argument] = Values_.size();
+            Values_.push_back(&argument);
+        }
+        for (Instruction& inst : instructions(func)) {
+            ValueIds_[&inst] = Values_.size();
+            Values_.push_back(&inst);
+        }
+
         // Standard iterative backward liveness over basic blocks.
-        DenseMap<BasicBlock*, SmallPtrSet<Value*, 16>> use;
-        DenseMap<BasicBlock*, SmallPtrSet<Value*, 16>> def;
+        DenseMap<BasicBlock*, BitVector> use;
+        DenseMap<BasicBlock*, BitVector> def;
+        DenseMap<BasicBlock*, BitVector> phiUses;
 
         for (auto&& block : func) {
             auto& blockUse = use[&block];
             auto& blockDef = def[&block];
+            blockUse.resize(Values_.size());
+            blockDef.resize(Values_.size());
+            LiveIn_[&block].resize(Values_.size());
+            LiveOut_[&block].resize(Values_.size());
             for (auto&& inst : block) {
-                if (auto* phi = dyn_cast<PHINode>(&inst)) {
-                    // PHI operands are live out of the predecessor, not here.
-                    blockDef.insert(phi);
-                    continue;
-                }
-                for (auto&& op : inst.operands()) {
-                    auto* v = op.get();
-                    if ((isa<Instruction>(v) || isa<Argument>(v)) && !blockDef.contains(v)) {
-                        blockUse.insert(v);
+                // PHI operands are live out of the predecessor, not here.
+                if (!isa<PHINode>(inst)) {
+                    for (Value* operand : inst.operands()) {
+                        auto found = ValueIds_.find(operand);
+                        if (found != ValueIds_.end() && !blockDef.test(found->second)) {
+                            blockUse.set(found->second);
+                        }
                     }
                 }
-                blockDef.insert(&inst);
+                blockDef.set(ValueIds_.lookup(&inst));
+            }
+            // These edge uses do not change during the fixed-point iteration.
+            auto& edgeUses = phiUses[&block];
+            edgeUses.resize(Values_.size());
+            for (BasicBlock* successor : successors(&block)) {
+                for (PHINode& phi : successor->phis()) {
+                    setValue(edgeUses, phi.getIncomingValueForBlock(&block));
+                }
             }
         }
 
@@ -171,38 +194,15 @@ public:
         while (changed) {
             changed = false;
             for (auto&& block : reverse(func)) {
-                SmallPtrSet<Value*, 16> out;
+                BitVector out = phiUses[&block];
                 for (auto* succ : successors(&block)) {
-                    for (auto* v : LiveIn_[succ]) {
-                        out.insert(v);
-                    }
-                    // PHIs in the successor make their incoming value live here.
-                    for (auto&& phi : succ->phis()) {
-                        auto* v = phi.getIncomingValueForBlock(&block);
-                        if (isa<Instruction>(v) || isa<Argument>(v)) {
-                            out.insert(v);
-                        }
-                    }
+                    out |= LiveIn_[succ];
                 }
 
-                auto in = use[&block];
-                for (auto* v : out) {
-                    if (!def[&block].contains(v)) {
-                        in.insert(v);
-                    }
-                }
-
-                auto& oldIn = LiveIn_[&block];
-                bool different = in.size() != oldIn.size();
-                if (!different) {
-                    for (Value* value : in) {
-                        if (!oldIn.contains(value)) {
-                            different = true;
-                            break;
-                        }
-                    }
-                }
-                if (different) {
+                BitVector in = out;
+                in.reset(def[&block]);
+                in |= use[&block];
+                if (in != LiveIn_[&block]) {
                     changed = true;
                 }
                 LiveIn_[&block] = std::move(in);
@@ -215,42 +215,53 @@ public:
     // suspension placed there.
     SmallPtrSet<Value*, 16> liveAfter(Instruction* inst) const {
         BasicBlock* block = inst->getParent();
-        SmallPtrSet<Value*, 16> live = LiveOut_.lookup(block);
+        BitVector live = LiveOut_.lookup(block);
         for (auto& i : reverse(*block)) {
             if (&i == inst) {
                 break;
             }
-            live.erase(&i);
+            live.reset(ValueIds_.lookup(&i));
             if (isa<PHINode>(&i)) {
                 continue;
             }
-            for (auto&& op : i.operands()) {
-                auto* v = op.get();
-                if (isa<Instruction>(v) || isa<Argument>(v)) {
-                    live.insert(v);
-                }
+            for (Value* operand : i.operands()) {
+                setValue(live, operand);
             }
         }
-        return live;
+        return values(live);
     }
 
     // Values that specifically cross `from -> to`.  Block live-out is the
     // union of every successor and badly over-approximates switch edges;
     // PHI operands, conversely, belong only to their incoming edge.
     SmallPtrSet<Value*, 16> liveAcross(BasicBlock* from, BasicBlock* to) const {
-        SmallPtrSet<Value*, 16> live = LiveIn_.lookup(to);
+        BitVector live = LiveIn_.lookup(to);
         for (auto&& phi : to->phis()) {
-            Value* value = phi.getIncomingValueForBlock(from);
-            if (isa<Instruction>(value) || isa<Argument>(value)) {
-                live.insert(value);
-            }
+            setValue(live, phi.getIncomingValueForBlock(from));
         }
-        return live;
+        return values(live);
     }
 
 private:
-    DenseMap<BasicBlock*, SmallPtrSet<Value*, 16>> LiveIn_;
-    DenseMap<BasicBlock*, SmallPtrSet<Value*, 16>> LiveOut_;
+    void setValue(BitVector& bits, Value* value) const {
+        auto found = ValueIds_.find(value);
+        if (found != ValueIds_.end()) {
+            bits.set(found->second);
+        }
+    }
+
+    SmallPtrSet<Value*, 16> values(const BitVector& bits) const {
+        SmallPtrSet<Value*, 16> result;
+        for (unsigned index : bits.set_bits()) {
+            result.insert(Values_[index]);
+        }
+        return result;
+    }
+
+    SmallVector<Value*> Values_;
+    DenseMap<Value*, unsigned> ValueIds_;
+    DenseMap<BasicBlock*, BitVector> LiveIn_;
+    DenseMap<BasicBlock*, BitVector> LiveOut_;
 };
 
 // Pointer sets are appropriate for liveness membership, but their iteration
