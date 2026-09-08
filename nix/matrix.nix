@@ -57,7 +57,7 @@ let
     "7.1" = suiteFor "7.1";
   };
   benchmarkSuite = callPackage ./benchmark-suite.nix {
-    inherit bpfCapsule;
+    inherit bpfCapsule llvmPackages;
     targetKernel = defaultKernel;
   };
   # The historical 5.15 and 6.6 kernels are available from nixpkgs. Newer

@@ -27,6 +27,7 @@ runCommand "bpf-capsule-format"
         ../tests
         ../examples
         ../benchmarks
+        ../ports
         (lib.fileset.fileFilter (file: file.hasExt "nix") ../.)
       ];
     };
@@ -34,7 +35,7 @@ runCommand "bpf-capsule-format"
   ''
     export HOME="$TMPDIR"
     cd "$src"
-    find src tools tests examples benchmarks \
+    find src tools tests examples benchmarks ports \
       \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.h' \) -print0 \
       | xargs -0 clang-format --dry-run -Werror
     gersemi --check .

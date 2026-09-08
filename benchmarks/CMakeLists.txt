@@ -57,21 +57,14 @@ capsule_benchmark(
     SKELETONS smoke_skeleton
 )
 
-FetchContent_Declare(
-    lua
-    URL https://www.lua.org/ftp/lua-5.5.1.tar.gz
-    URL_HASH SHA256=1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
-)
-FetchContent_MakeAvailable(lua)
-file(GLOB LUA_BPF_SOURCES "${lua_SOURCE_DIR}/src/*.c")
-list(FILTER LUA_BPF_SOURCES EXCLUDE REGEX "/(lua|luac)\\.c$")
+add_subdirectory(../ports/lua ports/lua)
 bpf_capsule_object(
     lua_runner_bpf
     OUTPUT lua_runner.bpf.o
-    SOURCES lua/lua_bpf.c ${LUA_BPF_SOURCES}
-    INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/lua" "${lua_SOURCE_DIR}/src"
-    COMPILE_DEFINITIONS LUA_USE_JUMPTABLE=0
-    COMPILE_OPTIONS -g -include "${PROJECT_SOURCE_DIR}/lua/lua_capsule_config.h"
+    SOURCES lua/lua_bpf.c
+    LIBRARIES capsule_lua
+    INCLUDE_DIRECTORIES "${PROJECT_SOURCE_DIR}/lua"
+    COMPILE_OPTIONS -g
     LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
 )
 bpf_capsule_skeleton(lua_runner_skeleton OUTPUT lua_runner.skel.h OBJECT "${lua_runner_bpf}" NAME lua_runner)

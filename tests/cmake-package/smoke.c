@@ -4,13 +4,19 @@
 
 #include "bpf_capsule.h"
 #include "smoke.h"
+#include "smoke_library.h"
+
+#ifndef SMOKE_LIBRARY_PUBLIC
+#error "public library definition did not reach the consumer"
+#endif
+#ifdef SMOKE_LIBRARY_PRIVATE
+#error "private library definition leaked to the consumer"
+#endif
 
 char _license[] SEC("license") = "GPL";
 
 volatile struct smoke_result result SEC(".data.smoke");
 volatile int input SEC(".data.smoke") = 18;
-
-extern int smoke_cpp_mix(int value);
 
 static int fib(int n) {
     return n < 2 ? n : fib(n - 1) + fib(n - 2);

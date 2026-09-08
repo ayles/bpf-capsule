@@ -8,10 +8,12 @@ function(run_checked description)
     if(NOT result EQUAL 0)
         message(FATAL_ERROR "${description} failed (${result}):\n${output}${error}")
     endif()
+    set(last_output "${output}${error}" PARENT_SCOPE)
 endfunction()
 
 file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
+file(COPY "${CONSUMER_SOURCE}/" DESTINATION "${WORK}/source")
 
 # A nested project is still part of this configured build. Reuse its generator
 # and compilers so the contract neither guesses at Make versus Ninja nor finds
@@ -41,14 +43,65 @@ endif()
 string(REPLACE ";" "\\;" link_options "${LINK_OPTIONS}")
 
 run_checked("configuring installed-package consumer"
-    "${CMAKE_COMMAND}" -S "${CONSUMER_SOURCE}" -B "${WORK}/consumer" ${configure_toolchain}
+    "${CMAKE_COMMAND}" -S "${WORK}/source" -B "${WORK}/consumer" ${configure_toolchain}
     "-DCMAKE_BUILD_TYPE=Release"
     "-DBpfCapsule_DIR=${PACKAGE_DIR}"
     "-DBPF_CAPSULE_LINK_OPTIONS=${link_options}"
 )
-run_checked("building installed-package consumer"
+run_checked("building a standalone bitcode library"
+    "${CMAKE_COMMAND}" --build "${WORK}/consumer" --target smoke_library --parallel 2
+)
+string(REGEX MATCHALL "capsule-cc: smoke_cpp" library_compiles "${last_output}")
+list(LENGTH library_compiles library_compile_count)
+if(NOT library_compile_count EQUAL 1)
+    message(FATAL_ERROR "shared C++ library was not compiled exactly once:\n${last_output}")
+endif()
+if(EXISTS "${WORK}/consumer/smoke.bpf.o" OR EXISTS "${WORK}/consumer/second/second.bpf.o")
+    message(FATAL_ERROR "building a bitcode archive unexpectedly linked its consumers")
+endif()
+run_checked("building installed-package consumers" "${CMAKE_COMMAND}" --build "${WORK}/consumer" --parallel 2)
+if(last_output MATCHES "capsule-cc: smoke_cpp|capsule archive:")
+    message(FATAL_ERROR "consumers rebuilt the shared library:\n${last_output}")
+endif()
+
+set(archive "${WORK}/consumer/library/libsmoke_library.a")
+set(seed_archive "${WORK}/consumer/library/libsmoke_seed.a")
+run_checked("listing bitcode archive members" "${LLVM_AR}" t "${archive}")
+if(NOT last_output MATCHES "unused-[0-9a-f]+.bc")
+    message(FATAL_ERROR "archive did not contain the unused source member:\n${last_output}")
+endif()
+
+run_checked("checking an incremental no-op build" "${CMAKE_COMMAND}" --build "${WORK}/consumer" --parallel 2)
+if(last_output MATCHES "capsule-cc:|capsule-ld:|capsule archive:")
+    message(FATAL_ERROR "unchanged consumer rebuilt Capsule inputs:\n${last_output}")
+endif()
+
+set(products "${seed_archive}" "${WORK}/consumer/smoke.bpf.o" "${WORK}/consumer/second/second.bpf.o")
+foreach(product IN LISTS products)
+    file(SHA256 "${product}" "before_${product}")
+endforeach()
+set(header "${WORK}/source/library/include/smoke_library.h")
+file(READ "${header}" contents)
+string(REPLACE "#define SMOKE_SEED 23" "#define SMOKE_SEED 24" contents "${contents}")
+file(WRITE "${header}" "${contents}")
+run_checked("rebuilding both consumers after a library header change"
     "${CMAKE_COMMAND}" --build "${WORK}/consumer" --parallel 2
 )
+foreach(product IN LISTS products)
+    file(SHA256 "${product}" after)
+    if(after STREQUAL "${before_${product}}")
+        message(FATAL_ERROR "library header change did not update ${product}")
+    endif()
+endforeach()
+
+run_checked("removing a source from the bitcode library"
+    "${CMAKE_COMMAND}" -S "${WORK}/source" -B "${WORK}/consumer" -DSMOKE_REMOVE_MEMBER=ON
+)
+run_checked("rebuilding the shortened archive" "${CMAKE_COMMAND}" --build "${WORK}/consumer" --parallel 2)
+run_checked("checking removed archive members" "${LLVM_AR}" t "${archive}")
+if(last_output MATCHES "unused-")
+    message(FATAL_ERROR "removed source remained in the bitcode archive:\n${last_output}")
+endif()
 
 # The installed compiler is useful without CMake too. It must find the
 # packaged guest sysroot relative to itself, never a C library from the host.
@@ -71,18 +124,27 @@ foreach(product IN ITEMS "${object}" "${WORK}/consumer/host_smoke")
 endforeach()
 run_checked("reading installed-package object" "${LLVM_READELF}" -h -S "${object}")
 
-execute_process(
-    COMMAND
-        "${CMAKE_COMMAND}" -S "${CONSUMER_SOURCE}/invalid" -B "${WORK}/invalid" ${configure_toolchain}
-        "-DBpfCapsule_DIR=${PACKAGE_DIR}"
-    RESULT_VARIABLE invalid_result
-    OUTPUT_VARIABLE invalid_output
-    ERROR_VARIABLE invalid_error
-)
-if(invalid_result EQUAL 0)
-    message(FATAL_ERROR "invalid installed-package helper invocation unexpectedly configured")
-endif()
-set(invalid_log "${invalid_output}${invalid_error}")
-if(NOT invalid_log MATCHES "unknown arguments: TYPO")
-    message(FATAL_ERROR "invalid consumer failed for the wrong reason:\n${invalid_log}")
-endif()
+foreach(invalid_call IN ITEMS object library missing-library wrong-llvm)
+    execute_process(
+        COMMAND
+            "${CMAKE_COMMAND}" -S "${CONSUMER_SOURCE}/invalid" -B "${WORK}/invalid-${invalid_call}"
+            ${configure_toolchain} "-DBpfCapsule_DIR=${PACKAGE_DIR}" "-DINVALID_CALL=${invalid_call}"
+        RESULT_VARIABLE invalid_result
+        OUTPUT_VARIABLE invalid_output
+        ERROR_VARIABLE invalid_error
+    )
+    if(invalid_result EQUAL 0)
+        message(FATAL_ERROR "invalid ${invalid_call} invocation unexpectedly configured")
+    endif()
+    set(invalid_log "${invalid_output}${invalid_error}")
+    if(invalid_call STREQUAL "wrong-llvm")
+        set(expected "BPF_CAPSULE_LLVM_AR must be LLVM")
+    elseif(invalid_call STREQUAL "missing-library")
+        set(expected "Capsule library target does not exist: missing")
+    else()
+        set(expected "unknown arguments: TYPO")
+    endif()
+    if(NOT invalid_log MATCHES "${expected}")
+        message(FATAL_ERROR "invalid ${invalid_call} failed for the wrong reason:\n${invalid_log}")
+    endif()
+endforeach()

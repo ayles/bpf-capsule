@@ -12,6 +12,7 @@
   zlib,
   zstd,
   gbenchmark,
+  llvmPackages,
   bpfCapsule,
   targetKernel ? null,
 }:
@@ -20,10 +21,7 @@ let
     kernel = targetKernel;
     arch = stdenv.hostPlatform.parsed.cpu.name;
   };
-  luaSource = fetchzip {
-    url = "https://www.lua.org/ftp/lua-5.5.1.tar.gz";
-    hash = "sha256-vb3Nt5dMPL/G6L1MmJPGQnQT3F8p6iK6Gu2F/cG00ho=";
-  };
+  sources = import ./port-sources.nix { inherit fetchzip; };
 in
 stdenv.mkDerivation {
   pname = "bpf-capsule-benchmark-suite-${
@@ -32,15 +30,20 @@ stdenv.mkDerivation {
   version = "0.1.0";
 
   src = lib.fileset.toSource {
-    root = ../benchmarks;
-    fileset = ../benchmarks;
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../benchmarks
+      ../ports/lua
+    ];
   };
+  cmakeDir = "../benchmarks";
 
   strictDeps = true;
   nativeBuildInputs = [
     cmake
     pkg-config
     bpftools
+    llvmPackages.libllvm
   ];
   buildInputs = [
     bpfCapsule
@@ -55,7 +58,7 @@ stdenv.mkDerivation {
   cmakeFlags = [
     "-DCMAKE_PREFIX_PATH=${bpfCapsule}"
     "-DBPF_CAPSULE_LINK_OPTIONS=${lib.concatStringsSep ";" targetProfile.linkOptions}"
-    "-DFETCHCONTENT_SOURCE_DIR_LUA=${luaSource}"
+    "-DFETCHCONTENT_SOURCE_DIR_LUA=${sources.lua}"
   ];
   meta = {
     description = "BPF Capsule benchmarks for Linux ${targetProfile.kernel}";

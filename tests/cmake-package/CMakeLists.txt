@@ -9,10 +9,14 @@ project(BpfCapsulePackageSmoke C CXX)
 
 find_package(BpfCapsule CONFIG REQUIRED)
 
+add_subdirectory(library)
+add_library(Smoke::library ALIAS smoke_library)
+
 bpf_capsule_object(
     smoke_bpf
     OUTPUT smoke.bpf.o
-    SOURCES smoke.c smoke_cpp.cpp
+    SOURCES smoke.c
+    LIBRARIES Smoke::library
     COMPILE_OPTIONS -g
     LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
 )
@@ -20,3 +24,7 @@ bpf_capsule_skeleton(smoke_skeleton OUTPUT smoke.skel.h OBJECT "${smoke_bpf}" NA
 
 add_executable(host_smoke host.c)
 target_link_libraries(host_smoke PRIVATE BpfCapsule::host smoke_skeleton)
+
+# A consumer in another directory must use the same archive, not recompile it
+# or race its producer in a parallel build.
+add_subdirectory(second)

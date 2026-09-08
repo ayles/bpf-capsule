@@ -10,11 +10,11 @@
 #include "bpf_ctrl.h"
 #include <stdlib.h>
 
-// PureDOOM's single-header platform API is the entire BPF porting boundary.
+// PureDOOM's platform API is the entire BPF porting boundary.
 // The build applies two non-BPF, allocator-independent rendering fixes to its
 // private PureDOOM copy; the patches describe both fixes.
-#define DOOM_IMPLEMENTATION
-#include "PureDOOM.h"
+#include "DOOM.h"
+#include "doom_config.h"
 
 char _license[] SEC("license") = "GPL";
 

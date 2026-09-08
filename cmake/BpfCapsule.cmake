@@ -62,7 +62,7 @@ function(_bpf_capsule_compile_bitcode out_var)
     endif()
     set(common_flags ${ARG_COMPILE_OPTIONS})
     foreach(directory IN LISTS ARG_INCLUDE_DIRECTORIES)
-        list(APPEND common_flags "-I${directory}")
+        list(APPEND common_flags "$<$<BOOL:${directory}>:-I$<JOIN:${directory},$<SEMICOLON>-I>>")
     endforeach()
     get_target_property(_bpf_capsule_libbpf_includes ${BPF_CAPSULE_LIBBPF_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
     if(_bpf_capsule_libbpf_includes AND NOT _bpf_capsule_libbpf_includes MATCHES "-NOTFOUND$")
@@ -76,7 +76,7 @@ function(_bpf_capsule_compile_bitcode out_var)
         if(definition MATCHES "^-D")
             list(APPEND common_flags "${definition}")
         else()
-            list(APPEND common_flags "-D${definition}")
+            list(APPEND common_flags "$<$<BOOL:${definition}>:-D$<JOIN:${definition},$<SEMICOLON>-D>>")
         endif()
     endforeach()
     if(BPF_CAPSULE_MAX_FIBERS)
@@ -132,6 +132,133 @@ function(_bpf_capsule_compile_bitcode out_var)
     set(${out_var} ${outputs} PARENT_SCOPE)
 endfunction()
 
+function(_bpf_capsule_find_llvm_tool variable name)
+    find_program(
+        ${variable}
+        NAMES ${name}-${BPF_CAPSULE_LLVM_MAJOR} ${name}
+        HINTS "${BPF_CAPSULE_LLVM_TOOLS_DIR}" "${LLVM_TOOLS_BINARY_DIR}"
+        REQUIRED
+    )
+    execute_process(
+        COMMAND "${${variable}}" --version
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE version
+        ERROR_VARIABLE error
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    string(REGEX MATCH "LLVM version ([0-9]+)" _ "${version}")
+    if(NOT result EQUAL 0 OR NOT CMAKE_MATCH_1 STREQUAL BPF_CAPSULE_LLVM_MAJOR)
+        message(
+            FATAL_ERROR
+            "${variable} must be LLVM ${BPF_CAPSULE_LLVM_MAJOR}; got ${${variable}}: ${version}${error}"
+        )
+    endif()
+endfunction()
+
+# Resolve archive targets without changing CMake's host compiler or archiver.
+# Imported STATIC libraries and ordinary INTERFACE header libraries work too.
+function(_bpf_capsule_library_inputs out_var)
+    set(archives)
+    set(includes)
+    set(definitions)
+    set(options)
+    set(pending ${ARGN})
+    set(visited)
+    # CMake resolves transitive usage requirements, including PRIVATE and
+    # LINK_ONLY, from the explicitly linked targets. Walk dependencies below
+    # only to collect archives, not to re-export their private compile flags.
+    foreach(library IN LISTS ARGN)
+        list(APPEND includes "$<TARGET_PROPERTY:${library},INTERFACE_INCLUDE_DIRECTORIES>")
+        list(APPEND definitions "$<TARGET_PROPERTY:${library},INTERFACE_COMPILE_DEFINITIONS>")
+        list(APPEND options "$<TARGET_PROPERTY:${library},INTERFACE_COMPILE_OPTIONS>")
+    endforeach()
+    while(pending)
+        list(POP_FRONT pending library)
+        if(library IN_LIST visited)
+            continue()
+        endif()
+        list(APPEND visited "${library}")
+        if(NOT TARGET "${library}")
+            message(FATAL_ERROR "Capsule library target does not exist: ${library}")
+        endif()
+        get_target_property(archive "${library}" BPF_CAPSULE_ARCHIVE)
+        get_target_property(type "${library}" TYPE)
+        if(archive)
+            list(APPEND archives "${archive}")
+        elseif(type STREQUAL "STATIC_LIBRARY")
+            list(APPEND archives "$<TARGET_FILE:${library}>")
+        elseif(NOT type STREQUAL "INTERFACE_LIBRARY")
+            message(FATAL_ERROR "Capsule library ${library} must be a static bitcode or interface library")
+        endif()
+        get_target_property(dependencies "${library}" INTERFACE_LINK_LIBRARIES)
+        if(dependencies)
+            foreach(dependency IN LISTS dependencies)
+                if(dependency MATCHES "^\\$<LINK_ONLY:(.+)>$")
+                    set(dependency "${CMAKE_MATCH_1}")
+                endif()
+                if(IS_ABSOLUTE "${dependency}")
+                    list(APPEND archives "${dependency}")
+                else()
+                    list(APPEND pending "${dependency}")
+                endif()
+            endforeach()
+        endif()
+    endwhile()
+    list(REMOVE_DUPLICATES archives)
+    set(${out_var} "${archives}" PARENT_SCOPE)
+    set(${out_var}_includes "${includes}" PARENT_SCOPE)
+    set(${out_var}_definitions "${definitions}" PARENT_SCOPE)
+    set(${out_var}_options "${options}" PARENT_SCOPE)
+endfunction()
+
+# A reusable bitcode archive: no runtime, kernel profile, or whole-program
+# optimization. Ordinary target_* commands control its build and interface.
+function(bpf_capsule_library target)
+    cmake_parse_arguments(ARG "" "OUTPUT" "SOURCES;BITCODE;DEPENDS" ${ARGN})
+    if(ARG_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "bpf_capsule_library(${target}) received unknown arguments: ${ARG_UNPARSED_ARGUMENTS}")
+    endif()
+    if(NOT ARG_SOURCES AND NOT ARG_BITCODE)
+        message(FATAL_ERROR "bpf_capsule_library(${target}) needs SOURCES or BITCODE")
+    endif()
+    if(NOT ARG_OUTPUT)
+        set(ARG_OUTPUT "lib${target}.a")
+    endif()
+    cmake_path(ABSOLUTE_PATH ARG_OUTPUT BASE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}" NORMALIZE OUTPUT_VARIABLE archive)
+    get_filename_component(archive_directory "${archive}" DIRECTORY)
+    _bpf_capsule_find_llvm_tool(BPF_CAPSULE_LLVM_AR llvm-ar)
+    # An OBJECT target provides normal PRIVATE/PUBLIC/INTERFACE properties
+    # without invoking the host archiver. Its only output is built below.
+    add_library(${target} OBJECT)
+    set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C BPF_CAPSULE_ARCHIVE "${archive}")
+    set(bitcode ${ARG_BITCODE})
+    if(ARG_SOURCES)
+        _bpf_capsule_compile_bitcode(
+            compiled_bitcode
+            SOURCES ${ARG_SOURCES}
+            DEPENDS ${ARG_DEPENDS}
+            INCLUDE_DIRECTORIES "$<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>"
+            COMPILE_DEFINITIONS "$<TARGET_PROPERTY:${target},COMPILE_DEFINITIONS>"
+            COMPILE_OPTIONS "$<TARGET_PROPERTY:${target},COMPILE_OPTIONS>"
+        )
+        list(APPEND bitcode ${compiled_bitcode})
+    endif()
+    add_custom_command(
+        OUTPUT "${archive}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${archive_directory}"
+        # A fresh archive also removes members whose sources were removed.
+        COMMAND "${CMAKE_COMMAND}" -E rm -f "${archive}.tmp"
+        COMMAND "${BPF_CAPSULE_LLVM_AR}" rcsD "${archive}.tmp" ${bitcode}
+        COMMAND "${CMAKE_COMMAND}" -E rename "${archive}.tmp" "${archive}"
+        DEPENDS ${bitcode} ${ARG_DEPENDS} "${BPF_CAPSULE_LLVM_AR}"
+        COMMENT "capsule archive: ${target}"
+        COMMAND_EXPAND_LISTS
+        VERBATIM
+    )
+    set_source_files_properties("${archive}" PROPERTIES HEADER_FILE_ONLY TRUE)
+    target_sources(${target} PRIVATE "${archive}")
+endfunction()
+
 # Rust remains a Cargo language frontend. This helper turns Cargo's staticlib
 # into one ordinary LLVM bitcode input; bpf-capsule-ld still owns every
 # whole-program transform and all BPF code generation.
@@ -155,34 +282,8 @@ function(bpf_capsule_rust_bitcode out_var)
     endif()
 
     find_program(BPF_CAPSULE_CARGO NAMES cargo REQUIRED)
-    find_program(
-        BPF_CAPSULE_LLVM_AR
-        NAMES llvm-ar-${BPF_CAPSULE_LLVM_MAJOR} llvm-ar
-        HINTS "${LLVM_TOOLS_BINARY_DIR}"
-        REQUIRED
-    )
-    find_program(
-        BPF_CAPSULE_LLVM_LINK
-        NAMES llvm-link-${BPF_CAPSULE_LLVM_MAJOR} llvm-link
-        HINTS "${LLVM_TOOLS_BINARY_DIR}"
-        REQUIRED
-    )
-    foreach(tool IN ITEMS BPF_CAPSULE_LLVM_AR BPF_CAPSULE_LLVM_LINK)
-        execute_process(
-            COMMAND "${${tool}}" --version
-            RESULT_VARIABLE tool_result
-            OUTPUT_VARIABLE tool_version
-            ERROR_VARIABLE tool_error
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-        string(REGEX MATCH "LLVM version ([0-9]+)" _ "${tool_version}")
-        if(NOT tool_result EQUAL 0 OR NOT CMAKE_MATCH_1 STREQUAL BPF_CAPSULE_LLVM_MAJOR)
-            message(
-                FATAL_ERROR
-                "${tool} must be LLVM ${BPF_CAPSULE_LLVM_MAJOR}; got ${${tool}}: ${tool_version}${tool_error}"
-            )
-        endif()
-    endforeach()
+    _bpf_capsule_find_llvm_tool(BPF_CAPSULE_LLVM_AR llvm-ar)
+    _bpf_capsule_find_llvm_tool(BPF_CAPSULE_LLVM_LINK llvm-link)
 
     set(cargo_features ${ARG_FEATURES})
     list(SORT cargo_features)
@@ -351,26 +452,27 @@ function(bpf_capsule_object out_var)
         ARG
         ""
         "OUTPUT"
-        "SOURCES;BITCODE;DEPENDS;INCLUDE_DIRECTORIES;COMPILE_DEFINITIONS;COMPILE_OPTIONS;SYSTEM_COMPILE_DEFINITIONS;LINK_OPTIONS"
+        "SOURCES;BITCODE;LIBRARIES;DEPENDS;INCLUDE_DIRECTORIES;COMPILE_DEFINITIONS;COMPILE_OPTIONS;SYSTEM_COMPILE_DEFINITIONS;LINK_OPTIONS"
         ${ARGN}
     )
     if(ARG_UNPARSED_ARGUMENTS)
         message(FATAL_ERROR "bpf_capsule_object(${out_var}) received unknown arguments: ${ARG_UNPARSED_ARGUMENTS}")
     endif()
-    if(NOT ARG_OUTPUT OR (NOT ARG_SOURCES AND NOT ARG_BITCODE))
-        message(FATAL_ERROR "bpf_capsule_object(${out_var}) needs OUTPUT and at least one source or bitcode input")
+    if(NOT ARG_OUTPUT OR (NOT ARG_SOURCES AND NOT ARG_BITCODE AND NOT ARG_LIBRARIES))
+        message(FATAL_ERROR "bpf_capsule_object(${out_var}) needs OUTPUT and SOURCES, BITCODE, or LIBRARIES")
     endif()
     cmake_path(ABSOLUTE_PATH ARG_OUTPUT BASE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}" NORMALIZE OUTPUT_VARIABLE output)
     get_filename_component(output_directory "${output}" DIRECTORY)
     set(input_bitcode ${ARG_BITCODE})
+    _bpf_capsule_library_inputs(libraries ${ARG_LIBRARIES})
     if(ARG_SOURCES)
         _bpf_capsule_compile_bitcode(
             compiled_bitcode
             SOURCES ${ARG_SOURCES}
-            DEPENDS ${ARG_DEPENDS}
-            INCLUDE_DIRECTORIES ${ARG_INCLUDE_DIRECTORIES}
-            COMPILE_DEFINITIONS ${ARG_COMPILE_DEFINITIONS}
-            COMPILE_OPTIONS ${ARG_COMPILE_OPTIONS}
+            DEPENDS ${ARG_DEPENDS} ${ARG_LIBRARIES}
+            INCLUDE_DIRECTORIES ${ARG_INCLUDE_DIRECTORIES} ${libraries_includes}
+            COMPILE_DEFINITIONS ${ARG_COMPILE_DEFINITIONS} ${libraries_definitions}
+            COMPILE_OPTIONS ${ARG_COMPILE_OPTIONS} ${libraries_options}
         )
         list(APPEND input_bitcode ${compiled_bitcode})
     endif()
@@ -420,7 +522,7 @@ function(bpf_capsule_object out_var)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${output_directory}"
         COMMAND
             $<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}> ${ARG_LINK_OPTIONS} -o "${output}" ${input_bitcode}
-            ${runtime_bitcode} ${platform_bitcode} "${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
+            ${runtime_bitcode} ${platform_bitcode} ${libraries} "${BPF_CAPSULE_COMPILER_RUNTIME_ARCHIVE}"
             "${BPF_CAPSULE_LIBC_ARCHIVE}"
         DEPENDS
             ${BPF_CAPSULE_LD_TARGET}
@@ -433,6 +535,8 @@ function(bpf_capsule_object out_var)
             "${BPF_CAPSULE_LIBC_ARCHIVE}"
             ${BPF_CAPSULE_LIBC_TARGET}
             ${ARG_DEPENDS}
+            ${ARG_LIBRARIES}
+            ${libraries}
         COMMENT "capsule-ld: ${out_var}"
         COMMAND_EXPAND_LISTS
         VERBATIM

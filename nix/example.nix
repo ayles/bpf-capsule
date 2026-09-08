@@ -26,51 +26,22 @@ let
     arch = stdenv.hostPlatform.parsed.cpu.name;
   };
   exampleSource = ../examples + "/${example}";
-  # The pinned upstream revisions the examples' CMake files would fetch
-  # themselves. The sandbox has no network, so they are inputs here.
-  zlibSource = fetchzip {
-    url = "https://github.com/madler/zlib/archive/da607da739fa6047df13e66a2af6b8bec7c2a498.tar.gz";
-    hash = "sha256-Sthd9RsydSLaITNlBp6g1X35WKZdS4h7gr0QhRqdGoI=";
-  };
-  sqliteSource = fetchzip {
-    url = "https://www.sqlite.org/2026/sqlite-amalgamation-3530400.zip";
-    hash = "sha256-ij7Yw6LuWXeetH3Zs6ir+4HdQTpynPlSIMspl0nTuUI=";
-  };
-  luaSource = fetchzip {
-    url = "https://www.lua.org/ftp/lua-5.5.1.tar.gz";
-    hash = "sha256-vb3Nt5dMPL/G6L1MmJPGQnQT3F8p6iK6Gu2F/cG00ho=";
-  };
-  wasm3Source = fetchzip {
-    url = "https://github.com/wasm3/wasm3/archive/0cd38327f0c721e75172f4f1eeb55854dc0517af.tar.gz";
-    hash = "sha256-0LFsyAhT51rhXORnxMQ8/Jt22F6neE5aZZSxF5c7HBw=";
-  };
-  llama2Source = fetchzip {
-    url = "https://github.com/karpathy/llama2.c/archive/350e04fe35433e6d2941dce5a1f53308f87058eb.tar.gz";
-    hash = "sha256-pFYN2JnKl/fgofqZvwG42YUkXqDrzTo4PjWbHhDvml8=";
-  };
-  quickjsSource = fetchzip {
-    url = "https://github.com/bellard/quickjs/archive/04be246001599f5995fa2f2d8c91a0f198d3f34c.tar.gz";
-    hash = "sha256-IGq2a2MQtp45hrPL/1CyF87vS8hfMbtKK1NVN6+n+Tk=";
-  };
-  puredoomSource = fetchzip {
-    url = "https://github.com/Daivuk/PureDOOM/archive/355cfbd16fac119718879239336ee2ea408886bd.tar.gz";
-    hash = "sha256-wW3psXtWuyxByUlelkTFp3BwWjp5W+uUaHeUEqr+sWw=";
-  };
-  # What each example compiles besides its own sources.
+  sources = import ./port-sources.nix { inherit fetchzip; };
+  # Select the same port definitions for CMake and the sandbox fileset.
   upstream = {
     fib = [ ];
-    zlib = [ "-DFETCHCONTENT_SOURCE_DIR_ZLIB=${zlibSource}" ];
-    sqlite = [ "-DFETCHCONTENT_SOURCE_DIR_SQLITE=${sqliteSource}" ];
-    lua = [ "-DFETCHCONTENT_SOURCE_DIR_LUA=${luaSource}" ];
-    lua-xdp = [ "-DFETCHCONTENT_SOURCE_DIR_LUA=${luaSource}" ];
+    zlib = [ "zlib" ];
+    sqlite = [ "sqlite" ];
+    lua = [ "lua" ];
+    lua-xdp = [ "lua" ];
     wasm3 = [
-      "-DFETCHCONTENT_SOURCE_DIR_WASM3=${wasm3Source}"
-      "-DFETCHCONTENT_SOURCE_DIR_ZLIB=${zlibSource}"
+      "wasm3"
+      "zlib"
     ];
-    llama2 = [ "-DFETCHCONTENT_SOURCE_DIR_LLAMA2=${llama2Source}" ];
-    quickjs = [ "-DFETCHCONTENT_SOURCE_DIR_QUICKJS=${quickjsSource}" ];
+    llama2 = [ "llama2" ];
+    quickjs = [ "quickjs" ];
     rust = [ ];
-    doom = [ "-DFETCHCONTENT_SOURCE_DIR_PUREDOOM=${puredoomSource}" ];
+    doom = [ "puredoom" ];
   };
 in
 assert lib.assertMsg (upstream ? ${example}) "unknown BPF Capsule example: ${example}";
@@ -79,15 +50,20 @@ stdenv.mkDerivation {
   version = "0.1.0";
 
   src = lib.fileset.toSource {
-    root = exampleSource;
-    fileset = exampleSource;
+    root = ../.;
+    fileset = lib.fileset.unions (
+      [ exampleSource ] ++ map (name: ../ports + "/${name}") upstream.${example}
+    );
   };
+
+  cmakeDir = "../examples/${example}";
 
   strictDeps = true;
   nativeBuildInputs = [
     cmake
     pkg-config
     bpftools
+    llvmPackages.libllvm
   ]
   ++ lib.optionals (example == "wasm3") [
     # The interpreted module is ordinary wasm32 output of the SDK's LLVM.
@@ -97,7 +73,6 @@ stdenv.mkDerivation {
   ++ lib.optionals (example == "rust") [
     cargo
     rustc
-    llvmPackages.libllvm
   ];
   buildInputs = [
     bpfCapsule
@@ -112,7 +87,9 @@ stdenv.mkDerivation {
     "-DCMAKE_PREFIX_PATH=${bpfCapsule}"
     "-DBPF_CAPSULE_LINK_OPTIONS=${lib.concatStringsSep ";" targetProfile.linkOptions}"
   ]
-  ++ upstream.${example};
+  ++ map (
+    name: "-DFETCHCONTENT_SOURCE_DIR_${lib.toUpper name}=${sources.${name}}"
+  ) upstream.${example};
   # bin/<example>.bpf.o is the final BPF object for inspection; keep it intact.
   stripExclude = [ "*.bpf.o" ];
 

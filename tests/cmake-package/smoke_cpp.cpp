@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+#include "smoke_library.h"
+
+#ifndef SMOKE_LIBRARY_PRIVATE
+#error "private library definition did not reach the library"
+#endif
 namespace {
 
 class Mixer {
@@ -18,5 +23,5 @@ private:
 } // namespace
 
 extern "C" __attribute__((noinline)) int smoke_cpp_mix(int value) {
-    return Mixer(23).apply(value);
+    return Mixer(smoke_seed()).apply(value);
 }

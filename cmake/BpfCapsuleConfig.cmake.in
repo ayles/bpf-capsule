@@ -11,6 +11,8 @@ set(BPF_CAPSULE_CC_TARGET BpfCapsule::cc)
 set(BPF_CAPSULE_LD_TARGET BpfCapsule::ld)
 set(BPF_CAPSULE_LIBBPF_TARGET PkgConfig::LibBpf)
 set(BPF_CAPSULE_LLVM_MAJOR "@LLVM_VERSION_MAJOR@")
+# Prefer the tools that can read this SDK's bitcode, not an unrelated PATH LLVM.
+set(BPF_CAPSULE_LLVM_TOOLS_DIR "@LLVM_TOOLS_BINARY_DIR@")
 set_and_check(BPF_CAPSULE_INCLUDE_DIR "@PACKAGE_BPF_CAPSULE_INSTALL_INCLUDE_DIR@")
 # The compiler/runtime object ABI. Private: only the SDK's own tests read it.
 set_and_check(BPF_CAPSULE_INTERNAL_INCLUDE_DIR "@PACKAGE_BPF_CAPSULE_INSTALL_INTERNAL_INCLUDE_DIR@")

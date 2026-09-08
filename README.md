@@ -151,6 +151,21 @@ compiler runtime, platform layer, and Picolibc, and returns the completed
 object's path. Pass that path to `bpf_capsule_skeleton`; its linkable target
 carries the generated header and embeds the object in the host executable.
 
+Reusable guest libraries are indexed bitcode archives:
+
+```cmake
+bpf_capsule_library(codec SOURCES codec.c)
+target_include_directories(codec PUBLIC include)
+target_compile_definitions(codec PRIVATE CODEC_TABLES=1)
+bpf_capsule_object(guest_bpf OUTPUT guest.bpf.o SOURCES guest_bpf.c LIBRARIES codec)
+```
+
+The library is an ordinary CMake target with the usual `PRIVATE`, `PUBLIC`,
+and `INTERFACE` scopes; `LIBRARIES` gives an object its usage requirements
+and its archive. The third-party libraries used by the examples, tests, and
+benchmarks live in `ports/`, one directory per upstream with its source pin,
+patches, target, and license installation.
+
 The host lifecycle brackets libbpf's own load: call
 `bpf_capsule_configure()` before loading the object,
 `bpf_capsule_initialize()` afterward, and `bpf_capsule_release()` before

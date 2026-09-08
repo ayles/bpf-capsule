@@ -24,10 +24,7 @@ let
     kernel = targetKernel;
     arch = stdenv.hostPlatform.parsed.cpu.name;
   };
-  luaSource = fetchzip {
-    url = "https://www.lua.org/ftp/lua-5.5.1.tar.gz";
-    hash = "sha256-vb3Nt5dMPL/G6L1MmJPGQnQT3F8p6iK6Gu2F/cG00ho=";
-  };
+  sources = import ./port-sources.nix { inherit fetchzip; };
 in
 stdenv.mkDerivation {
   pname = "bpf-capsule-tests-${builtins.replaceStrings [ "." ] [ "" ] targetProfile.kernel}";
@@ -39,6 +36,7 @@ stdenv.mkDerivation {
       (lib.fileset.difference ../tests ../tests/vm)
       # The lua-xdp integration test compiles that example's runtime.
       ../examples/lua-xdp
+      ../ports/lua
     ];
   };
   cmakeDir = "../tests";
@@ -68,7 +66,7 @@ stdenv.mkDerivation {
   cmakeFlags = [
     "-DCMAKE_PREFIX_PATH=${bpfCapsule}"
     "-DBPF_CAPSULE_LINK_OPTIONS=${lib.concatStringsSep ";" targetProfile.linkOptions}"
-    "-DFETCHCONTENT_SOURCE_DIR_LUA=${luaSource}"
+    "-DFETCHCONTENT_SOURCE_DIR_LUA=${sources.lua}"
   ]
   ++ lib.optional targetProfile.freplace "-DBPF_CAPSULE_TEST_FREPLACE=ON";
   # Privileged suites skip themselves without root; the VM checks run them.
