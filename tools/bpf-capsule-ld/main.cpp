@@ -66,6 +66,8 @@
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
 
+#include <cassert>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -80,8 +82,6 @@ cl::opt<std::string> OutputFilename("o", cl::desc("Output BPF object"), cl::valu
 cl::opt<bool> Freplace("freplace", cl::desc("Embed physical managed step roots as freplace programs"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<bool> ManagedAtomics(
     "managed-atomics", cl::desc("Enable full BPF atomics and scalar C atomics in Capsule memory"), cl::init(false), cl::cat(LinkerCategory));
-// FiberStack registers and validates the public option. Its value is read by
-// the pre-scan below because it determines flags injected into LLVM's parse.
 cl::opt<unsigned> FiberStack(
     "fiber-stack", cl::desc("Bytes in each Capsule fiber stack (power of two, default 262144)"), cl::init(262144), cl::cat(LinkerCategory));
 cl::opt<bool> EmitLlvm("emit-llvm", cl::desc("Stop after the capsule pipeline and emit bitcode (debugging)"), cl::init(false), cl::cat(LinkerCategory));
@@ -190,14 +190,13 @@ bool definesRuntime(const Module& module) {
     return function && !function->isDeclaration();
 }
 
-bool hasOption(int argc, char** argv, StringRef name) {
-    for (int i = 1; i < argc; ++i) {
-        StringRef argument(argv[i]);
-        if (argument == name || (argument.starts_with(name) && argument.drop_front(name.size()).starts_with("="))) {
-            return true;
-        }
-    }
-    return false;
+// These options are registered by the statically linked Capsule passes and
+// LLVM 23. Match their declared cl::opt types when setting pipeline defaults.
+template <typename T>
+void setCodegenOption(StringRef name, T value) {
+    auto* option = cl::getRegisteredOptions().lookup(name);
+    assert(option && "missing registered codegen option");
+    static_cast<cl::opt<T>*>(option)->setValue(value);
 }
 
 // A native static link resolves an undefined weak symbol to zero without
@@ -302,33 +301,21 @@ int main(int argc, char** argv) {
     InitializeAllAsmPrinters();
     InitializeAllAsmParsers();
 
-    // The pass library's own cl::opts (every -bpf-* knob) are registered by
-    // static initializers together with all of upstream LLVM's, so opt/llc
-    // experiment flags work here unchanged. Policy flags the reference
-    // pipeline always set are injected, then everything parses in one pass.
-    // --fiber-stack is pre-scanned because injected flag values depend on it.
-    unsigned fiberStack = 262144;
-    for (int i = 1; i < argc; ++i) {
-        StringRef arg(argv[i]);
-        if (arg.consume_front("--fiber-stack=") || arg.consume_front("-fiber-stack=")) {
-            (void)arg.getAsInteger(10, fiberStack);
-        } else if ((arg == "--fiber-stack" || arg == "-fiber-stack") && i + 1 < argc) {
-            (void)StringRef(argv[i + 1]).getAsInteger(10, fiberStack);
-        }
+    // Parse public and LLVM experiment options once. The public stack size
+    // governs both managed frames and LLVM's temporary pre-relocation stack.
+    cl::ParseCommandLineOptions(argc, argv, "BPF Capsule linker\n");
+    const bool runPassMode = RunPasses.getNumOccurrences() != 0;
+    const bool customPipeline = PipelineOverride.getNumOccurrences() != 0;
+    auto& optionsByName = cl::getRegisteredOptions();
+    const bool stopCodegen = optionsByName.lookup("stop-after")->getNumOccurrences() || optionsByName.lookup("stop-before")->getNumOccurrences();
+    if (FiberStack > unsigned(std::numeric_limits<int>::max())) {
+        fail("--fiber-stack exceeds the BPF backend's stack size range");
     }
-    std::string fiberStackFlag = "-bpf-fiber-stack-size=" + std::to_string(fiberStack);
-    std::string bpfStackFlag = "-bpf-stack-size=" + std::to_string(fiberStack);
-    std::vector<const char*> args(argv, argv + argc);
-    const bool runPassMode = hasOption(argc, argv, "-run-pass") || hasOption(argc, argv, "--run-pass");
-    const bool customPipeline = hasOption(argc, argv, "-passes") || hasOption(argc, argv, "--passes");
-    const bool stopCodegen = hasOption(argc, argv, "-stop-after") || hasOption(argc, argv, "--stop-after") || hasOption(argc, argv, "-stop-before") ||
-        hasOption(argc, argv, "--stop-before");
+    setCodegenOption<unsigned>("bpf-fiber-stack-size", FiberStack);
+    setCodegenOption<int>("bpf-stack-size", FiberStack);
     if (!customPipeline && !runPassMode) {
-        args.push_back("-bpf-unified-spill-pipeline");
+        setCodegenOption<bool>("bpf-unified-spill-pipeline", true);
     }
-    args.push_back(fiberStackFlag.c_str());
-    args.push_back(bpfStackFlag.c_str());
-    cl::ParseCommandLineOptions(args.size(), args.data(), "BPF Capsule linker\n");
 
     if (stopCodegen && (EmitLlvm || EmitAssembly)) {
         fail("-stop-before/-stop-after cannot be combined with --emit-llvm or --emit-asm");
@@ -775,7 +762,7 @@ int main(int argc, char** argv) {
         legacy::PassManager codegen;
         // Post-RA spill relocation, machine flattening and final-layout repair
         // insert themselves through RegisterTargetPassConfigCallback, gated
-        // on -bpf-unified-spill-pipeline injected above.
+        // on the unified spill pipeline enabled above.
         if (machine->addPassesToEmitFile(codegen, objectStream, nullptr, CodeGenFileType::ObjectFile)) {
             fail("the BPF target cannot emit object files");
         }
