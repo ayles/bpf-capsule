@@ -217,6 +217,27 @@ void ForEachRegisterDef(MachineInstr& instruction, Visitor&& visit) {
     }
 }
 
+// An empty assembly barrier with tied inputs/outputs does not change registers.
+// In particular, lower-arena-sext uses this to hide a scalar from IR optimizers;
+// it must not hide its scalar provenance from spill relocation after selection.
+// Untied outputs or clobbers remain opaque even when the assembly is empty.
+bool IsIdentityAsm(const MachineInstr& instruction) {
+    if (!instruction.isInlineAsm() || !instruction.getOperand(0).isSymbol() || instruction.getOperand(0).getSymbolName()[0] != '\0') {
+        return false;
+    }
+    for (unsigned index = 0; index < instruction.getNumOperands(); ++index) {
+        const MachineOperand& operand = instruction.getOperand(index);
+        if (!operand.isReg() || !operand.isDef()) {
+            continue;
+        }
+        unsigned input;
+        if (!instruction.isRegTiedToUseOperand(index, &input) || instruction.getOperand(input).getReg() != operand.getReg()) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // ------------------------------------------------------------- value lattice
 
 // A mask is usable only if one AND-immediate can re-apply it after a unified
@@ -1147,6 +1168,10 @@ struct Xfer {
     std::string bailWhy;
 
     bool step(MachineInstr& MI, State& st, std::vector<Access>* record) {
+        // KILL changes register liveness, not the value held in the register.
+        if (MI.isKill() || IsIdentityAsm(MI)) {
+            return true;
+        }
         const OpInfo& oi = P.info(MI);
         auto wr = [&](int r) {
             if (r >= 0) {
@@ -1298,18 +1323,15 @@ struct Xfer {
                     break;
                 }
                 bool has2 = MI.getNumOperands() > 2 && MI.getOperand(2).isReg();
-                // BPF's ordinary ALU operations are tied three-operand
-                // instructions (`dst = op dst, src`), but MOV_rr is the
-                // two-operand exception (`dst = mov src`). Treating the
-                // missing operand 2 as an absent source leaves the
-                // destination's stale lattice value in place and can turn a
-                // scalar copy into a verifier pointer.
+                // MOV's source is operand 1, unlike tied three-operand ALU
+                // instructions. Any later implicit register operands describe
+                // liveness, not the value being copied.
                 int s = -1;
                 if (!oi.immSrc) {
-                    if (has2) {
-                        s = P.ridx(MI.getOperand(2));
-                    } else if (oi.alu == OpInfo::Mov && MI.getOperand(1).isReg()) {
+                    if (oi.alu == OpInfo::Mov && MI.getOperand(1).isReg()) {
                         s = P.ridx(MI.getOperand(1));
+                    } else if (has2) {
+                        s = P.ridx(MI.getOperand(2));
                     }
                 }
                 bool fromFrame = s == 10 || (MI.getOperand(1).isReg() && P.ridx(MI.getOperand(1)) == 10);

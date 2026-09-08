@@ -240,6 +240,18 @@ capsule_mir_pass_contract(
     "-bpf-unified-spill-limit=16"
 )
 capsule_mir_pass_contract(
+    unified-spills-identity-barrier
+    "bpf-unified-spills"
+    unified-spills/identity-barrier
+    "-bpf-unified-spill-limit=16"
+)
+capsule_mir_pass_contract(
+    unified-spills-move-implicit-def
+    "bpf-unified-spills"
+    unified-spills/move-implicit-def
+    "-bpf-unified-spill-limit=16"
+)
+capsule_mir_pass_contract(
     unified-spills-opaque-definition
     "bpf-unified-spills"
     unified-spills/opaque-definition
