@@ -13,8 +13,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Nix checks (x86-64)
+  format:
+    name: Format
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check formatting
+        run: nix build --print-build-logs .#checks.x86_64-linux.format
+
+  profile:
+    name: Kernel ${{ matrix.profile }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        profile:
+          - "515"
+          - "518"
+          - "60"
+          - "66"
+          - "69"
+          - "610"
+          - "70"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@8aa03977d8d733052d78f4e008a241fd1dbf36b3
+        with:
+          enable_kvm: true
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: system-features = nixos-test benchmark big-parallel kvm
+
+      - name: Build and run the profile's tests and examples
+        run: |
+          nix build --print-build-logs --max-jobs 1 --cores 4 \
+            ".#checks.x86_64-linux.suite-${{ matrix.profile }}" \
+            ".#checks.x86_64-linux.vm-${{ matrix.profile }}" \
+            ".#checks.x86_64-linux.examples-vm-${{ matrix.profile }}"
+
+  benchmarks:
+    name: Benchmarks
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -27,9 +76,6 @@ jobs:
           enable_kvm: true
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: system-features = nixos-test benchmark big-parallel kvm
-
-      - name: Build and run all in-kernel tests
-        run: nix flake check --print-build-logs --max-jobs 1 --cores 4
 
       - name: Restore benchmark history
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830

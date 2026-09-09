@@ -8,7 +8,9 @@
   llvmPackages,
   bpfCapsule,
   linuxPackages_5_15,
+  linuxPackages_6_1,
   linuxPackages_6_6,
+  linuxPackages_6_12,
   linuxPackages_latest,
 }:
 let
@@ -55,15 +57,20 @@ let
       }
     );
   suiteFor = targetKernel: callPackage ./tests.nix { inherit llvmPackages bpfCapsule targetKernel; };
-  suites = {
-    "5.15" = suiteFor "5.15";
-    "5.18" = suiteFor "5.18";
-    "6.6" = suiteFor "6.6";
-    "6.9" = suiteFor "6.9";
-    "6.10" = suiteFor "6.10";
-    "7.0" = suiteFor "7.0";
-    "7.1" = suiteFor "7.1";
+  # Every kernel version at which a target feature flips, mapped to the
+  # closest nixpkgs kernel that can boot the code that profile generates.
+  # A profile is a capability floor: 5.18 and 6.0 have no packaged kernel,
+  # so their code runs on the next one that does.
+  profileKernels = {
+    "5.15" = linuxPackages_5_15;
+    "5.18" = linuxPackages_6_1;
+    "6.0" = linuxPackages_6_1;
+    "6.6" = linuxPackages_6_6;
+    "6.9" = linuxPackages_6_12;
+    "6.10" = linuxPackages_6_12;
+    "7.0" = linuxPackages_latest;
   };
+  suites = lib.mapAttrs (kernel: _: suiteFor kernel) profileKernels;
   benchmarkSuite = callPackage ./benchmark-suite.nix {
     inherit bpfCapsule llvmPackages;
     targetKernel = defaultKernel;
@@ -99,29 +106,23 @@ in
   ) suites;
   inherit benchmarkSuite;
 
-  # Everything exported through the flake's standard `checks` output.
-  checks = {
-    suite-515 = suites."5.15";
-    suite-66 = suites."6.6";
-    suite-69 = suites."6.9";
-    suite-70 = suites."7.0";
-    suite-71 = suites."7.1";
-    suite-default = suites.${defaultKernel};
-    benchmark-suite = benchmarkSuite;
-    vm-515 = vm "5.15" linuxPackages_5_15;
-    vm-66 = vm "6.6" linuxPackages_6_6;
-    vm-69 = vm "6.9" linuxPackages_latest;
-    vm-70 = vm "7.0" linuxPackages_latest;
-    examples-vm-515 = examplesVm "5.15" linuxPackages_5_15;
-    examples-vm-default = examplesVm defaultKernel linuxPackages_latest;
-  }
-  // lib.optionalAttrs (stdenv.hostPlatform.parsed.cpu.name == "aarch64") {
-    suite-518 = suites."5.18";
-    suite-610 = suites."6.10";
-    vm-518 = vm "5.18" linuxPackages_latest;
-    vm-610 = vm "6.10" linuxPackages_latest;
-  }
-  // lib.optionalAttrs (lib.versionAtLeast linuxPackages_latest.kernel.version "7.1") {
-    vm-71 = vm "7.1" linuxPackages_latest;
-  };
+  # Everything exported through the flake's standard `checks` output: every
+  # profile's compiler tests, its in-kernel tests, and its examples, so a
+  # feature that only one kernel floor enables cannot regress unnoticed.
+  checks =
+    lib.concatMapAttrs (
+      kernel: kernelPackages:
+      let
+        key = lib.replaceStrings [ "." ] [ "" ] kernel;
+      in
+      {
+        "suite-${key}" = suites.${kernel};
+        "vm-${key}" = vm kernel kernelPackages;
+        "examples-vm-${key}" = examplesVm kernel kernelPackages;
+      }
+    ) profileKernels
+    // {
+      suite-default = suites.${defaultKernel};
+      benchmark-suite = benchmarkSuite;
+    };
 }
