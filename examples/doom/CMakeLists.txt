@@ -17,7 +17,7 @@ bpf_capsule_object(
     INCLUDE_DIRECTORIES ${CMAKE_CURRENT_SOURCE_DIR}
     # Upstream intentionally uses assignment in its WAD-probing conditions.
     COMPILE_OPTIONS -Wno-parentheses -g
-    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS} --loop-budget-multiplier=4
 )
 bpf_capsule_skeleton(doom_skeleton OUTPUT doom.skel.h OBJECT "${doom_bpf}" NAME doom)
 

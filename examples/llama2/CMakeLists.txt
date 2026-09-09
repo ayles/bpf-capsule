@@ -17,7 +17,7 @@ bpf_capsule_object(
     SOURCES llama2_bpf.c
     LIBRARIES capsule_llama2
     COMPILE_OPTIONS -g
-    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS} --loop-budget-multiplier=4
 )
 bpf_capsule_skeleton(llama2_skeleton OUTPUT llama2.skel.h OBJECT "${llama2_bpf}" NAME llama2)
 
@@ -34,7 +34,7 @@ bpf_capsule_object(
     SOURCES llama2q_bpf.c
     LIBRARIES capsule_llama2
     COMPILE_OPTIONS -g
-    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS} --loop-budget-multiplier=4
 )
 bpf_capsule_skeleton(llama2q_skeleton OUTPUT llama2q.skel.h OBJECT "${llama2q_bpf}" NAME llama2q)
 

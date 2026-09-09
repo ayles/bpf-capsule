@@ -17,7 +17,7 @@ bpf_capsule_object(
     SOURCES lua_bpf.c
     LIBRARIES capsule_lua
     COMPILE_OPTIONS -g
-    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS} --loop-budget-multiplier=4
 )
 bpf_capsule_skeleton(lua_skeleton OUTPUT lua.skel.h OBJECT "${lua_bpf}" NAME lua_runner)
 

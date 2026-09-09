@@ -361,6 +361,8 @@ Loops then get one of three fates, priced against an explicit verifier budget
   A shared expansion budget prioritizes chunks by estimated dispatches saved
   per unit of verifier cost, using call sites and loop nesting to estimate
   frequency. This selects loop chunks, not the physical placement of regions.
+  The linker's `--loop-budget-multiplier` scales that budget for a link with
+  verifier headroom to spare.
 - **Virtualized**: suspend at every backedge — the universal fallback;
   suspension itself is the verifier boundary.
 

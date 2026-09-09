@@ -66,6 +66,14 @@ using RegionId = bpf_capsule_region_id;
 static cl::opt<unsigned> FiberStackBytes(
     "bpf-fiber-stack-size", cl::init(256u * 1024u), cl::desc("Bytes of unified program memory reserved for each Capsule fiber stack"));
 
+// The chunk budget is derived from the loops themselves (ClassifyLoops)
+// because the compiler cannot yet measure how much of the verifier's budget
+// an object will use. This multiplier lets a link spend known headroom on
+// more chunks; once that use can be predicted, the factor becomes a
+// computed value instead of an option.
+static cl::opt<unsigned> LoopChunkBudgetMultiplier(
+    "bpf-loop-chunk-budget-multiplier", cl::init(1), cl::desc("Multiply the verifier budget spent on native loop chunks"));
+
 // An intra-frame continuation immediately re-enters the managed dispatcher.
 constexpr int ActionContinue = 0;
 // Return to the native caller before another dispatch. Yield, abort and a
@@ -3132,6 +3140,7 @@ private:
         // loop-entry shapes. Both terms come from the candidates themselves:
         // there is no module-size threshold or fixed budget floor.
         chunkBudget = std::max(chunkBudget, singleLoopBudget);
+        chunkBudget = SaturatingMultiply(chunkBudget, std::max(1u, LoopChunkBudgetMultiplier.getValue()));
         uint64_t chunkCost = 0;
         auto stableTie = [&](unsigned a, unsigned b) {
             Function* af = chunks[a].Header->getParent();

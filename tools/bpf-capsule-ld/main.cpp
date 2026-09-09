@@ -80,6 +80,8 @@ cl::opt<bool> ManagedAtomics(
     "managed-atomics", cl::desc("Enable full BPF atomics and scalar C atomics in Capsule memory"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<unsigned> FiberStack(
     "fiber-stack", cl::desc("Bytes in each Capsule fiber stack (power of two, default 262144)"), cl::init(262144), cl::cat(LinkerCategory));
+cl::opt<unsigned> LoopBudgetMultiplier(
+    "loop-budget-multiplier", cl::desc("Multiply the verifier budget spent on native loop chunks (default 1)"), cl::init(1), cl::cat(LinkerCategory));
 cl::opt<bool> EmitLlvm("emit-llvm", cl::desc("Stop after the capsule pipeline and emit bitcode (debugging)"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<bool> EmitAssembly("emit-asm", cl::desc("Stop after code generation and emit BPF assembly (debugging)"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<bool> SaveTemps("save-temps", cl::desc("Keep <output>.linked.bc and <output>.capsule.bc beside the output"), cl::init(false), cl::cat(LinkerCategory));
@@ -308,6 +310,10 @@ int main(int argc, char** argv) {
         fail("--fiber-stack exceeds the BPF backend's stack size range");
     }
     setCodegenOption<unsigned>("bpf-fiber-stack-size", FiberStack);
+    if (!LoopBudgetMultiplier) {
+        fail("--loop-budget-multiplier must be at least 1");
+    }
+    setCodegenOption<unsigned>("bpf-loop-chunk-budget-multiplier", LoopBudgetMultiplier);
     setCodegenOption<int>("bpf-stack-size", FiberStack);
     if (!customPipeline && !runPassMode) {
         setCodegenOption<bool>("bpf-unified-spill-pipeline", true);
