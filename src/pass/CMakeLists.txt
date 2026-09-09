@@ -34,6 +34,7 @@ add_library(
     split_shift63.cpp
     stackify.cpp
     # late machine pass (registers itself into codegen via TargetPassConfig)
+    machine_arena_sext.cpp
     machine_stack_budget.cpp
     unified_spills_mir.cpp
     machine_flatten.cpp

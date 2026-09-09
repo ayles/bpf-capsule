@@ -324,6 +324,7 @@ int main(int argc, char** argv) {
     if (!customPipeline && !runPassMode) {
         setCodegenOption<bool>("bpf-unified-spill-pipeline", true);
     }
+    setCodegenOption<bool>("bpf-machine-arena-sext", Memory == MemoryMode::Arena && !NativeArenaSignedLoads);
 
     if (stopCodegen && (EmitLlvm || EmitAssembly)) {
         fail("-stop-before/-stop-after cannot be combined with --emit-llvm or --emit-asm");

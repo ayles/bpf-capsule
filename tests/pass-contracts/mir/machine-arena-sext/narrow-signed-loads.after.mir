@@ -1,0 +1,69 @@
+--- |
+  ; ModuleID = 'tests/pass-contracts/mir/machine-arena-sext/narrow-signed-loads.before.mir'
+  source_filename = "machine-arena-sext-contract.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define i64 @signed_loads(ptr %p) #0 {
+  entry:
+    %b = load i8, ptr %p, align 1
+    %sb = sext i8 %b to i64
+    %hp = getelementptr i8, ptr %p, i64 8
+    %h = load i16, ptr %hp, align 2
+    %sh = sext i16 %h to i64
+    %wp = getelementptr i8, ptr %p, i64 16
+    %w = load i32, ptr %wp, align 4
+    %sw = sext i32 %w to i64
+    %a = add i64 %sb, %sh
+    %r = add i64 %a, %sw
+    ret i64 %r
+  }
+  
+  attributes #0 = { "target-cpu"="v4" }
+...
+---
+name:            signed_loads
+alignment:       8
+tracksRegLiveness: true
+noPhis:          false
+isSSA:           true
+noVRegs:         false
+hasFakeUses:     false
+registers:
+  - { id: 0, class: gpr }
+  - { id: 1, class: gpr }
+  - { id: 2, class: gpr }
+  - { id: 3, class: gpr }
+  - { id: 4, class: gpr }
+  - { id: 5, class: gpr }
+  - { id: 6, class: gpr32 }
+  - { id: 7, class: gpr }
+  - { id: 8, class: gpr32 }
+  - { id: 9, class: gpr }
+  - { id: 10, class: gpr32 }
+  - { id: 11, class: gpr }
+liveins:
+  - { reg: '$r1', virtual-reg: '%0' }
+frameInfo:
+  maxAlignment:    1
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1
+  
+    %0:gpr = COPY $r1
+    %6:gpr32 = LDH32 %0, 8 :: (load (s16) from %ir.hp)
+    %7:gpr = SUBREG_TO_REG killed %6, %subreg.sub_32
+    %1:gpr = MOVSX_rr_16 killed %7
+    %8:gpr32 = LDB32 %0, 0 :: (load (s8) from %ir.p)
+    %9:gpr = SUBREG_TO_REG killed %8, %subreg.sub_32
+    %2:gpr = MOVSX_rr_8 killed %9
+    %3:gpr = ADD_rr %2, killed %1
+    %10:gpr32 = LDW32 %0, 16 :: (load (s32) from %ir.wp)
+    %11:gpr = SUBREG_TO_REG killed %10, %subreg.sub_32
+    %4:gpr = MOVSX_rr_32 killed %11
+    %5:gpr = ADD_rr %3, killed %4
+    $r0 = COPY %5
+    RET implicit $r0
+...
