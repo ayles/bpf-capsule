@@ -29,6 +29,11 @@
 #define BPF_CAPSULE_FUNCTION_TOKEN_DISPLACEMENT (1ull << 32)
 #define BPF_CAPSULE_REGION_ID_STEP_BITS 8u
 #define BPF_CAPSULE_REGION_ID_STEP_MASK ((1u << BPF_CAPSULE_REGION_ID_STEP_BITS) - 1u)
+
+// Dispatches one generated step call performs before returning to its
+// bounded caller: the compiler builds the loop, the runtime sizes the outer
+// levels by it. Bounded by the verifier's per-path jump history (8192).
+#define BPF_CAPSULE_STEP_TRIPS 32u
 #define BPF_CAPSULE_REGION_ID_INDEX_MASK 0x00ffff00u
 #define BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN 0x01000000u
 #define BPF_CAPSULE_NATIVE_FUNCTION_TOKEN_SPAN 0x00100000u

@@ -221,13 +221,14 @@ entry:
   %0 = icmp ne ptr %fiber_control, null
   br i1 %0, label %control.ready, label %control.missing
 
-iterate:                                          ; preds = %control.ready
+iterate:                                          ; preds = %latch, %control.ready
+  %trip = phi i32 [ 0, %control.ready ], [ %trip.next, %latch ]
   %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5
   %resume.region.id = load i32, ptr %fiber.resume.region.id, align 4
   %1 = icmp eq i32 %resume.region.id, -1
   %2 = icmp eq i32 %resume.region.id, 0
   %3 = or i1 %2, %1
-  br i1 %3, label %terminal, label %route
+  br label %route
 
 control.ready:                                    ; preds = %entry
   br label %iterate
@@ -242,26 +243,42 @@ dispatch:                                         ; preds = %route
   %step.index = and i32 %resume.region.id, 255
   %region.key = and i32 %resume.region.id, 16776960
   switch i32 %step.index, label %bad.id [
-    i32 0, label %bpf.dispatch.output.scalar.0
+    i32 0, label %idle.or.root
+    i32 255, label %completed
   ]
 
-bpf.dispatch.output.scalar.0:                     ; preds = %dispatch
+idle.or.root:                                     ; preds = %dispatch
+  br i1 %2, label %done, label %bpf.dispatch.output.scalar.0
+
+bpf.dispatch.output.scalar.0:                     ; preds = %idle.or.root
   %4 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region.key)
+  %5 = icmp ne i32 %4, 0
+  br i1 %5, label %bpf.dispatch.output.scalar.0.stop, label %latch
+
+bpf.dispatch.output.scalar.0.stop:                ; preds = %bpf.dispatch.output.scalar.0
   ret i32 %4
 
-terminal:                                         ; preds = %iterate
+terminal:                                         ; No predecessors!
   br i1 %1, label %completed, label %done
 
-completed:                                        ; preds = %terminal
+completed:                                        ; preds = %terminal, %dispatch
   store i32 0, ptr %fiber.resume.region.id, align 4
   br label %done
 
-done:                                             ; preds = %completed, %terminal
+done:                                             ; preds = %completed, %terminal, %idle.or.root
   ret i32 1
 
 bad.id:                                           ; preds = %dispatch
-  %5 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
+  %6 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661)
   ret i32 1
+
+latch:                                            ; preds = %bpf.dispatch.output.scalar.0
+  %trip.next = add i32 %trip, 1
+  %7 = icmp ult i32 %trip.next, 32
+  br i1 %7, label %iterate, label %exhausted
+
+exhausted:                                        ; preds = %latch
+  ret i32 0
 }
 
 ; Function Attrs: noinline

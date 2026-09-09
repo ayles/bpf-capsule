@@ -243,20 +243,24 @@ extern int __bpf_capsule_trampoline_ctx_step(void* ctx, uint32_t fiber, struct _
 // the history accumulates along the whole path, so nested loops in one function
 // blow it just the same.
 //
-// Two levels of bounded loops in global subprograms give 4.2 million
-// dispatches for a few thousand instructions of verification. Each level is
-// checked once, standalone, and the verifier does not walk into a global
-// subprogram at its call site. Runtime iterations therefore multiply while
-// verification cost only adds. The construct needs no helper or iteration map
-// and works on both supported kernel tiers.
+// Three bounded loops give 4.2 million dispatches for a few thousand
+// instructions of verification: the entry program repeats the L1 level, L1
+// repeats the generated step, and the step itself loops over
+// BPF_CAPSULE_STEP_TRIPS dispatches with the root switch and the root calls
+// inline. Each level is a global subprogram, checked once and standalone,
+// and the verifier does not walk into a global subprogram at its call site,
+// so runtime iterations multiply while verification cost only adds. The
+// step's trip count answers to the jump-history limit above: its inline
+// body spends about ten jumps per trip. Every trip past the first saves a
+// global call with its prologue and epilogue, most of a dispatch's fixed
+// cost. The construct needs no helper or iteration map and works on both
+// supported kernel tiers.
 //
 // Measured alternatives, all rejected:
 //   - bpf_for_each_map_elem (5.13+): same speed, but needs a 1<<20-element
 //     array map -- 4 MiB bought purely to buy iterations.
-//   - open-coded iterators (6.4+): the loop body is INLINE, so the verifier
-//     walks it instead of checking it once, and zlib dies with "the sequence
-//     of 8193 jumps is too complex". Being checked once, as a callback or a
-//     global subprogram, is the whole trick; an inlined loop throws it away.
+//   - open-coded iterators (6.4+): one loop and no L1, but bpf_iter_num_next()
+//     is a kernel call on every trip and costs what the removed level saved.
 //   - bpf_loop (5.17+): calls its body through a function pointer once per
 //     iteration, slower than a direct call.
 // So this is the same construct on every kernel, which suits us: arena is
@@ -267,6 +271,10 @@ extern int __bpf_capsule_trampoline_ctx_step(void* ctx, uint32_t fiber, struct _
 // overruns it ("combined stack size of 7 calls is 544. Too large").
 #ifndef BPF_CAPSULE_DRIVE_LEVEL
 #define BPF_CAPSULE_DRIVE_LEVEL 2048
+#endif
+// The entry-level loop: level * repeats * step trips = the 4M-dispatch budget.
+#ifndef BPF_CAPSULE_DRIVE_REPEATS
+#define BPF_CAPSULE_DRIVE_REPEATS (BPF_CAPSULE_DRIVE_LEVEL / BPF_CAPSULE_STEP_TRIPS)
 #endif
 #if BPF_CAPSULE_FEATURE_ARENA
 #define __BPF_CAPSULE_STACK_PARAMETER
@@ -308,7 +316,7 @@ __BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((always_inline)) int 
         return 1;
     }
 #endif
-    for (int i = 0; i < BPF_CAPSULE_DRIVE_LEVEL; i++) {
+    for (int i = 0; i < BPF_CAPSULE_DRIVE_REPEATS; i++) {
         int status = __bpf_capsule_trampoline_l1(fiber __BPF_CAPSULE_CONTROL_ARGUMENT __BPF_CAPSULE_STACK_ARGUMENT);
         if (status) {
             return status;
@@ -343,7 +351,7 @@ __BPF_CAPSULE_FN_CLASS("capsule.trampoline") __attribute__((used, always_inline)
         return 1;
     }
 #endif
-    for (int i = 0; i < BPF_CAPSULE_DRIVE_LEVEL; i++) {
+    for (int i = 0; i < BPF_CAPSULE_DRIVE_REPEATS; i++) {
         int status = __bpf_capsule_trampoline_ctx_l1(ctx, fiber __BPF_CAPSULE_CONTROL_ARGUMENT __BPF_CAPSULE_STACK_ARGUMENT);
         if (status) {
             return status;

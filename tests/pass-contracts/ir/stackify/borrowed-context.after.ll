@@ -9,10 +9,10 @@ target triple = "bpfel"
 @bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 1, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_call_stack = internal global [262144 x i8] zeroinitializer, align 262144, !bpf.fiber.stack.size !0
 
-define i32 @__bpf_capsule_trampoline_l1(i32 %fiber, ptr %control) #0 !dbg !6 {
+define i32 @__bpf_capsule_trampoline_l1(i32 %fiber, ptr nonnull %control) #0 !dbg !6 {
 entry:
-  %status = call i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr %control), !dbg !19
-  ret i32 %status, !dbg !19
+  %status = call i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr %control), !dbg !21
+  ret i32 %status, !dbg !21
 }
 
 define i32 @__bpf_capsule_trampoline(i32 %fiber) #0 {
@@ -22,10 +22,10 @@ entry:
   ret i32 %status
 }
 
-define i32 @__bpf_capsule_trampoline_ctx_l1(ptr %context, i32 %fiber, ptr %control) #0 !dbg !20 {
+define i32 @__bpf_capsule_trampoline_ctx_l1(ptr %context, i32 %fiber, ptr nonnull %control) #0 !dbg !22 {
 entry:
-  %status = call i32 @__bpf_capsule_trampoline_ctx_step(ptr %context, i32 %fiber, ptr %control), !dbg !29
-  ret i32 %status, !dbg !29
+  %status = call i32 @__bpf_capsule_trampoline_ctx_step(ptr %context, i32 %fiber, ptr %control), !dbg !31
+  ret i32 %status, !dbg !31
 }
 
 define i32 @__bpf_capsule_trampoline_ctx(ptr %context, i32 %fiber) #0 {
@@ -35,7 +35,7 @@ entry:
   ret i32 %status
 }
 
-define i32 @start(ptr %context, i32 %fiber) section "xdp" !dbg !30 !bpf.native !33 {
+define i32 @start(ptr %context, i32 %fiber) section "xdp" !dbg !32 !bpf.native !35 {
 entry:
   %fiber.index = and i32 %fiber, 0
   %fiber.index1 = and i32 %fiber.index, 0
@@ -45,7 +45,7 @@ entry:
   %fiber.stack = getelementptr i8, ptr @bpf_call_stack, i64 %stack.linear.offset
   %root.fp = ptrtoint ptr %fiber.stack to i64
   %fiber.index2 = and i32 %fiber.index, 0
-  %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index2, !bpf.capsule.sectioned.bounded !33
+  %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index2, !bpf.capsule.sectioned.bounded !35
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber.control, i32 0, i32 0
   store i64 0, ptr %fiber.outcome, align 8
   %root.saved.fp = getelementptr i8, ptr %fiber.stack, i64 0
@@ -53,23 +53,23 @@ entry:
   %root.return.region.id = getelementptr i8, ptr %fiber.stack, i64 8
   store i32 -1, ptr %root.return.region.id, align 4
   %fiber.index3 = and i32 %fiber.index, 0
-  %fiber.control4 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index3, !bpf.capsule.sectioned.bounded !33
+  %fiber.control4 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index3, !bpf.capsule.sectioned.bounded !35
   %fiber.return.size = getelementptr inbounds nuw %fiber_control, ptr %fiber.control4, i32 0, i32 6
   store i32 4, ptr %fiber.return.size, align 4
   %fiber.index5 = and i32 %fiber.index, 0
-  %fiber.control6 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index5, !bpf.capsule.sectioned.bounded !33
+  %fiber.control6 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index5, !bpf.capsule.sectioned.bounded !35
   %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber.control6, i32 0, i32 5
   store i32 256, ptr %fiber.resume.region.id, align 4
   %fiber.index7 = and i32 %fiber.index, 0
-  %fiber.control8 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index7, !bpf.capsule.sectioned.bounded !33
+  %fiber.control8 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index7, !bpf.capsule.sectioned.bounded !35
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber.control8, i32 0, i32 3
   store i64 %root.fp, ptr %fiber.sp, align 8
   %fiber.index9 = and i32 %fiber.index, 0
-  %fiber.control10 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index9, !bpf.capsule.sectioned.bounded !33
+  %fiber.control10 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index9, !bpf.capsule.sectioned.bounded !35
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber.control10, i32 0, i32 4
   store i64 %root.fp, ptr %fiber.fp, align 8
   %control.i = getelementptr [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index
-  %status.i = call i32 @__bpf_capsule_trampoline_ctx_l1(ptr %context, i32 %fiber.index, ptr %control.i), !dbg !34
+  %status.i = call i32 @__bpf_capsule_trampoline_ctx_l1(ptr %context, i32 %fiber.index, ptr %control.i), !dbg !36
   %fiber.index11 = and i32 %fiber.index, 0
   %2 = zext i32 %fiber.index11 to i64
   %3 = mul i64 %2, 262144
@@ -79,7 +79,7 @@ entry:
   ret i32 %root.result
 }
 
-define i32 @start_scalar(i32 %fiber) section "syscall" !bpf.native !33 {
+define i32 @start_scalar(i32 %fiber) section "syscall" !bpf.native !35 {
 entry:
   %fiber.index = and i32 %fiber, 0
   %fiber.index1 = and i32 %fiber.index, 0
@@ -89,7 +89,7 @@ entry:
   %fiber.stack = getelementptr i8, ptr @bpf_call_stack, i64 %stack.linear.offset
   %root.fp = ptrtoint ptr %fiber.stack to i64
   %fiber.index2 = and i32 %fiber.index, 0
-  %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index2, !bpf.capsule.sectioned.bounded !33
+  %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index2, !bpf.capsule.sectioned.bounded !35
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber.control, i32 0, i32 0
   store i64 0, ptr %fiber.outcome, align 8
   %root.saved.fp = getelementptr i8, ptr %fiber.stack, i64 0
@@ -99,19 +99,19 @@ entry:
   %2 = getelementptr i8, ptr %fiber.stack, i64 24
   store i32 5, ptr %2, align 8
   %fiber.index3 = and i32 %fiber.index, 0
-  %fiber.control4 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index3, !bpf.capsule.sectioned.bounded !33
+  %fiber.control4 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index3, !bpf.capsule.sectioned.bounded !35
   %fiber.return.size = getelementptr inbounds nuw %fiber_control, ptr %fiber.control4, i32 0, i32 6
   store i32 4, ptr %fiber.return.size, align 4
   %fiber.index5 = and i32 %fiber.index, 0
-  %fiber.control6 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index5, !bpf.capsule.sectioned.bounded !33
+  %fiber.control6 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index5, !bpf.capsule.sectioned.bounded !35
   %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber.control6, i32 0, i32 5
   store i32 1536, ptr %fiber.resume.region.id, align 4
   %fiber.index7 = and i32 %fiber.index, 0
-  %fiber.control8 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index7, !bpf.capsule.sectioned.bounded !33
+  %fiber.control8 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index7, !bpf.capsule.sectioned.bounded !35
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber.control8, i32 0, i32 3
   store i64 %root.fp, ptr %fiber.sp, align 8
   %fiber.index9 = and i32 %fiber.index, 0
-  %fiber.control10 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index9, !bpf.capsule.sectioned.bounded !33
+  %fiber.control10 = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index9, !bpf.capsule.sectioned.bounded !35
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber.control10, i32 0, i32 4
   store i64 %root.fp, ptr %fiber.fp, align 8
   %control.i = getelementptr [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index
@@ -126,22 +126,22 @@ entry:
 }
 
 ; Function Attrs: noinline
-define i32 @bpf_capsule_set_outcome(i32 %fiber, i64 %outcome) #1 !dbg !35 !bpf.native.scalar !33 {
+define i32 @bpf_capsule_set_outcome(i32 %fiber, i64 %outcome) #1 !dbg !37 !bpf.native.scalar !35 {
 entry:
-  %fiber.index = and i32 %fiber, 0, !dbg !42
-  %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index, !dbg !42, !bpf.capsule.sectioned.bounded !33
-  %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber.control, i32 0, i32 0, !dbg !42
-  store volatile i64 %outcome, ptr %fiber.outcome, align 8, !dbg !42
-  ret i32 0, !dbg !42
+  %fiber.index = and i32 %fiber, 0, !dbg !44
+  %fiber.control = getelementptr inbounds [1 x %fiber_control], ptr @bpf_capsule_fibers, i32 0, i32 %fiber.index, !dbg !44, !bpf.capsule.sectioned.bounded !35
+  %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber.control, i32 0, i32 0, !dbg !44
+  store volatile i64 %outcome, ptr %fiber.outcome, align 8, !dbg !44
+  ret i32 0, !dbg !44
 }
 
 ; Function Attrs: noinline
-define i32 @bpf.unit.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !43 !bpf.capsule !33 !bpf.capsule.allocation.unit !50 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !51 {
+define i32 @bpf.unit.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !45 !bpf.capsule !35 !bpf.capsule.allocation.unit !52 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !53 {
 unit.entry:
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   %frame.fp = load i64, ptr %fiber.fp, align 8
   %frame.addr = inttoptr i64 %frame.fp to ptr
-  call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %fiber_control), !dbg !52
+  call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %fiber_control), !dbg !54
   br label %unit.dispatch
 
 unit.dispatch:                                    ; preds = %unit.entry
@@ -173,7 +173,7 @@ entry:                                            ; preds = %borrowed_root.prolo
 
 borrowed_root.prologue.overflow:                  ; preds = %borrowed_root.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %2 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !52
+  %2 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !54
   ret i32 1
 
 entry.resume:                                     ; preds = %unit.test.right3
@@ -253,8 +253,8 @@ entry.resume.resume.resume.resume:                ; preds = %unit.test.right7
   ret i32 0
 
 unit.dispatch1:                                   ; preds = %unit.dispatch
-  %8 = icmp ult i32 %region, 768, !dbg !52
-  br i1 %8, label %unit.test.left, label %unit.test.right, !dbg !52
+  %8 = icmp ult i32 %region, 768, !dbg !54
+  br i1 %8, label %unit.test.left, label %unit.test.right, !dbg !54
 
 unit.test.left:                                   ; preds = %unit.dispatch1
   %9 = icmp ult i32 %region, 512
@@ -285,12 +285,12 @@ unit.test.right7:                                 ; preds = %unit.test.right5
 }
 
 ; Function Attrs: noinline
-define i32 @bpf.unit.1(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !53 !bpf.capsule !33 !bpf.capsule.allocation.unit !50 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !51 {
+define i32 @bpf.unit.1(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !55 !bpf.capsule !35 !bpf.capsule.allocation.unit !52 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !53 {
 unit.entry:
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   %frame.fp = load i64, ptr %fiber.fp, align 8
   %frame.addr = inttoptr i64 %frame.fp to ptr
-  call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %fiber_control), !dbg !58
+  call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %fiber_control), !dbg !60
   br label %unit.dispatch
 
 unit.dispatch:                                    ; preds = %unit.entry
@@ -325,20 +325,20 @@ entry:                                            ; preds = %scalar_helper.prolo
 
 scalar_helper.prologue.overflow:                  ; preds = %scalar_helper.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !58
+  %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !60
   ret i32 1
 
 unit.dispatch1:                                   ; preds = %unit.dispatch
-  br label %scalar_helper.prologue, !dbg !58
+  br label %scalar_helper.prologue, !dbg !60
 }
 
 ; Function Attrs: noinline
-define i32 @bpf.unit.2(ptr "bpf.capsule.borrowed" %ctx, i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !59 !bpf.capsule !33 !bpf.capsule.allocation.unit !67 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !68 {
+define i32 @bpf.unit.2(ptr "bpf.capsule.borrowed" %ctx, i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !61 !bpf.capsule !35 !bpf.capsule.allocation.unit !69 !bpf.capsule.stack.size !0 !bpf.capsule.flatten.unit !70 {
 unit.entry:
   %fiber.fp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 4
   %frame.fp = load i64, ptr %fiber.fp, align 8
   %frame.addr = inttoptr i64 %frame.fp to ptr
-  call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %fiber_control), !dbg !69
+  call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %fiber_control), !dbg !71
   br label %unit.dispatch
 
 unit.dispatch:                                    ; preds = %unit.entry
@@ -353,7 +353,7 @@ context_helper.prologue:                          ; preds = %unit.dispatch1
 entry:                                            ; preds = %context_helper.prologue
   %fiber.sp = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 3
   store i64 %frame.sp, ptr %fiber.sp, align 8
-  call void asm sideeffect "", "r"(ptr %ctx), !dbg !69
+  call void asm sideeffect "", "r"(ptr %ctx), !dbg !71
   %1 = getelementptr i8, ptr %frame.addr, i64 24
   %value = load i32, ptr %1, align 4
   %result = add i32 %value, 1
@@ -374,167 +374,205 @@ entry:                                            ; preds = %context_helper.prol
 
 context_helper.prologue.overflow:                 ; preds = %context_helper.prologue
   %fiber.outcome = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 0
-  %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !69
+  %4 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -30064771069), !dbg !71
   ret i32 1
 
 unit.dispatch1:                                   ; preds = %unit.dispatch
-  br label %context_helper.prologue, !dbg !69
+  br label %context_helper.prologue, !dbg !71
 }
 
 ; Function Attrs: noinline
-define i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr "bpf.capsule.control" %fiber_control) #2 !dbg !70 {
+define i32 @__bpf_capsule_trampoline_step(i32 %fiber, ptr nonnull "bpf.capsule.control" %fiber_control) #2 !dbg !72 {
 entry:
-  %0 = icmp ne ptr %fiber_control, null, !dbg !74
-  br i1 %0, label %control.ready, label %control.missing, !dbg !74
+  %0 = icmp ne ptr %fiber_control, null, !dbg !76
+  br i1 %0, label %control.ready, label %control.missing, !dbg !76
 
-iterate:                                          ; preds = %control.ready
-  %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5, !dbg !74
-  %resume.region.id = load i32, ptr %fiber.resume.region.id, align 4, !dbg !74
-  %1 = icmp eq i32 %resume.region.id, -1, !dbg !74
-  %2 = icmp eq i32 %resume.region.id, 0, !dbg !74
-  %3 = or i1 %2, %1, !dbg !74
-  br i1 %3, label %terminal, label %route, !dbg !74
+iterate:                                          ; preds = %latch, %control.ready
+  %trip = phi i32 [ 0, %control.ready ], [ %trip.next, %latch ], !dbg !76
+  %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5, !dbg !76
+  %resume.region.id = load i32, ptr %fiber.resume.region.id, align 4, !dbg !76
+  %1 = icmp eq i32 %resume.region.id, -1, !dbg !76
+  %2 = icmp eq i32 %resume.region.id, 0, !dbg !76
+  %3 = or i1 %2, %1, !dbg !76
+  br label %route, !dbg !76
 
 control.ready:                                    ; preds = %entry
-  br label %iterate, !dbg !74
+  br label %iterate, !dbg !76
 
 control.missing:                                  ; preds = %entry
-  ret i32 1, !dbg !74
+  ret i32 1, !dbg !76
 
 route:                                            ; preds = %iterate
-  br label %dispatch, !dbg !74
+  br label %dispatch, !dbg !76
 
 dispatch:                                         ; preds = %route
-  %step.index = and i32 %resume.region.id, 255, !dbg !74
-  %region.key = and i32 %resume.region.id, 16776960, !dbg !74
+  %step.index = and i32 %resume.region.id, 255, !dbg !76
+  %region.key = and i32 %resume.region.id, 16776960, !dbg !76
   switch i32 %step.index, label %bad.id [
-    i32 0, label %bpf.dispatch.output.scalar.0
-  ], !dbg !74
+    i32 0, label %idle.or.root
+    i32 255, label %completed
+  ], !dbg !76
 
-bpf.dispatch.output.scalar.0:                     ; preds = %dispatch
-  %4 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region.key), !dbg !74
-  ret i32 %4, !dbg !74
+idle.or.root:                                     ; preds = %dispatch
+  br i1 %2, label %done, label %bpf.dispatch.output.scalar.0, !dbg !76
 
-terminal:                                         ; preds = %iterate
-  br i1 %1, label %completed, label %done, !dbg !74
+bpf.dispatch.output.scalar.0:                     ; preds = %idle.or.root
+  %4 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region.key), !dbg !76
+  %5 = icmp ne i32 %4, 0, !dbg !76
+  br i1 %5, label %bpf.dispatch.output.scalar.0.stop, label %latch, !dbg !76
 
-completed:                                        ; preds = %terminal
-  store i32 0, ptr %fiber.resume.region.id, align 4, !dbg !74
-  br label %done, !dbg !74
+bpf.dispatch.output.scalar.0.stop:                ; preds = %bpf.dispatch.output.scalar.0
+  ret i32 %4, !dbg !76
 
-done:                                             ; preds = %completed, %terminal
-  ret i32 1, !dbg !74
+terminal:                                         ; No predecessors!
+  br i1 %1, label %completed, label %done, !dbg !76
+
+completed:                                        ; preds = %terminal, %dispatch
+  store i32 0, ptr %fiber.resume.region.id, align 4, !dbg !76
+  br label %done, !dbg !76
+
+done:                                             ; preds = %completed, %terminal, %idle.or.root
+  ret i32 1, !dbg !76
 
 bad.id:                                           ; preds = %dispatch
-  %5 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !74
-  ret i32 1, !dbg !74
+  %6 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !76
+  ret i32 1, !dbg !76
+
+latch:                                            ; preds = %bpf.dispatch.output.scalar.0
+  %trip.next = add i32 %trip, 1, !dbg !76
+  %7 = icmp ult i32 %trip.next, 32, !dbg !76
+  br i1 %7, label %iterate, label %exhausted, !dbg !76
+
+exhausted:                                        ; preds = %latch
+  ret i32 0, !dbg !76
 }
 
 ; Function Attrs: noinline
-define i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !75 !bpf.capsule.flatten.root !51 {
+define i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr nonnull "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !77 !bpf.capsule.flatten.root !53 {
 entry:
-  %0 = icmp ne ptr %fiber_control, null, !dbg !80
-  br i1 %0, label %dispatch, label %bad.id, !dbg !80
+  %0 = icmp ne ptr %fiber_control, null, !dbg !82
+  br i1 %0, label %dispatch, label %bad.id, !dbg !82
 
 dispatch:                                         ; preds = %entry
-  br label %unit.route, !dbg !80
+  br label %unit.route, !dbg !82
 
 unit.route:                                       ; preds = %dispatch
-  %1 = icmp ult i32 %region, 1536, !dbg !80
-  br i1 %1, label %unit.route.left, label %unit.route.right, !dbg !80
+  %1 = icmp ult i32 %region, 1536, !dbg !82
+  br i1 %1, label %unit.route.left, label %unit.route.right, !dbg !82
 
 unit.route.left:                                  ; preds = %unit.route
-  br label %bpf.unit.0, !dbg !80
+  br label %bpf.unit.0, !dbg !82
 
 unit.route.right:                                 ; preds = %unit.route
-  br label %bpf.unit.1, !dbg !80
+  br label %bpf.unit.1, !dbg !82
 
 bad.id:                                           ; preds = %entry
-  %2 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !80
-  ret i32 1, !dbg !80
+  %2 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !82
+  ret i32 1, !dbg !82
 
 bpf.unit.0:                                       ; preds = %unit.route.left
-  %3 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !80
-  ret i32 %3, !dbg !80
+  %3 = call i32 @bpf.unit.0(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !82
+  ret i32 %3, !dbg !82
 
 bpf.unit.1:                                       ; preds = %unit.route.right
-  %4 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !80
-  ret i32 %4, !dbg !80
+  %4 = call i32 @bpf.unit.1(i32 %fiber, ptr %fiber_control, i32 %region), !dbg !82
+  ret i32 %4, !dbg !82
 }
 
 ; Function Attrs: noinline
-define i32 @__bpf_capsule_trampoline_ctx_step(ptr "bpf.capsule.borrowed" %ctx, i32 %fiber, ptr "bpf.capsule.control" %fiber_control) #2 !dbg !81 {
+define i32 @__bpf_capsule_trampoline_ctx_step(ptr "bpf.capsule.borrowed" %ctx, i32 %fiber, ptr nonnull "bpf.capsule.control" %fiber_control) #2 !dbg !83 {
 entry:
-  %0 = icmp ne ptr %fiber_control, null, !dbg !86
-  br i1 %0, label %control.ready, label %control.missing, !dbg !86
+  %0 = icmp ne ptr %fiber_control, null, !dbg !88
+  br i1 %0, label %control.ready, label %control.missing, !dbg !88
 
-iterate:                                          ; preds = %control.ready
-  %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5, !dbg !86
-  %resume.region.id = load i32, ptr %fiber.resume.region.id, align 4, !dbg !86
-  %1 = icmp eq i32 %resume.region.id, -1, !dbg !86
-  %2 = icmp eq i32 %resume.region.id, 0, !dbg !86
-  %3 = or i1 %2, %1, !dbg !86
-  br i1 %3, label %terminal, label %route, !dbg !86
+iterate:                                          ; preds = %latch, %control.ready
+  %trip = phi i32 [ 0, %control.ready ], [ %trip.next, %latch ], !dbg !88
+  %fiber.resume.region.id = getelementptr inbounds nuw %fiber_control, ptr %fiber_control, i32 0, i32 5, !dbg !88
+  %resume.region.id = load i32, ptr %fiber.resume.region.id, align 4, !dbg !88
+  %1 = icmp eq i32 %resume.region.id, -1, !dbg !88
+  %2 = icmp eq i32 %resume.region.id, 0, !dbg !88
+  %3 = or i1 %2, %1, !dbg !88
+  br label %route, !dbg !88
 
 control.ready:                                    ; preds = %entry
-  br label %iterate, !dbg !86
+  br label %iterate, !dbg !88
 
 control.missing:                                  ; preds = %entry
-  ret i32 1, !dbg !86
+  ret i32 1, !dbg !88
 
 route:                                            ; preds = %iterate
-  br label %dispatch, !dbg !86
+  br label %dispatch, !dbg !88
 
 dispatch:                                         ; preds = %route
-  %step.index = and i32 %resume.region.id, 255, !dbg !86
-  %region.key = and i32 %resume.region.id, 16776960, !dbg !86
+  %step.index = and i32 %resume.region.id, 255, !dbg !88
+  %region.key = and i32 %resume.region.id, 16776960, !dbg !88
   switch i32 %step.index, label %bad.id [
     i32 1, label %bpf.dispatch.output.ctx.0
-    i32 0, label %scalar.root.0
-  ], !dbg !86
+    i32 0, label %idle.or.root
+    i32 255, label %completed
+  ], !dbg !88
 
 bpf.dispatch.output.ctx.0:                        ; preds = %dispatch
-  %4 = call i32 @bpf.dispatch.output.ctx.0(ptr %ctx, i32 %fiber, ptr %fiber_control, i32 %region.key), !dbg !86
-  ret i32 %4, !dbg !86
+  %4 = call i32 @bpf.dispatch.output.ctx.0(ptr %ctx, i32 %fiber, ptr %fiber_control, i32 %region.key), !dbg !88
+  %5 = icmp ne i32 %4, 0, !dbg !88
+  br i1 %5, label %bpf.dispatch.output.ctx.0.stop, label %latch, !dbg !88
 
-terminal:                                         ; preds = %iterate
-  br i1 %1, label %completed, label %done, !dbg !86
+bpf.dispatch.output.ctx.0.stop:                   ; preds = %bpf.dispatch.output.ctx.0
+  ret i32 %4, !dbg !88
 
-completed:                                        ; preds = %terminal
-  store i32 0, ptr %fiber.resume.region.id, align 4, !dbg !86
-  br label %done, !dbg !86
+scalar.root.0.stop:                               ; preds = %scalar.root.0
+  ret i32 %6, !dbg !88
 
-scalar.root.0:                                    ; preds = %dispatch
-  %5 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region.key), !dbg !86
-  ret i32 %5, !dbg !86
+terminal:                                         ; No predecessors!
+  br i1 %1, label %completed, label %done, !dbg !88
 
-done:                                             ; preds = %completed, %terminal
-  ret i32 1, !dbg !86
+completed:                                        ; preds = %terminal, %dispatch
+  store i32 0, ptr %fiber.resume.region.id, align 4, !dbg !88
+  br label %done, !dbg !88
+
+idle.or.root:                                     ; preds = %dispatch
+  br i1 %2, label %done, label %scalar.root.0, !dbg !88
+
+scalar.root.0:                                    ; preds = %idle.or.root
+  %6 = call i32 @bpf.dispatch.output.scalar.0(i32 %fiber, ptr %fiber_control, i32 %region.key), !dbg !88
+  %7 = icmp ne i32 %6, 0, !dbg !88
+  br i1 %7, label %scalar.root.0.stop, label %latch, !dbg !88
+
+done:                                             ; preds = %idle.or.root, %completed, %terminal
+  ret i32 1, !dbg !88
 
 bad.id:                                           ; preds = %dispatch
-  %6 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !86
-  ret i32 1, !dbg !86
+  %8 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !88
+  ret i32 1, !dbg !88
+
+latch:                                            ; preds = %scalar.root.0, %bpf.dispatch.output.ctx.0
+  %trip.next = add i32 %trip, 1, !dbg !88
+  %9 = icmp ult i32 %trip.next, 32, !dbg !88
+  br i1 %9, label %iterate, label %exhausted, !dbg !88
+
+exhausted:                                        ; preds = %latch
+  ret i32 0, !dbg !88
 }
 
 ; Function Attrs: noinline
-define i32 @bpf.dispatch.output.ctx.0(ptr "bpf.capsule.borrowed" %ctx, i32 %fiber, ptr "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !87 !bpf.capsule.flatten.root !68 {
+define i32 @bpf.dispatch.output.ctx.0(ptr "bpf.capsule.borrowed" %ctx, i32 %fiber, ptr nonnull "bpf.capsule.control" %fiber_control, i32 %region) #1 !dbg !89 !bpf.capsule.flatten.root !70 {
 entry:
-  %0 = icmp ne ptr %fiber_control, null, !dbg !93
-  br i1 %0, label %dispatch, label %bad.id, !dbg !93
+  %0 = icmp ne ptr %fiber_control, null, !dbg !95
+  br i1 %0, label %dispatch, label %bad.id, !dbg !95
 
 dispatch:                                         ; preds = %entry
-  br label %unit.route, !dbg !93
+  br label %unit.route, !dbg !95
 
 unit.route:                                       ; preds = %dispatch
-  br label %bpf.unit.2, !dbg !93
+  br label %bpf.unit.2, !dbg !95
 
 bad.id:                                           ; preds = %entry
-  %1 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !93
-  ret i32 1, !dbg !93
+  %1 = call i32 @bpf_capsule_set_outcome(i32 %fiber, i64 -38654705661), !dbg !95
+  ret i32 1, !dbg !95
 
 bpf.unit.2:                                       ; preds = %unit.route
-  %2 = call i32 @bpf.unit.2(ptr %ctx, i32 %fiber, ptr %fiber_control, i32 %region), !dbg !93
-  ret i32 %2, !dbg !93
+  %2 = call i32 @bpf.unit.2(ptr %ctx, i32 %fiber, ptr %fiber_control, i32 %region), !dbg !95
+  ret i32 %2, !dbg !95
 }
 
 attributes #0 = { "capsule.trampoline" }
@@ -562,79 +600,81 @@ attributes #2 = { noinline "capsule.trampoline" }
 !15 = !DISubrange(count: 40, lowerBound: 0)
 !16 = !{!17, !18}
 !17 = !DILocalVariable(name: "fiber", arg: 1, scope: !6, file: !2, type: !10)
-!18 = !DILocalVariable(name: "control", arg: 2, scope: !6, file: !2, type: !11)
-!19 = !DILocation(line: 0, scope: !6)
-!20 = distinct !DISubprogram(name: "__bpf_capsule_trampoline_ctx_l1", linkageName: "__bpf_capsule_trampoline_ctx_l1", scope: null, file: !2, type: !21, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !25)
-!21 = !DISubroutineType(types: !22)
-!22 = !{!9, !23, !10, !11}
-!23 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !24, size: 64)
-!24 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "xdp_md", file: !2, size: 192)
-!25 = !{!26, !27, !28}
-!26 = !DILocalVariable(name: "context", arg: 1, scope: !20, file: !2, type: !23)
-!27 = !DILocalVariable(name: "fiber", arg: 2, scope: !20, file: !2, type: !10)
-!28 = !DILocalVariable(name: "control", arg: 3, scope: !20, file: !2, type: !11)
-!29 = !DILocation(line: 0, scope: !20)
-!30 = distinct !DISubprogram(name: "start", scope: !2, file: !2, type: !31, spFlags: DISPFlagDefinition, unit: !1)
-!31 = !DISubroutineType(types: !32)
-!32 = !{!9, !23, !9}
-!33 = !{}
-!34 = !DILocation(line: 0, scope: !30)
-!35 = distinct !DISubprogram(name: "bpf_capsule_set_outcome", linkageName: "bpf_capsule_set_outcome", scope: null, file: !2, type: !36, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !39)
-!36 = !DISubroutineType(types: !37)
-!37 = !{!9, !9, !38}
-!38 = !DIBasicType(name: "long long", size: 64, encoding: DW_ATE_signed)
-!39 = !{!40, !41}
-!40 = !DILocalVariable(name: "a0", arg: 1, scope: !35, file: !2, type: !9)
-!41 = !DILocalVariable(name: "a1", arg: 2, scope: !35, file: !2, type: !38)
-!42 = !DILocation(line: 0, scope: !35)
-!43 = distinct !DISubprogram(name: "bpf.unit.0", linkageName: "bpf.unit.0", scope: null, file: !2, type: !44, flags: DIFlagArtificial, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !46)
-!44 = !DISubroutineType(types: !45)
-!45 = !{!9, !10, !11, !10}
-!46 = !{!47, !48, !49}
-!47 = !DILocalVariable(name: "fiber", arg: 1, scope: !43, file: !2, type: !10)
-!48 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !43, file: !2, type: !11)
-!49 = !DILocalVariable(name: "region", arg: 3, scope: !43, file: !2, type: !10)
-!50 = !{i32 0}
-!51 = !{i32 2}
-!52 = !DILocation(line: 0, scope: !43)
-!53 = distinct !DISubprogram(name: "bpf.unit.1", linkageName: "bpf.unit.1", scope: null, file: !2, type: !44, flags: DIFlagArtificial, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !54)
-!54 = !{!55, !56, !57}
-!55 = !DILocalVariable(name: "fiber", arg: 1, scope: !53, file: !2, type: !10)
-!56 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !53, file: !2, type: !11)
-!57 = !DILocalVariable(name: "region", arg: 3, scope: !53, file: !2, type: !10)
-!58 = !DILocation(line: 0, scope: !53)
-!59 = distinct !DISubprogram(name: "bpf.unit.2", linkageName: "bpf.unit.2", scope: null, file: !2, type: !60, flags: DIFlagArtificial, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !62)
-!60 = !DISubroutineType(types: !61)
-!61 = !{!9, !23, !10, !11, !10}
-!62 = !{!63, !64, !65, !66}
-!63 = !DILocalVariable(name: "ctx", arg: 1, scope: !59, file: !2, type: !23)
-!64 = !DILocalVariable(name: "fiber", arg: 2, scope: !59, file: !2, type: !10)
-!65 = !DILocalVariable(name: "fiber_control", arg: 3, scope: !59, file: !2, type: !11)
-!66 = !DILocalVariable(name: "region", arg: 4, scope: !59, file: !2, type: !10)
-!67 = !{i32 1}
-!68 = !{i32 3}
-!69 = !DILocation(line: 0, scope: !59)
-!70 = distinct !DISubprogram(name: "__bpf_capsule_trampoline_step", linkageName: "__bpf_capsule_trampoline_step", scope: null, file: !2, type: !7, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !71)
-!71 = !{!72, !73}
-!72 = !DILocalVariable(name: "fiber", arg: 1, scope: !70, file: !2, type: !10)
-!73 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !70, file: !2, type: !11)
-!74 = !DILocation(line: 0, scope: !70)
-!75 = distinct !DISubprogram(name: "bpf.dispatch.output.scalar.0", linkageName: "bpf.dispatch.output.scalar.0", scope: null, file: !2, type: !44, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !76)
-!76 = !{!77, !78, !79}
-!77 = !DILocalVariable(name: "fiber", arg: 1, scope: !75, file: !2, type: !10)
-!78 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !75, file: !2, type: !11)
-!79 = !DILocalVariable(name: "region", arg: 3, scope: !75, file: !2, type: !10)
-!80 = !DILocation(line: 0, scope: !75)
-!81 = distinct !DISubprogram(name: "__bpf_capsule_trampoline_ctx_step", linkageName: "__bpf_capsule_trampoline_ctx_step", scope: null, file: !2, type: !21, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !82)
-!82 = !{!83, !84, !85}
-!83 = !DILocalVariable(name: "ctx", arg: 1, scope: !81, file: !2, type: !23)
-!84 = !DILocalVariable(name: "fiber", arg: 2, scope: !81, file: !2, type: !10)
-!85 = !DILocalVariable(name: "fiber_control", arg: 3, scope: !81, file: !2, type: !11)
-!86 = !DILocation(line: 0, scope: !81)
-!87 = distinct !DISubprogram(name: "bpf.dispatch.output.ctx.0", linkageName: "bpf.dispatch.output.ctx.0", scope: null, file: !2, type: !60, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !88)
-!88 = !{!89, !90, !91, !92}
-!89 = !DILocalVariable(name: "ctx", arg: 1, scope: !87, file: !2, type: !23)
-!90 = !DILocalVariable(name: "fiber", arg: 2, scope: !87, file: !2, type: !10)
-!91 = !DILocalVariable(name: "fiber_control", arg: 3, scope: !87, file: !2, type: !11)
-!92 = !DILocalVariable(name: "region", arg: 4, scope: !87, file: !2, type: !10)
-!93 = !DILocation(line: 0, scope: !87)
+!18 = !DILocalVariable(name: "control", arg: 2, scope: !6, file: !2, type: !11, annotations: !19)
+!19 = !{!20}
+!20 = !{!"btf_decl_tag", !"arg:nonnull"}
+!21 = !DILocation(line: 0, scope: !6)
+!22 = distinct !DISubprogram(name: "__bpf_capsule_trampoline_ctx_l1", linkageName: "__bpf_capsule_trampoline_ctx_l1", scope: null, file: !2, type: !23, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !27)
+!23 = !DISubroutineType(types: !24)
+!24 = !{!9, !25, !10, !11}
+!25 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !26, size: 64)
+!26 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "xdp_md", file: !2, size: 192)
+!27 = !{!28, !29, !30}
+!28 = !DILocalVariable(name: "context", arg: 1, scope: !22, file: !2, type: !25)
+!29 = !DILocalVariable(name: "fiber", arg: 2, scope: !22, file: !2, type: !10)
+!30 = !DILocalVariable(name: "control", arg: 3, scope: !22, file: !2, type: !11, annotations: !19)
+!31 = !DILocation(line: 0, scope: !22)
+!32 = distinct !DISubprogram(name: "start", scope: !2, file: !2, type: !33, spFlags: DISPFlagDefinition, unit: !1)
+!33 = !DISubroutineType(types: !34)
+!34 = !{!9, !25, !9}
+!35 = !{}
+!36 = !DILocation(line: 0, scope: !32)
+!37 = distinct !DISubprogram(name: "bpf_capsule_set_outcome", linkageName: "bpf_capsule_set_outcome", scope: null, file: !2, type: !38, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !41)
+!38 = !DISubroutineType(types: !39)
+!39 = !{!9, !9, !40}
+!40 = !DIBasicType(name: "long long", size: 64, encoding: DW_ATE_signed)
+!41 = !{!42, !43}
+!42 = !DILocalVariable(name: "a0", arg: 1, scope: !37, file: !2, type: !9)
+!43 = !DILocalVariable(name: "a1", arg: 2, scope: !37, file: !2, type: !40)
+!44 = !DILocation(line: 0, scope: !37)
+!45 = distinct !DISubprogram(name: "bpf.unit.0", linkageName: "bpf.unit.0", scope: null, file: !2, type: !46, flags: DIFlagArtificial, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !48)
+!46 = !DISubroutineType(types: !47)
+!47 = !{!9, !10, !11, !10}
+!48 = !{!49, !50, !51}
+!49 = !DILocalVariable(name: "fiber", arg: 1, scope: !45, file: !2, type: !10)
+!50 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !45, file: !2, type: !11)
+!51 = !DILocalVariable(name: "region", arg: 3, scope: !45, file: !2, type: !10)
+!52 = !{i32 0}
+!53 = !{i32 2}
+!54 = !DILocation(line: 0, scope: !45)
+!55 = distinct !DISubprogram(name: "bpf.unit.1", linkageName: "bpf.unit.1", scope: null, file: !2, type: !46, flags: DIFlagArtificial, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !56)
+!56 = !{!57, !58, !59}
+!57 = !DILocalVariable(name: "fiber", arg: 1, scope: !55, file: !2, type: !10)
+!58 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !55, file: !2, type: !11)
+!59 = !DILocalVariable(name: "region", arg: 3, scope: !55, file: !2, type: !10)
+!60 = !DILocation(line: 0, scope: !55)
+!61 = distinct !DISubprogram(name: "bpf.unit.2", linkageName: "bpf.unit.2", scope: null, file: !2, type: !62, flags: DIFlagArtificial, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !64)
+!62 = !DISubroutineType(types: !63)
+!63 = !{!9, !25, !10, !11, !10}
+!64 = !{!65, !66, !67, !68}
+!65 = !DILocalVariable(name: "ctx", arg: 1, scope: !61, file: !2, type: !25)
+!66 = !DILocalVariable(name: "fiber", arg: 2, scope: !61, file: !2, type: !10)
+!67 = !DILocalVariable(name: "fiber_control", arg: 3, scope: !61, file: !2, type: !11)
+!68 = !DILocalVariable(name: "region", arg: 4, scope: !61, file: !2, type: !10)
+!69 = !{i32 1}
+!70 = !{i32 3}
+!71 = !DILocation(line: 0, scope: !61)
+!72 = distinct !DISubprogram(name: "__bpf_capsule_trampoline_step", linkageName: "__bpf_capsule_trampoline_step", scope: null, file: !2, type: !7, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !73)
+!73 = !{!74, !75}
+!74 = !DILocalVariable(name: "fiber", arg: 1, scope: !72, file: !2, type: !10)
+!75 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !72, file: !2, type: !11, annotations: !19)
+!76 = !DILocation(line: 0, scope: !72)
+!77 = distinct !DISubprogram(name: "bpf.dispatch.output.scalar.0", linkageName: "bpf.dispatch.output.scalar.0", scope: null, file: !2, type: !46, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !78)
+!78 = !{!79, !80, !81}
+!79 = !DILocalVariable(name: "fiber", arg: 1, scope: !77, file: !2, type: !10)
+!80 = !DILocalVariable(name: "fiber_control", arg: 2, scope: !77, file: !2, type: !11, annotations: !19)
+!81 = !DILocalVariable(name: "region", arg: 3, scope: !77, file: !2, type: !10)
+!82 = !DILocation(line: 0, scope: !77)
+!83 = distinct !DISubprogram(name: "__bpf_capsule_trampoline_ctx_step", linkageName: "__bpf_capsule_trampoline_ctx_step", scope: null, file: !2, type: !23, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !84)
+!84 = !{!85, !86, !87}
+!85 = !DILocalVariable(name: "ctx", arg: 1, scope: !83, file: !2, type: !25)
+!86 = !DILocalVariable(name: "fiber", arg: 2, scope: !83, file: !2, type: !10)
+!87 = !DILocalVariable(name: "fiber_control", arg: 3, scope: !83, file: !2, type: !11, annotations: !19)
+!88 = !DILocation(line: 0, scope: !83)
+!89 = distinct !DISubprogram(name: "bpf.dispatch.output.ctx.0", linkageName: "bpf.dispatch.output.ctx.0", scope: null, file: !2, type: !62, spFlags: DISPFlagDefinition, unit: !1, retainedNodes: !90)
+!90 = !{!91, !92, !93, !94}
+!91 = !DILocalVariable(name: "ctx", arg: 1, scope: !89, file: !2, type: !25)
+!92 = !DILocalVariable(name: "fiber", arg: 2, scope: !89, file: !2, type: !10)
+!93 = !DILocalVariable(name: "fiber_control", arg: 3, scope: !89, file: !2, type: !11, annotations: !19)
+!94 = !DILocalVariable(name: "region", arg: 4, scope: !89, file: !2, type: !10)
+!95 = !DILocation(line: 0, scope: !89)

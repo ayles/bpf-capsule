@@ -351,7 +351,7 @@ DIType* BtfGetByteArrayPointer(DIBuilder& builder, uint64_t sizeBytes) {
     return builder.createPointerType(arrayType, 64);
 }
 
-void BtfFunctionAddDebugInfo(DIBuilder& debugBuilder, Function& func, ArrayRef<Metadata*> paramTypes) {
+void BtfFunctionAddDebugInfo(DIBuilder& debugBuilder, Function& func, ArrayRef<Metadata*> paramTypes, ArrayRef<MDNode*> paramAnnotations) {
     auto debugCU = *func.getParent()->debug_compile_units_begin();
     auto debugType = debugBuilder.createSubroutineType(debugBuilder.getOrCreateTypeArray(paramTypes));
     auto flags = func.isDeclaration() ? DISubprogram::SPFlagZero : DISubprogram::SPFlagDefinition;
@@ -364,8 +364,12 @@ void BtfFunctionAddDebugInfo(DIBuilder& debugBuilder, Function& func, ArrayRef<M
         if (i + 1 >= debugFunction->getType()->getTypeArray().size()) {
             break;
         }
-        auto* variable = debugBuilder.createParameterVariable(
-            debugFunction, arg.getName(), i + 1, debugCU->getFile(), 0, debugFunction->getType()->getTypeArray()[i + 1], true);
+        MDNode* annotations = i < paramAnnotations.size() ? paramAnnotations[i] : nullptr;
+        // An optimized argument may have lost its name; BTF needs one, and a
+        // later repair that supplies it would drop the annotations.
+        std::string name = arg.getName().empty() ? ("a" + Twine(i)).str() : arg.getName().str();
+        auto* variable = debugBuilder.createParameterVariable(debugFunction, name, i + 1, debugCU->getFile(), 0,
+            debugFunction->getType()->getTypeArray()[i + 1], true, DINode::FlagZero, annotations ? DINodeArray(cast<MDTuple>(annotations)) : DINodeArray());
         retainedArguments.push_back(variable);
     }
     debugFunction->replaceRetainedNodes(MDNode::get(func.getContext(), retainedArguments));

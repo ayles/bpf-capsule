@@ -4715,17 +4715,52 @@ private:
             smb.CreateRet(ConstantInt::get(I32_, 1));
             b.SetInsertPoint(stackReady);
         }
-        // One dispatch per root entry: a loop that cannot iterate must not
-        // be built (its counter and carried action pin callee-saved
-        // registers).
+        // The step loops over BPF_CAPSULE_STEP_TRIPS dispatches below; its
+        // counter and the control pointer live in callee-saved registers,
+        // which every trip past the first repays.
+        BasicBlock* iterateEntry = b.GetInsertBlock();
         b.CreateBr(iterate);
         b.SetInsertPoint(iterate);
+        // Up to BPF_CAPSULE_STEP_TRIPS dispatches per step call. The body
+        // (lifecycle test, root switch, root call) is verified once per trip,
+        // so the count answers to the verifier's per-path jump history, not
+        // to its instruction budget; every trip past the first saves a global
+        // call with its prologue and epilogue.
+        PHINode* trip = b.CreatePHI(I32_, 2, "trip");
+        trip->addIncoming(ConstantInt::get(I32_, 0), iterateEntry);
+        auto* latch = BasicBlock::Create(Ctx_, "latch", step);
+        auto* exhausted = BasicBlock::Create(Ctx_, "exhausted", step);
+        {
+            IRBuilder<> lb(latch);
+            Value* next = lb.CreateAdd(trip, ConstantInt::get(I32_, 1), "trip.next");
+            lb.CreateCondBr(lb.CreateICmpULT(next, ConstantInt::get(I32_, BPF_CAPSULE_STEP_TRIPS)), iterate, exhausted);
+            trip->addIncoming(next, latch);
+            IRBuilder<> eb(exhausted);
+            eb.CreateRet(ConstantInt::get(I32_, ActionContinue));
+        }
+        // Continue the trip loop only on ActionContinue; every other action
+        // leaves the step immediately, exactly as a one-trip step would.
+        auto continueOrStop = [&](IRBuilder<>& rb, Value* action, const Twine& name) {
+            auto* stop = BasicBlock::Create(Ctx_, name + ".stop", step, terminal);
+            rb.CreateCondBr(rb.CreateICmpNE(action, ConstantInt::get(I32_, ActionContinue)), stop, latch);
+            IRBuilder<>(stop).CreateRet(action);
+        };
         Value* resumeRegionIdPtr = ResumeRegionIdPtr(b, fiber);
         Value* resumeRegionId = b.CreateLoad(I32_, resumeRegionIdPtr, "resume.region.id");
         Value* isCompleted = b.CreateICmpEQ(resumeRegionId, DoneRegionId());
         Value* isIdle = b.CreateICmpEQ(resumeRegionId, ConstantInt::get(I32_, 0));
         Value* stopped = b.CreateOr(isIdle, isCompleted);
-        b.CreateCondBr(stopped, terminal, route);
+        // When every physical step key stays below DONE's low byte, the
+        // lifecycle words route through the step switch instead: DONE's low
+        // byte selects `completed`, and key 0 tests idle before root 0. The
+        // two lifecycle compares then leave the per-dispatch path.
+        const unsigned lastStepKey = (borrowed ? ScalarStepCount_ : 0) + physicalRoots - 1;
+        const bool foldLifecycle = lastStepKey < (BPF_CAPSULE_REGION_ID_DONE & BPF_CAPSULE_REGION_ID_STEP_MASK);
+        if (foldLifecycle) {
+            b.CreateBr(route);
+        } else {
+            b.CreateCondBr(stopped, terminal, route);
+        }
 
         b.SetInsertPoint(terminal);
         b.CreateCondBr(isCompleted, completed, done);
@@ -4879,7 +4914,7 @@ private:
                 }
             }
             rootArguments.push_back(regionKey);
-            routeBuilder.CreateRet(routeBuilder.CreateCall(output, rootArguments));
+            continueOrStop(routeBuilder, routeBuilder.CreateCall(output, rootArguments), rootName);
             sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), (borrowed ? ScalarStepCount_ : 0) + root), routeRoot);
             rootFunctions.push_back(output);
         }
@@ -4906,8 +4941,22 @@ private:
                     }
                 }
                 arguments.push_back(regionKey);
-                rb.CreateRet(rb.CreateCall(root, arguments));
+                continueOrStop(rb, rb.CreateCall(root, arguments), "scalar.root." + Twine(scalar));
                 sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), scalar), route);
+            }
+        }
+
+        if (foldLifecycle) {
+            sw->addCase(ConstantInt::get(cast<IntegerType>(I32_), BPF_CAPSULE_REGION_ID_DONE & BPF_CAPSULE_REGION_ID_STEP_MASK), completed);
+            auto* zeroKey = ConstantInt::get(cast<IntegerType>(I32_), 0);
+            SwitchInst::CaseIt zero = sw->findCaseValue(zeroKey);
+            if (zero == sw->case_default()) {
+                sw->addCase(zeroKey, done);
+            } else {
+                BasicBlock* rootZero = zero->getCaseSuccessor();
+                auto* guard = BasicBlock::Create(Ctx_, "idle.or.root", step, rootZero);
+                IRBuilder<>(guard).CreateCondBr(isIdle, done, rootZero);
+                zero->setSuccessor(guard);
             }
         }
 
@@ -5021,7 +5070,25 @@ private:
             if (FixedMemory_) {
                 signature.push_back(BtfGetByteArrayPointer(debugBuilder, FiberStackSize_));
             }
-            BtfFunctionAddDebugInfo(debugBuilder, *step, signature);
+            // Kernels with arena memory (6.9+) honor the arg:nonnull decl tag
+            // (6.8+): the control record pointer then enters the step and
+            // every root as plain memory, and the null test each of them had
+            // to make before its first load folds away.
+            SmallVector<MDNode*> stepAnnotations;
+            SmallVector<MDNode*> outputAnnotations;
+            if (ArenaTier_) {
+                auto* nonnull = MDNode::get(Ctx_, {MDNode::get(Ctx_, {MDString::get(Ctx_, "btf_decl_tag"), MDString::get(Ctx_, "arg:nonnull")})});
+                stepAnnotations.assign(step->arg_size(), nullptr);
+                stepAnnotations[ControlArgumentIndex(borrowed)] = nonnull;
+                step->addParamAttr(ControlArgumentIndex(borrowed), Attribute::NonNull);
+                if (!FreplaceRoots_) {
+                    outputAnnotations = stepAnnotations;
+                    for (Function* output : rootFunctions) {
+                        output->addParamAttr(ControlArgumentIndex(borrowed), Attribute::NonNull);
+                    }
+                }
+            }
+            BtfFunctionAddDebugInfo(debugBuilder, *step, signature, stepAnnotations);
             SmallVector<Metadata*> outputSignature{BtfGetInt(debugBuilder, 32, true)};
             if (FreplaceRoots_) {
                 if (borrowed) {
@@ -5033,7 +5100,7 @@ private:
             }
             outputSignature.push_back(BtfGetInt(debugBuilder, 32, false));
             for (Function* output : rootFunctions) {
-                BtfFunctionAddDebugInfo(debugBuilder, *output, outputSignature);
+                BtfFunctionAddDebugInfo(debugBuilder, *output, outputSignature, outputAnnotations);
             }
             debugBuilder.finalize();
         }
@@ -5061,7 +5128,17 @@ private:
         if (FixedMemory_) {
             signature.push_back(BtfGetByteArrayPointer(db, FiberStackSize_));
         }
-        BtfFunctionAddDebugInfo(db, function, signature);
+        // The level passes its control record straight through to the step,
+        // whose parameter is tagged non-null on arena kernels; the verifier
+        // accepts that only from a parameter tagged the same way.
+        SmallVector<MDNode*> annotations;
+        if (ArenaTier_) {
+            annotations.assign(function.arg_size(), nullptr);
+            annotations[ControlArgumentIndex(borrowed)] =
+                MDNode::get(Ctx_, {MDNode::get(Ctx_, {MDString::get(Ctx_, "btf_decl_tag"), MDString::get(Ctx_, "arg:nonnull")})});
+            function.addParamAttr(ControlArgumentIndex(borrowed), Attribute::NonNull);
+        }
+        BtfFunctionAddDebugInfo(db, function, signature, annotations);
         for (Instruction& instruction : instructions(function)) {
             instruction.dropDbgRecords();
             instruction.setMetadata(LLVMContext::MD_loop, nullptr);

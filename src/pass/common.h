@@ -16,7 +16,10 @@
 llvm::DIType* BtfGetInt(llvm::DIBuilder& builder, size_t sizeInBits, bool isSigned);
 llvm::DIType* BtfGetByteArrayPointer(llvm::DIBuilder& builder, uint64_t sizeBytes);
 
-void BtfFunctionAddDebugInfo(llvm::DIBuilder& debugBuilder, llvm::Function& func, llvm::ArrayRef<llvm::Metadata*> paramTypes);
+// paramAnnotations, when given, holds one entry per parameter: null or the
+// DINodeArray of that parameter's annotations (BTF decl tags).
+void BtfFunctionAddDebugInfo(llvm::DIBuilder& debugBuilder, llvm::Function& func, llvm::ArrayRef<llvm::Metadata*> paramTypes,
+    llvm::ArrayRef<llvm::MDNode*> paramAnnotations = {});
 
 // The metadata kind, operand-bundle, and string-attribute names the passes
 // use to talk to each other. Linkage-visible symbol names live in
