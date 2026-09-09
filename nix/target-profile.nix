@@ -25,7 +25,12 @@ let
   # had them before Capsule's kernel floor, arm64 gained them in Linux 6.0.
   freplace = atLeast (if arch == "aarch64" then "6.0" else "5.6");
   nativeArenaSignedLoads = arena && atLeast "7.0";
-  indirectJumps = arena && atLeast "7.1";
+  # Instruction-array dispatch is available from 7.1 and no profile selects
+  # it: measured against the compare trees it replaces it runs the Lua
+  # benchmark in 1561 ms instead of 524 ms, and QuickJS and SQLite stop
+  # loading because the verifier explores every array target. --indirect-jumps
+  # still compiles it for the next evaluation of that trade.
+  indirectJumps = false;
 in
 assert lib.assertMsg supportedArch "BPF Capsule has no target profile for ${arch}";
 assert lib.assertMsg (atLeast "5.15") "BPF Capsule requires Linux 5.15 or newer";
