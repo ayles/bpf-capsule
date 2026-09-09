@@ -87,9 +87,16 @@ let
     };
 in
 {
-  # The examples as ordinarily run: the oldest arena profile for this
-  # architecture (6.9 on x86-64, 6.10 on arm64).
+  # The examples for the oldest arena profile of this architecture (6.9 on
+  # x86-64, 6.10 on arm64): the profile the checks and the benchmarks use.
   examples = examplesFor defaultKernel;
+  # The examples for the oldest supported kernel, runnable everywhere; CPython
+  # needs arena memory and is absent here.
+  examplesOldest = examplesFor "5.15";
+  # Every profile, keyed by its kernel floor without the dot: `lua-71`.
+  examplesByKernel = lib.mapAttrs' (
+    kernel: _: lib.nameValuePair (lib.replaceStrings [ "." ] [ "" ] kernel) (examplesFor kernel)
+  ) suites;
   inherit benchmarkSuite;
 
   # Everything exported through the flake's standard `checks` output.

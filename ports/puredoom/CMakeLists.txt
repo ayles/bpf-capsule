@@ -27,6 +27,13 @@ file(GLOB puredoom_sources "${puredoom_patched_SOURCE_DIR}/src/DOOM/*.c")
 bpf_capsule_library(capsule_puredoom SOURCES ${puredoom_sources})
 target_include_directories(capsule_puredoom PUBLIC "${puredoom_patched_SOURCE_DIR}/src/DOOM")
 target_compile_options(capsule_puredoom PRIVATE -Wno-parentheses -g)
+
+# The same patched sources compiled natively, for the example's --native
+# comparison.
+add_library(puredoom_native STATIC ${puredoom_sources})
+target_include_directories(puredoom_native PUBLIC "${puredoom_patched_SOURCE_DIR}/src/DOOM")
+target_compile_options(puredoom_native PRIVATE -O2 -w)
+target_link_libraries(puredoom_native PUBLIC m)
 install(FILES "${puredoom_SOURCE_DIR}/LICENSE" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule/puredoom")
 # Keep the original source and the identified modifications with distributions.
 install(FILES CMakeLists.txt DESTINATION "${CMAKE_INSTALL_DATADIR}/bpf-capsule/ports/puredoom")

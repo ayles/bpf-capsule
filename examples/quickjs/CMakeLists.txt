@@ -17,13 +17,15 @@ bpf_capsule_object(
     SOURCES quickjs_bpf.c
     LIBRARIES capsule_quickjs
     COMPILE_OPTIONS -g
-    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS}
+    # QuickJS recurses through the C stack for every JavaScript call; give it
+    # the stack budget its native build reserves.
+    LINK_OPTIONS ${BPF_CAPSULE_LINK_OPTIONS} --fiber-stack=2097152
 )
 bpf_capsule_skeleton(quickjs_skeleton OUTPUT quickjs.skel.h OBJECT "${quickjs_bpf}" NAME quickjs)
 
 add_executable(quickjs quickjs_host.c)
 target_compile_options(quickjs PRIVATE -Wall -Wextra)
-target_link_libraries(quickjs PRIVATE BpfCapsule::host quickjs_skeleton)
+target_link_libraries(quickjs PRIVATE BpfCapsule::host quickjs_skeleton quickjs_native)
 
 install(TARGETS quickjs RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${quickjs_bpf}" DESTINATION "${CMAKE_INSTALL_BINDIR}")

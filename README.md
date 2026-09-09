@@ -103,13 +103,34 @@ SDK. With Nix:
 ```sh
 nix build                                # the SDK: bpf-capsule-cc, bpf-capsule-ld, host library
 sudo nix run .#doom -- /path/to/doom.wad tty
+sudo nix run .#lua -- examples/lua/benchmark.lua
+nix run .#lua -- --native examples/lua/benchmark.lua
 nix flake check                          # the complete test matrix
 nix run .#benchmarks                     # local in-kernel measurements
 ```
 
-The Nix example packages target Linux 6.9 or newer on x86-64 and 6.10 or
-newer on arm64. Compatibility profiles back to 5.15 are covered by the test
-matrix.
+The plain example packages are built for the oldest supported kernel, 5.15,
+so they run on any supported machine. A kernel floor suffix selects a faster
+profile where the kernel and JIT support it: `.#lua-71`, `.#doom-69`,
+`.#sqlite-610`. The CPython examples need arena memory and exist only from
+`python-610` on arm64 and `python-69` on x86-64; their plain names build the
+oldest of those.
+
+Every script example (`lua`, `quickjs`, `sqlite`, `python`) runs the same
+program natively with `--native` and reports its execution time either way:
+`kernel execution` is the in-kernel run time from BPF's own accounting,
+`native execution` the CPU time of the same code in the process. `llama2`
+prints both from one run, and `doom` reports per-frame statistics for
+whichever engine drew the frames. Each example directory carries a
+`benchmark.*` workload for that comparison:
+
+```console
+$ sudo taskset -c 0 nix run .#lua -- examples/lua/benchmark.lua
+$ taskset -c 0 nix run .#lua -- --native examples/lua/benchmark.lua
+```
+
+`BPF_CAPSULE_MAX_DRAINS` caps the continuations a run may use; without it a
+run continues until it finishes.
 
 Without Nix, building the SDK requires CMake 3.24 or newer, C17 and C++20
 compilers, LLVM and Clang 23 from the same installation, pkg-config, and
@@ -230,10 +251,13 @@ not a security boundary.
 ## Performance
 
 Native-relative performance varies with the workload, architecture, and
-kernel. Many current integrations run a few times to around an order of
-magnitude slower than native userspace; frequent region handoffs and software
-floating point can cost considerably more. The [benchmarks](benchmarks) provide
-exact local measurements.
+kernel. Integer and pointer-heavy code such as DOOM or SQLite runs a few
+times slower than native userspace, interpreters around an order of magnitude,
+and floating-point-heavy code such as llama2.c's FP32 model several tens of
+times, because every float operation is a software call. The examples measure
+this themselves: run one with and without `--native`; the
+[benchmarks](benchmarks) directory adds micro-benchmarks of the transformation
+itself.
 
 The project is licensed under Apache-2.0 with the LLVM exception. Fetched and
 vendored components retain their upstream licensing notices. The exception

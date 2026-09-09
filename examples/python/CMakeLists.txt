@@ -22,9 +22,12 @@ bpf_capsule_object(
 )
 bpf_capsule_skeleton(python_skeleton OUTPUT python.skel.h OBJECT "${python_bpf}" NAME python)
 
+find_package(Python3 3.14 COMPONENTS Interpreter REQUIRED)
 add_executable(python python_host.c)
 add_dependencies(python cpython_stdlib)
 target_compile_options(python PRIVATE -Wall -Wextra)
+# --native runs the same script under the interpreter the port was built with.
+target_compile_definitions(python PRIVATE "PYTHON_NATIVE_INTERPRETER=\"${Python3_EXECUTABLE}\"")
 target_link_libraries(python PRIVATE BpfCapsule::host python_skeleton)
 
 get_target_property(python_stdlib_image capsule_cpython BPF_CAPSULE_CPYTHON_STDLIB)

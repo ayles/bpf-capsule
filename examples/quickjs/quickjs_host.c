@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Run one JavaScript file with batch stdin and direct Capsule-memory output.
+// Run one JavaScript file with batch stdin and direct Capsule-memory output,
+// or the same runner natively with --native, reporting the execution time of
+// both.
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bpf_capsule_host.h"
 
-#include "quickjs_ctrl.h"
+#include "quickjs_runner.h"
 #include "quickjs.skel.h"
 
 enum {
@@ -21,9 +25,36 @@ enum {
     QUICKJS_HEAP_BYTES = 16u << 20,
 };
 
+// The number of continuations a run may use; unlimited unless the environment
+// caps it, so a regression in the drive budget can be turned into a failure.
+// The kernel's own per-program counters, summed over the object: a wall clock
+// around the syscall would also count the syscall path and this loop, which
+// the native run does not pay. Run-time statistics must be enabled first.
+static int kernel_run_time(struct bpf_object* object, uint64_t* nanoseconds, uint64_t* invocations) {
+    uint64_t total_nanoseconds = 0;
+    uint64_t total_invocations = 0;
+    struct bpf_program* program;
+    bpf_object__for_each_program(program, object) {
+        int fd = bpf_program__fd(program);
+        if (fd < 0) {
+            continue;
+        }
+        struct bpf_prog_info info = {0};
+        unsigned int length = sizeof(info);
+        if (bpf_prog_get_info_by_fd(fd, &info, &length)) {
+            return -1;
+        }
+        total_nanoseconds += info.run_time_ns;
+        total_invocations += info.run_cnt;
+    }
+    *nanoseconds = total_nanoseconds;
+    *invocations = total_invocations;
+    return 0;
+}
+
 static int read_max_drains(unsigned long* result) {
     const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
-    *result = 0;
+    *result = ULONG_MAX;
     if (!text || !*text) {
         return 0;
     }
@@ -38,6 +69,7 @@ static int read_max_drains(unsigned long* result) {
     return 0;
 }
 
+// Reads a whole stream, NUL-terminated: QuickJS wants a terminated source.
 static char* read_stream(FILE* file, size_t* size) {
     size_t capacity = 64u << 10;
     size_t used = 0;
@@ -74,45 +106,65 @@ static char* read_stream(FILE* file, size_t* size) {
     }
 }
 
-int main(int argc, char** argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: quickjs SCRIPT\n");
-        return 2;
-    }
-    unsigned long max_drains = 0;
-    if (read_max_drains(&max_drains)) {
-        return 2;
-    }
+static double milliseconds_since(const struct timespec* start, clockid_t clock) {
+    struct timespec now;
+    clock_gettime(clock, &now);
+    return (double)(now.tv_sec - start->tv_sec) * 1e3 + (double)(now.tv_nsec - start->tv_nsec) / 1e6;
+}
 
-    int result = 1;
-    char* script = NULL;
-    char* input = NULL;
-    struct quickjs* skeleton = NULL;
-    struct bpf_capsule capsule = {0};
+// Report the script's console output, or its exception and exit status 1.
+static int publish(const struct qjs_buffer* output, const struct qjs_buffer* error, int failed, const char* engine) {
+    if (failed) {
+        size_t error_size = error->size < error->capacity ? error->size : error->capacity;
+        if (error_size) {
+            fwrite(error->address, 1, error_size, stderr);
+            fputc('\n', stderr);
+        }
+        return 1;
+    }
+    if (output->size > output->capacity) {
+        fprintf(stderr, "QuickJS stdout requires %zu bytes; the %s buffer holds %zu\n", output->size, engine, output->capacity);
+        return 1;
+    }
+    if (output->size) {
+        fwrite(output->address, 1, output->size, stdout);
+    }
+    return 0;
+}
 
-    FILE* file = fopen(argv[1], "rb");
-    size_t script_size = 0;
-    script = file ? read_stream(file, &script_size) : NULL;
-    if (file) {
-        fclose(file);
+static int run_native(char* script, size_t script_size, char* input, size_t input_size) {
+    struct qjs_buffer script_buffer = {script, script_size + 1, script_size};
+    struct qjs_buffer input_buffer = {input, input_size, input_size};
+    struct qjs_buffer output = {malloc(QUICKJS_OUTPUT_BYTES), QUICKJS_OUTPUT_BYTES, 0};
+    struct qjs_buffer error = {malloc(QUICKJS_ERROR_BYTES), QUICKJS_ERROR_BYTES, 0};
+    if (!output.address || !error.address) {
+        perror("allocate quickjs buffers");
+        free(output.address);
+        free(error.address);
+        return 1;
     }
-    if (!script) {
-        fprintf(stderr, "cannot read %s: %s\n", argv[1], strerror(errno));
-        goto cleanup;
+    struct timespec start;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &start);
+    int failed = qjs_runner_run(&script_buffer, &input_buffer, &output, &error);
+    double cpu_ms = milliseconds_since(&start, CLOCK_PROCESS_CPUTIME_ID);
+    int result = publish(&output, &error, failed, "native");
+    if (!failed) {
+        fprintf(stderr, "native execution: %.3f ms\n", cpu_ms);
     }
-    size_t input_size = 0;
-    input = isatty(0) ? calloc(1, 1) : read_stream(stdin, &input_size);
-    if (!input) {
-        fprintf(stderr, "cannot read stdin: %s\n", strerror(errno));
-        goto cleanup;
-    }
+    free(output.address);
+    free(error.address);
+    return result;
+}
 
+static int run_capsule(char* script, size_t script_size, char* input, size_t input_size, unsigned long max_drains) {
     if (script_size >= UINT32_MAX || input_size >= UINT32_MAX) {
         fprintf(stderr, "script and stdin are too large for Capsule memory\n");
-        goto cleanup;
+        return 1;
     }
-
-    skeleton = quickjs__open();
+    int result = 1;
+    int stats_fd = -1;
+    struct quickjs* skeleton = quickjs__open();
+    struct bpf_capsule capsule = {0};
     if (!skeleton) {
         fprintf(stderr, "open failed\n");
         goto cleanup;
@@ -126,6 +178,7 @@ int main(int argc, char** argv) {
         fprintf(stderr, "cannot configure/load Capsule QuickJS: %s\n", strerror(errno));
         goto cleanup;
     }
+    stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
 
     volatile struct quickjs_bpf_ctrl* control = &skeleton->data_qctrl->qctrl;
     control->script.address = bpf_capsule_malloc(&capsule, script_size + 1);
@@ -153,6 +206,8 @@ int main(int argc, char** argv) {
         fprintf(stderr, "BPF object is missing a QuickJS program\n");
         goto cleanup;
     }
+    uint64_t kernel_before = 0, invocations_before = 0;
+    int stats_failed = stats_fd < 0 || kernel_run_time(skeleton->obj, &kernel_before, &invocations_before);
     struct bpf_test_run_opts options = {.sz = sizeof(options)};
     if (bpf_prog_test_run_opts(run_fd, &options)) {
         perror("run");
@@ -170,38 +225,75 @@ int main(int argc, char** argv) {
         }
         drains++;
     }
-    if (control->capsule.status == CAPSULE_EXITED) {
-        size_t error_size = control->error.size < control->error.capacity ? control->error.size : control->error.capacity;
-        if (error_size) {
-            fwrite(control->error.address, 1, error_size, stderr);
-            fputc('\n', stderr);
-        }
-        if (control->capsule.code < 0) {
-            fprintf(stderr, "capsule stopped: %s (%lld)\n", bpf_capsule_error_string(control->capsule.code), (long long)control->capsule.code);
-            goto cleanup;
-        }
-        result = (int)control->capsule.code;
+    uint64_t kernel_after = 0, invocations_after = 0;
+    stats_failed = stats_failed || kernel_run_time(skeleton->obj, &kernel_after, &invocations_after);
+    if (control->capsule.status == CAPSULE_EXITED && control->capsule.code < 0) {
+        fprintf(stderr, "capsule stopped: %s (%lld)\n", bpf_capsule_error_string(control->capsule.code), (long long)control->capsule.code);
         goto cleanup;
     }
-    if (control->capsule.status != CAPSULE_OK) {
+    if (control->capsule.status != CAPSULE_OK && control->capsule.status != CAPSULE_EXITED) {
         fprintf(stderr, "capsule status=%s\n", bpf_capsule_status_string(control->capsule.status));
         goto cleanup;
     }
-    if (control->output.size > control->output.capacity) {
-        fprintf(stderr, "QuickJS stdout requires %zu bytes; the buffer holds %zu\n", control->output.size, control->output.capacity);
+    struct qjs_buffer output = {control->output.address, control->output.capacity, control->output.size};
+    struct qjs_buffer error = {control->error.address, control->error.capacity, control->error.size};
+    int failed = control->capsule.status == CAPSULE_EXITED;
+    result = publish(&output, &error, failed, "Capsule");
+    if (failed) {
+        result = (int)control->capsule.code;
         goto cleanup;
     }
-    if (control->output.size) {
-        fwrite(control->output.address, 1, control->output.size, stdout);
+    if (!stats_failed) {
+        fprintf(stderr, "kernel execution: %.3f ms over %llu invocations\n", (double)(kernel_after - kernel_before) / 1e6,
+            (unsigned long long)(invocations_after - invocations_before));
     }
     fprintf(stderr, "continuation drains: %lu\n", drains);
-    result = 0;
 
 cleanup:
+    if (stats_fd >= 0) {
+        close(stats_fd);
+    }
     if (skeleton) {
         (void)bpf_capsule_release(&capsule);
         quickjs__destroy(skeleton);
     }
+    return result;
+}
+
+int main(int argc, char** argv) {
+    int native = argc >= 2 && !strcmp(argv[1], "--native");
+    if (argc != 2 + native) {
+        fprintf(stderr, "usage: quickjs [--native] SCRIPT\n");
+        return 2;
+    }
+    unsigned long max_drains = 0;
+    if (read_max_drains(&max_drains)) {
+        return 2;
+    }
+    const char* path = argv[1 + native];
+
+    int result = 1;
+    char* script = NULL;
+    char* input = NULL;
+    FILE* file = fopen(path, "rb");
+    size_t script_size = 0;
+    script = file ? read_stream(file, &script_size) : NULL;
+    if (file) {
+        fclose(file);
+    }
+    if (!script) {
+        fprintf(stderr, "cannot read %s: %s\n", path, strerror(errno));
+        goto cleanup;
+    }
+    size_t input_size = 0;
+    input = isatty(0) ? calloc(1, 1) : read_stream(stdin, &input_size);
+    if (!input) {
+        fprintf(stderr, "cannot read stdin: %s\n", strerror(errno));
+        goto cleanup;
+    }
+    result = native ? run_native(script, script_size, input, input_size) : run_capsule(script, script_size, input, input_size, max_drains);
+
+cleanup:
     free(input);
     free(script);
     return result;

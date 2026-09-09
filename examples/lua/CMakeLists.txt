@@ -23,7 +23,7 @@ bpf_capsule_skeleton(lua_skeleton OUTPUT lua.skel.h OBJECT "${lua_bpf}" NAME lua
 
 add_executable(lua lua_host.c)
 target_compile_options(lua PRIVATE -Wall -Wextra)
-target_link_libraries(lua PRIVATE BpfCapsule::host lua_skeleton)
+target_link_libraries(lua PRIVATE BpfCapsule::host lua_skeleton lua_native)
 
 install(TARGETS lua RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${lua_bpf}" DESTINATION "${CMAKE_INSTALL_BINDIR}")

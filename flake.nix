@@ -30,13 +30,21 @@
             pname = "bpf-capsule-ld";
             name = "bpf-capsule-ld-${bpfCapsule.version}";
           };
-          llama2-q8 = matrix.examples.llama2 // {
+          llama2-q8 = matrix.examplesOldest.llama2 // {
             pname = "llama2-q8";
-            name = "llama2-q8-${matrix.examples.llama2.version}";
+            name = "llama2-q8-${matrix.examplesOldest.llama2.version}";
           };
           inherit benchmarks;
         }
-        // matrix.examples;
+        # Plain names build for the oldest supported kernel, so `nix run` works
+        # on any supported machine; CPython exists only on arena profiles.
+        // matrix.examples
+        // matrix.examplesOldest
+        # `<example>-<kernel floor>` selects a profile: lua-71, doom-515.
+        // pkgs.lib.concatMapAttrs (
+          kernel: examples:
+          pkgs.lib.mapAttrs' (name: package: pkgs.lib.nameValuePair "${name}-${kernel}" package) examples
+        ) matrix.examplesByKernel;
 
         checks = matrix.checks // {
           format = pkgs.callPackage ./nix/format.nix { inherit llvmPackages; };

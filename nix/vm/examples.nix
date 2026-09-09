@@ -71,40 +71,67 @@ import ./run.nix {
       fi
     }
 
+    # run_native NAME COMMAND...: the same program with --native must print
+    # exactly what the kernel run printed to stdout.
+    run_native() {
+      local name="$1"
+      shift
+      printf 'RUN:%s --native\n' "$name"
+      "$@" > /tmp/kernel-stdout 2>/dev/null
+      "$1" --native "''${@:2}" > /tmp/native-stdout 2>/tmp/native-stderr
+      cat /tmp/native-stderr
+      if ! cmp /tmp/kernel-stdout /tmp/native-stdout; then
+        printf '%s: native output differs from the kernel output\n' "$name" >&2
+        exit 1
+      fi
+      [[ "$(cat /tmp/native-stderr)" == *'native execution:'* ]]
+    }
+
     run_example fib 'fib(20) = 6765' - ${examples.fib}/bin/fib
     run_example zlib 'stock zlib:' 0 ${examples.zlib}/bin/zlib 65536
-    run_example sqlite 'rows=12 checksum=693506f4cc70de84' 0 ${examples.sqlite}/bin/sqlite
+    run_example sqlite $'500\t41791750' 0 \
+      ${examples.sqlite}/bin/sqlite ${examples.sqlite}/share/bpf-capsule/sqlite/script.sql
+    [[ "$example_output" == *'kernel execution:'* ]]
+    run_native sqlite ${examples.sqlite}/bin/sqlite ${examples.sqlite}/share/bpf-capsule/sqlite/script.sql
     run_example wasm3 'stock zlib Wasm: 4096 ->' 0 ${examples.wasm3}/bin/wasm3 4096
     run_example lua $'Lua checksum\t16898\ttrue\t0\ttrue' 0 \
       ${examples.lua}/bin/lua ${../../examples/lua/script.lua}
+    run_native lua ${examples.lua}/bin/lua ${../../examples/lua/script.lua}
     run_example quickjs 'checksum 807746 text-bytes 743 matches 100' 0 \
       ${examples.quickjs}/bin/quickjs ${../../examples/quickjs/script.js}
+    run_native quickjs ${examples.quickjs}/bin/quickjs ${../../examples/quickjs/script.js}
     run_example rust 'Rust panic: status=exited code=101' 0 ${examples.rust}/bin/rust
 
-    story='text: Once upon a time, there was a little girl named Lily. She loved to play outside in the park.'
+    story='Once upon a time, there was a little girl named Lily. She loved to play outside in the park.'
     run_example llama2 "$story" 0 \
-      ${examples.llama2}/bin/llama2 ${llamaModel} 32 ${llamaTokenizer}
+      ${examples.llama2}/bin/llama2 ${llamaModel} -z ${llamaTokenizer} -n 32 -t 0
     [[ "$example_output" == *'native reference: match'* ]]
     run_example llama2-q8 "$story" 0 \
-      ${examples.llama2}/bin/llama2-q8 ${llamaQ8Model} 32 ${llamaTokenizer}
+      ${examples.llama2}/bin/llama2-q8 ${llamaQ8Model} -z ${llamaTokenizer} -n 32 -t 0
     [[ "$example_output" == *'native reference: match'* ]]
 
-    mkdir -p /tmp/doom-frames
-    run_example doom 'dump done: status=0' - \
-      ${examples.doom}/bin/doom ${doomWad}/freedoom1.wad dump 2 /tmp/doom-frames
-    frames=(/tmp/doom-frames/frame_*.ppm)
-    [[ ''${#frames[@]} -eq 2 ]]
     expected=(
       a95d4cb55feeb7b3ef7c2bd289f32d1ce3105da4e91d71348eb1eaa6dc9adce2
       06553576c3d898219971710fce745457db31cfd76ae28d6c10ad72804d37d881
     )
-    for frame in 0 1; do
-      read -r actual _ < <(sha256sum "/tmp/doom-frames/frame_$(printf '%05d' "$frame").ppm")
-      if [[ "$actual" != "''${expected[$frame]}" ]]; then
-        printf 'Doom frame %d: expected %s, got %s\n' \
-          "$frame" "''${expected[$frame]}" "$actual" >&2
-        exit 1
-      fi
+    # The kernel and the native engine must draw the same two frames.
+    for engine in kernel native; do
+      mkdir -p "/tmp/doom-frames-$engine"
+      native_flag=()
+      [[ $engine == native ]] && native_flag=(--native)
+      run_example "doom $engine" 'dump done: status=0' - \
+        ${examples.doom}/bin/doom "''${native_flag[@]}" ${doomWad}/freedoom1.wad dump 2 "/tmp/doom-frames-$engine"
+      [[ "$example_output" == *"$engine frame time over 2 frames"* ]]
+      frames=("/tmp/doom-frames-$engine"/frame_*.ppm)
+      [[ ''${#frames[@]} -eq 2 ]]
+      for frame in 0 1; do
+        read -r actual _ < <(sha256sum "/tmp/doom-frames-$engine/frame_$(printf '%05d' "$frame").ppm")
+        if [[ "$actual" != "''${expected[$frame]}" ]]; then
+          printf 'Doom %s frame %d: expected %s, got %s\n' \
+            "$engine" "$frame" "''${expected[$frame]}" "$actual" >&2
+          exit 1
+        fi
+      done
     done
 
     # Lua-XDP end to end: a veth pair, the observer on one end, exactly five
@@ -137,6 +164,7 @@ import ./run.nix {
       # in the kernel; the source image is consumed by its normal importer.
       run_example python 'CPython 3b09041c50e319a2 8.75' - \
         env BPF_CAPSULE_MAX_DRAINS=64 ${examples.python}/bin/python ${../../tests/vm/python.py}
+      run_native python ${examples.python}/bin/python ${../../examples/python/benchmark.py}
 
       # Python-XDP mirrors the Lua check with one isolated interpreter per
       # fiber. Five live packets plus eight test runs on each of two CPUs.

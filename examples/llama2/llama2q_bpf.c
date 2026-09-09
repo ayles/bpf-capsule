@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Transformer inference in the kernel: stock llama2.c's Q8 runner reads a
-// quantized checkpoint directly from Capsule memory.
+// quantized checkpoint directly from Capsule memory and generates text with
+// its own tokenizer and sampler.
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
 #include "bpf_capsule.h"
 #include "llama2_ctrl.h"
 
-// The guest uses upstream's model and argmax code, not its file-backed
-// tokenizer. Declare the tokenizer's libc dependency so the complete upstream
+// The guest uses upstream's model, tokenizer and sampler, not its file-backed
+// loaders. Declare the tokenizer's libc dependency so the complete upstream
 // translation unit parses; internalization removes that unused path.
 extern int sscanf(const char*, const char*, ...);
 
-// run.c's main() wants argv and a clock; the rest of the file is the model.
+// runq.c's main() wants argv and a clock; the rest of the file is the model.
 #define main llama2_unused_main
 #include "runq.c"
 #undef main
 
 struct llama2_bpf_ctrl qctrl SEC(".data.qctrl");
+#define LLAMA2_CONTROL qctrl
+#include "llama2_runner.h"
 
 SEC("syscall")
 int llama2q_drain(void) {
@@ -26,9 +29,9 @@ int llama2q_drain(void) {
 }
 
 static void llama2q_run_body(void) {
-    qctrl.generated_tokens = 0;
-    if (!qctrl.model || qctrl.model_size < 256 || !qctrl.requested_tokens) {
-        return;
+    qctrl.output_size = 0;
+    if (!qctrl.model || qctrl.model_size < 256 || !qctrl.tokenizer || !qctrl.output || !qctrl.output_capacity) {
+        capsule_exit(1);
     }
     const unsigned char* qmodel_image = qctrl.model;
 
@@ -39,7 +42,7 @@ static void llama2q_run_body(void) {
     memcpy(&magic, qmodel_image, sizeof(magic));
     memcpy(&version, qmodel_image + sizeof(magic), sizeof(version));
     if (magic != 0x616b3432 || version != 2) {
-        return;
+        capsule_exit(2);
     }
     Transformer t = {0};
     Config* p = &t.config;
@@ -50,35 +53,14 @@ static void llama2q_run_body(void) {
     if (p->dim <= 0 || (p->dim & 1) || p->hidden_dim <= 0 || p->n_layers <= 0 || p->n_heads <= 0 || p->n_kv_heads <= 0 || p->n_heads % p->n_kv_heads ||
         p->dim % p->n_heads || ((p->dim / p->n_heads) & 1) || p->vocab_size <= 1 || p->seq_len <= 0 || shared_classifier > 1 || group_size <= 0 ||
         p->dim % group_size || p->hidden_dim % group_size) {
-        return;
+        capsule_exit(2);
     }
     GS = group_size;
 
     // Upstream advances the pointer variable but never mutates the checkpoint.
     memory_map_weights(&t.weights, p, (void*)(qmodel_image + 256), shared_classifier);
     malloc_run_state(&t.state, p);
-
-    // Greedy decoding from the BOS token: no sampler state, so the ids are a
-    // pure function of the weights and the arithmetic.
-    int token = 1;
-    int steps = (int)qctrl.requested_tokens;
-    if (steps > LLAMA2_MAX_TOKENS) {
-        steps = LLAMA2_MAX_TOKENS;
-    }
-    // The KV caches are seq_len entries deep; past that, positions wrap into
-    // garbage. The host clamps the same way, so both sides agree on count.
-    if (steps > p->seq_len) {
-        steps = p->seq_len;
-    }
-    for (int pos = 0; pos < steps; pos++) {
-        float* logits = forward(&t, token, pos);
-        token = sample_argmax(logits, p->vocab_size);
-        // Keep the mask in emitted BPF so the verifier can see the map bound
-        // after the managed loop has been lowered into continuations.
-        int at = pos;
-        asm volatile("" : "+r"(at));
-        qctrl.tokens[at & (LLAMA2_MAX_TOKENS - 1)] = token;
-    }
+    llama2_generate(&t);
     free_run_state(&t.state);
     free(t.weights.q_tokens);
     free(t.weights.token_embedding_table);
@@ -92,7 +74,6 @@ static void llama2q_run_body(void) {
     if (t.weights.wcls != t.weights.q_tokens) {
         free(t.weights.wcls);
     }
-    qctrl.generated_tokens = (unsigned int)steps;
 }
 
 SEC("syscall")

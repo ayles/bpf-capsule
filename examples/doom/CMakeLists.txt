@@ -22,13 +22,13 @@ bpf_capsule_object(
 bpf_capsule_skeleton(doom_skeleton OUTPUT doom.skel.h OBJECT "${doom_bpf}" NAME doom)
 
 add_executable(doom doom.c)
-target_compile_options(doom PRIVATE -Wall -Wextra)
-target_link_libraries(doom PRIVATE BpfCapsule::host doom_skeleton)
+target_compile_options(doom PRIVATE -Wall -Wextra -Wno-parentheses)
+target_link_libraries(doom PRIVATE BpfCapsule::host doom_skeleton puredoom_native)
 
 install(TARGETS doom RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${doom_bpf}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule-doom")
 install(
-    FILES doom.c doom_bpf.c bpf_ctrl.h CMakeLists.txt LICENSE
+    FILES doom.c doom_bpf.c doom_engine.h bpf_ctrl.h CMakeLists.txt LICENSE
     DESTINATION "${CMAKE_INSTALL_DATADIR}/bpf-capsule/examples/doom"
 )

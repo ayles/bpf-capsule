@@ -3,15 +3,18 @@
 // input, and shows what it drew. It knows nothing about the memory backend,
 // the call stack or the verifier: small shared values use explicit control
 // maps, while the WAD goes through Capsule's backend-neutral memory API.
+// With --native the same engine steps run in this process instead, so the
+// two builds can be compared frame for frame.
 //
-//   doom WAD tty                     stdin keys in, truecolor terminal out
-//   doom WAD dump N DIR              N deterministic frames to DIR as PPM
+//   doom [--native] WAD tty          stdin keys in, truecolor terminal out
+//   doom [--native] WAD dump N DIR   N deterministic frames to DIR as PPM
 #include "bpf_ctrl.h"
 
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 #include <errno.h>
 #include <limits.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,6 +28,16 @@
 #include "bpf_capsule_host.h"
 
 #include "doom.skel.h"
+
+// The native engine returns from doom_exit() through this point.
+static jmp_buf native_exit_point;
+static void native_exit(int code) {
+    longjmp(native_exit_point, code + 1);
+}
+
+#define DOOM_ENGINE_EXIT(code) native_exit(code)
+#define DOOM_ENGINE_ERROR(text, length) fprintf(stderr, "%.*s\n", (int)(length), (text))
+#include "doom_engine.h"
 
 #define W 320
 #define H 200
@@ -68,6 +81,12 @@ static uint64_t monotonic_us(void) {
     struct timespec time;
     clock_gettime(CLOCK_MONOTONIC, &time);
     return (uint64_t)time.tv_sec * 1000000ull + (uint64_t)time.tv_nsec / 1000;
+}
+
+static uint64_t thread_cpu_ns(void) {
+    struct timespec time;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time);
+    return (uint64_t)time.tv_sec * 1000000000ull + (uint64_t)time.tv_nsec;
 }
 
 static uint64_t program_run_time(int program_fd) {
@@ -183,7 +202,7 @@ static int compare_frame_ns(const void* a, const void* b) {
 
 // Mean plus tail percentiles: frames are not uniform (screen wipes, busy
 // scenes), and the slow tail is what a player actually notices.
-static void print_frame_stats(struct frame_samples* samples) {
+static void print_frame_stats(struct frame_samples* samples, const char* engine) {
     if (!samples->count) {
         return;
     }
@@ -193,7 +212,7 @@ static void print_frame_stats(struct frame_samples* samples) {
         total += samples->ns[i];
     }
     size_t last = samples->count - 1;
-    fprintf(stderr, "kernel frame time over %zu frames: avg %.3f ms, p50 %.3f ms, p90 %.3f ms, p99 %.3f ms, max %.3f ms\n", samples->count,
+    fprintf(stderr, "%s frame time over %zu frames: avg %.3f ms, p50 %.3f ms, p90 %.3f ms, p99 %.3f ms, max %.3f ms\n", engine, samples->count,
         total / 1e6 / samples->count, samples->ns[last * 50 / 100] / 1e6, samples->ns[last * 90 / 100] / 1e6, samples->ns[last * 99 / 100] / 1e6,
         samples->ns[last] / 1e6);
 }
@@ -250,17 +269,6 @@ static int key_of_ascii(int code) {
     }
 }
 
-static int queue_input(volatile struct doom_bpf_ctrl* ctrl, int key, int down) {
-    unsigned count = ctrl->input_count;
-    if (count >= DOOM_INPUT_QUEUE_CAPACITY) {
-        fprintf(stderr, "input queue overflow: too many key transitions in one game tic\n");
-        return -1;
-    }
-    ctrl->input_events[count] = (unsigned)key | (down ? DOOM_INPUT_DOWN : 0);
-    ctrl->input_count = count + 1;
-    return 0;
-}
-
 static int write_ppm(const char* path, const unsigned char* pixels) {
     FILE* file = fopen(path, "wb");
     if (!file) {
@@ -281,14 +289,182 @@ static int write_ppm(const char* path, const unsigned char* pixels) {
     return 0;
 }
 
+// ---- the engine behind either the kernel or this process ---------------------
+
+struct engine {
+    int native;
+    // the kernel
+    struct doom* skeleton;
+    struct bpf_capsule capsule;
+    volatile struct doom_bpf_ctrl* ctrl;
+    int start_fd, frame_fd, stats_fd;
+    struct bpf_test_run_opts options;
+    // this process
+    unsigned char* wad;
+    unsigned int events[DOOM_INPUT_QUEUE_CAPACITY];
+    unsigned int event_count;
+};
+
+enum frame_status {
+    FRAME_DRAWN = 0,
+    FRAME_STOPPED = 1, // the game quit cleanly
+    FRAME_FAILED = -1,
+};
+
+static int queue_input(struct engine* engine, int key, int down) {
+    unsigned int event = (unsigned)key | (down ? DOOM_INPUT_DOWN : 0);
+    if (engine->native) {
+        if (engine->event_count >= DOOM_INPUT_QUEUE_CAPACITY) {
+            fprintf(stderr, "input queue overflow: too many key transitions in one game tic\n");
+            return -1;
+        }
+        engine->events[engine->event_count++] = event;
+        return 0;
+    }
+    unsigned count = engine->ctrl->input_count;
+    if (count >= DOOM_INPUT_QUEUE_CAPACITY) {
+        fprintf(stderr, "input queue overflow: too many key transitions in one game tic\n");
+        return -1;
+    }
+    engine->ctrl->input_events[count] = event;
+    engine->ctrl->input_count = count + 1;
+    return 0;
+}
+
+// Loads the WAD into the engine's memory and starts it. Startup and every
+// frame must finish in one invocation: this example has no continuation-
+// driving loop, so any non-OK status is a hard failure.
+static int start_engine(struct engine* engine, FILE* wad, uint64_t wad_size, int start_in_e1m1) {
+    if (engine->native) {
+        engine->wad = malloc(wad_size);
+        if (!engine->wad) {
+            perror("allocate WAD");
+            return -1;
+        }
+        if (import_wad(wad, engine->wad, (size_t)wad_size)) {
+            return -1;
+        }
+        int exit_code = setjmp(native_exit_point);
+        if (exit_code) {
+            fprintf(stderr, "engine start failed: engine exited with code %d\n", exit_code - 1);
+            return -1;
+        }
+        doom_engine_start(engine->wad, wad_size, start_in_e1m1);
+        return 0;
+    }
+
+    const uint64_t engine_heap_size = 20ull << 20;
+    engine->skeleton = doom__open();
+    if (!engine->skeleton) {
+        fprintf(stderr, "open failed\n");
+        return -1;
+    }
+    const struct bpf_capsule_config capsule_config = {
+        .fiber_count = 1,
+        .heap_bytes = wad_size + engine_heap_size,
+    };
+    if (bpf_capsule_configure(&engine->capsule, engine->skeleton->obj, capsule_config) || bpf_object__load_skeleton(engine->skeleton->skeleton) ||
+        bpf_capsule_initialize(&engine->capsule)) {
+        fprintf(stderr, "failed to load BPF object: %s\n", strerror(errno));
+        return -1;
+    }
+    engine->ctrl = &engine->skeleton->data_ctrl->ctrl;
+    engine->frame_fd = bpf_program__fd(engine->skeleton->progs.doom_frame);
+    engine->start_fd = bpf_program__fd(engine->skeleton->progs.doom_start);
+    if (engine->frame_fd < 0 || engine->start_fd < 0) {
+        fprintf(stderr, "BPF object is missing a Doom entry\n");
+        return -1;
+    }
+    engine->options.sz = sizeof(engine->options);
+    engine->stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
+    engine->ctrl->wad = bpf_capsule_malloc(&engine->capsule, wad_size);
+    if (!engine->ctrl->wad) {
+        perror("allocate WAD");
+        return -1;
+    }
+    engine->ctrl->wad_size = wad_size;
+    if (import_wad(wad, engine->ctrl->wad, (size_t)wad_size)) {
+        return -1;
+    }
+    // Start the engine once, before any frame: in dump mode it warps straight
+    // into E1M1 for determinism.
+    engine->ctrl->start_in_e1m1 = start_in_e1m1;
+    int start_error = bpf_prog_test_run_opts(engine->start_fd, &engine->options);
+    if (start_error || engine->ctrl->capsule.status != CAPSULE_OK) {
+        report_capsule_stop("engine start failed", start_error, engine->ctrl);
+        return -1;
+    }
+    if ((int)engine->options.retval != 0) {
+        fprintf(stderr, "engine start returned %d\n", (int)engine->options.retval);
+        return -1;
+    }
+    return 0;
+}
+
+// One game tic and its frame. *ns receives the frame's execution time: kernel
+// time from BPF's own accounting, or this thread's CPU time natively.
+static enum frame_status run_frame(struct engine* engine, const unsigned char** framebuffer, uint64_t* ns) {
+    if (engine->native) {
+        int exit_code = setjmp(native_exit_point);
+        if (exit_code) {
+            engine->event_count = 0;
+            if (exit_code - 1) {
+                fprintf(stderr, "run stopped: engine exited with code %d\n", exit_code - 1);
+                return FRAME_FAILED;
+            }
+            return FRAME_STOPPED;
+        }
+        uint64_t before = thread_cpu_ns();
+        *framebuffer = doom_engine_frame(engine->events, engine->event_count);
+        *ns = thread_cpu_ns() - before;
+        engine->event_count = 0;
+        return FRAME_DRAWN;
+    }
+
+    uint64_t before = program_run_time(engine->frame_fd);
+    int frame_error = bpf_prog_test_run_opts(engine->frame_fd, &engine->options);
+    if (frame_error || engine->ctrl->capsule.status != CAPSULE_OK) {
+        report_capsule_stop("run stopped", frame_error, engine->ctrl);
+        return engine->ctrl->capsule.status == CAPSULE_EXITED && engine->ctrl->capsule.code == 0 ? FRAME_STOPPED : FRAME_FAILED;
+    }
+    if ((int)engine->options.retval != 0) {
+        fprintf(stderr, "frame returned %d\n", (int)engine->options.retval);
+        return FRAME_FAILED;
+    }
+    *framebuffer = engine->ctrl->framebuffer;
+    if (!framebuffer_is_readable(&engine->capsule, *framebuffer)) {
+        fprintf(stderr, "framebuffer is outside Capsule memory\n");
+        return FRAME_FAILED;
+    }
+    *ns = engine->stats_fd >= 0 ? program_run_time(engine->frame_fd) - before : 0;
+    return FRAME_DRAWN;
+}
+
+static void release_engine(struct engine* engine) {
+    if (engine->native) {
+        free(engine->wad);
+        return;
+    }
+    if (engine->stats_fd >= 0) {
+        close(engine->stats_fd);
+    }
+    if (engine->skeleton) {
+        (void)bpf_capsule_release(&engine->capsule);
+        doom__destroy(engine->skeleton);
+    }
+}
+
 int main(int argc, char** argv) {
+    int native = argc >= 2 && !strcmp(argv[1], "--native");
+    argc -= native;
+    argv += native;
     if (argc < 3) {
-        fprintf(stderr, "usage: doom WAD (tty | dump N DIR)\n");
+        fprintf(stderr, "usage: doom [--native] WAD (tty | dump N DIR)\n");
         return 1;
     }
     int tty = !strcmp(argv[2], "tty"), dump = !strcmp(argv[2], "dump");
     if ((tty && argc != 3) || (dump && argc != 5) || (!tty && !dump)) {
-        fprintf(stderr, "usage: doom WAD (tty | dump N DIR)\n");
+        fprintf(stderr, "usage: doom [--native] WAD (tty | dump N DIR)\n");
         return 1;
     }
 
@@ -304,14 +480,13 @@ int main(int argc, char** argv) {
     }
 
     int result = 1;
-    int stats_fd = -1;
     int terminal_configured = 0;
     struct termios saved = {0};
     struct terminal_output terminal = {0};
     struct frame_samples samples = {0};
+    struct engine engine = {.native = native, .stats_fd = -1};
+    const char* engine_name = native ? "native" : "kernel";
     FILE* wad = fopen(argv[1], "rb");
-    struct doom* skeleton = NULL;
-    struct bpf_capsule capsule = {0};
     if (!wad) {
         perror(argv[1]);
         goto cleanup;
@@ -337,38 +512,7 @@ int main(int argc, char** argv) {
         perror("WAD rewind");
         goto cleanup;
     }
-    uint64_t wad_size = (uint64_t)wad_file_size;
-    const uint64_t engine_heap_size = 20ull << 20;
-
-    skeleton = doom__open();
-    if (!skeleton) {
-        fprintf(stderr, "open failed\n");
-        goto cleanup;
-    }
-    const struct bpf_capsule_config capsule_config = {
-        .fiber_count = 1,
-        .heap_bytes = wad_size + engine_heap_size,
-    };
-    if (bpf_capsule_configure(&capsule, skeleton->obj, capsule_config) || bpf_object__load_skeleton(skeleton->skeleton) || bpf_capsule_initialize(&capsule)) {
-        fprintf(stderr, "failed to load BPF object: %s\n", strerror(errno));
-        goto cleanup;
-    }
-    volatile struct doom_bpf_ctrl* ctrl = &skeleton->data_ctrl->ctrl;
-    int frame_fd = bpf_program__fd(skeleton->progs.doom_frame);
-    int start_fd = bpf_program__fd(skeleton->progs.doom_start);
-    if (frame_fd < 0 || start_fd < 0) {
-        fprintf(stderr, "BPF object is missing a Doom entry\n");
-        goto cleanup;
-    }
-    struct bpf_test_run_opts options = {.sz = sizeof(options)};
-    stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
-    ctrl->wad = bpf_capsule_malloc(&capsule, wad_size);
-    if (!ctrl->wad) {
-        perror("allocate WAD");
-        goto cleanup;
-    }
-    ctrl->wad_size = wad_size;
-    if (import_wad(wad, ctrl->wad, (size_t)wad_size)) {
+    if (start_engine(&engine, wad, (uint64_t)wad_file_size, dump)) {
         goto cleanup;
     }
     int wad_close_error = fclose(wad);
@@ -378,51 +522,25 @@ int main(int argc, char** argv) {
         goto cleanup;
     }
 
-    // Start the engine once, before any frame: in dump mode it warps straight
-    // into E1M1 for determinism.
-    ctrl->start_in_e1m1 = dump;
-    // Startup and every frame must finish in one invocation. This example has
-    // no continuation-driving loop, so any non-OK status is a hard failure.
-    int start_error = bpf_prog_test_run_opts(start_fd, &options);
-    if (start_error || ctrl->capsule.status != CAPSULE_OK) {
-        report_capsule_stop("engine start failed", start_error, ctrl);
-        goto cleanup;
-    }
-    if ((int)options.retval != 0) {
-        fprintf(stderr, "engine start returned %d\n", (int)options.retval);
-        goto cleanup;
-    }
     if (dump) { // deterministic input and PPMs out
         int dump_failed = 0;
         for (int i = 0; i < (int)dump_frames; ++i) {
-            uint64_t before = program_run_time(frame_fd);
-            int frame_error = bpf_prog_test_run_opts(frame_fd, &options);
-            if (frame_error || ctrl->capsule.status != CAPSULE_OK) {
-                report_capsule_stop("run failed", frame_error, ctrl);
+            const unsigned char* framebuffer = NULL;
+            uint64_t ns = 0;
+            if (run_frame(&engine, &framebuffer, &ns) != FRAME_DRAWN) {
                 dump_failed = 1;
                 break;
             }
-            if ((int)options.retval != 0) {
-                fprintf(stderr, "frame returned %d\n", (int)options.retval);
-                dump_failed = 1;
-                break;
-            }
-            const unsigned char* framebuffer = ctrl->framebuffer;
-            if (!framebuffer_is_readable(&capsule, framebuffer)) {
-                fprintf(stderr, "framebuffer is outside Capsule memory\n");
-                dump_failed = 1;
-                break;
-            }
-            if (stats_fd >= 0 && record_frame(&samples, program_run_time(frame_fd) - before)) {
+            if (record_frame(&samples, ns)) {
                 fprintf(stderr, "cannot record frame timing\n");
                 dump_failed = 1;
                 break;
             }
-            if (i == 6 && queue_input(ctrl, DK_UP, 1)) {
+            if (i == 6 && queue_input(&engine, DK_UP, 1)) {
                 dump_failed = 1;
                 break;
             }
-            if (i == 7 && queue_input(ctrl, DK_RIGHT, 1)) {
+            if (i == 7 && queue_input(&engine, DK_RIGHT, 1)) {
                 dump_failed = 1;
                 break;
             }
@@ -438,7 +556,7 @@ int main(int argc, char** argv) {
                 break;
             }
         }
-        fprintf(stderr, dump_failed ? "dump failed: status=%u\n" : "dump done: status=%u\n", ctrl->capsule.status);
+        fprintf(stderr, dump_failed ? "dump failed\n" : "dump done: status=0\n");
         result = dump_failed;
         goto cleanup;
     }
@@ -511,7 +629,7 @@ int main(int argc, char** argv) {
         }
         if (pressed) {
             if (pressed != held) {
-                if ((held && queue_input(ctrl, held, 0)) || queue_input(ctrl, pressed, 1)) {
+                if ((held && queue_input(&engine, held, 0)) || queue_input(&engine, pressed, 1)) {
                     failed = 1;
                     break;
                 }
@@ -519,7 +637,7 @@ int main(int argc, char** argv) {
             }
             linger = 6;
         } else if (held && --linger <= 0) {
-            if (queue_input(ctrl, held, 0)) {
+            if (queue_input(&engine, held, 0)) {
                 failed = 1;
                 break;
             }
@@ -531,25 +649,14 @@ int main(int argc, char** argv) {
             t0 = monotonic_us();
         }
         uint64_t due = ++tick * 1000000ull / 35;
-        uint64_t before = program_run_time(frame_fd);
-        int frame_error = bpf_prog_test_run_opts(frame_fd, &options);
-        if (frame_error || ctrl->capsule.status != CAPSULE_OK) {
-            report_capsule_stop("run stopped", frame_error, ctrl);
-            failed = ctrl->capsule.status != CAPSULE_EXITED || ctrl->capsule.code != 0;
+        const unsigned char* framebuffer = NULL;
+        uint64_t ns = 0;
+        enum frame_status status = run_frame(&engine, &framebuffer, &ns);
+        if (status != FRAME_DRAWN) {
+            failed = status == FRAME_FAILED;
             break;
         }
-        if ((int)options.retval != 0) {
-            fprintf(stderr, "frame returned %d\n", (int)options.retval);
-            failed = 1;
-            break;
-        }
-        const unsigned char* framebuffer = ctrl->framebuffer;
-        if (!framebuffer_is_readable(&capsule, framebuffer)) {
-            fprintf(stderr, "framebuffer is outside Capsule memory\n");
-            failed = 1;
-            break;
-        }
-        if (stats_fd >= 0 && record_frame(&samples, program_run_time(frame_fd) - before)) {
+        if (record_frame(&samples, ns)) {
             fprintf(stderr, "cannot record frame timing\n");
             failed = 1;
             break;
@@ -558,9 +665,9 @@ int main(int argc, char** argv) {
             failed = 1;
             break;
         }
-        // Account for both the in-kernel frame and userspace presentation.
-        // Using the timestamp from before that work would add its duration to
-        // every 1/35-second period and make busy scenes visibly slow down.
+        // Account for both the frame and userspace presentation. Using the
+        // timestamp from before that work would add its duration to every
+        // 1/35-second period and make busy scenes visibly slow down.
         uint64_t now = monotonic_us();
         int64_t slack = (int64_t)(t0 + due) - (int64_t)now;
         if (slack > 0 && usleep((useconds_t)slack) && errno != EINTR) {
@@ -581,16 +688,12 @@ cleanup:
             result = 1;
         }
     }
-    print_frame_stats(&samples);
+    print_frame_stats(&samples, engine_name);
     free(samples.ns);
     free(terminal.bytes);
     if (wad) {
         fclose(wad);
     }
-    if (stats_fd >= 0) {
-        close(stats_fd);
-    }
-    (void)bpf_capsule_release(&capsule);
-    doom__destroy(skeleton);
+    release_engine(&engine);
     return result;
 }

@@ -1,20 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// DOOM's kernel side: the entry points userspace invokes, and the handful of
-// callbacks the engine needs from its host. Everything that makes ordinary C
-// runnable in the kernel lives in the runtime header and the passes, not here.
+// DOOM's kernel side: the entry points userspace invokes around the engine
+// steps shared with the native build (doom_engine.h). Everything that makes
+// ordinary C runnable in the kernel lives in the runtime header and the
+// passes, not here.
 
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 
 #include "bpf_capsule.h"
 #include "bpf_ctrl.h"
-#include <stdlib.h>
-
-// PureDOOM's platform API is the entire BPF porting boundary.
-// The build applies two non-BPF, allocator-independent rendering fixes to its
-// private PureDOOM copy; the patches describe both fixes.
-#include "DOOM.h"
-#include "doom_config.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -23,135 +17,29 @@ char _license[] SEC("license") = "GPL";
 // here.
 volatile struct doom_bpf_ctrl ctrl SEC(".data.ctrl");
 
-// ------------------------------------------------------------- callbacks
-
-struct wad_file {
-    unsigned long size;
-    unsigned long position;
-};
-
-static struct wad_file wad_file;
-static uint64_t frame_clock;
-static int engine_started;
-
-static const char* basename(const char* path) {
-    const char* name = path;
-    for (; *path; path++) {
-        if (*path == '/' || *path == '\\') {
-            name = path + 1;
-        }
+// Preserve the engine's first fatal message in the mmapped control map so the
+// host can explain the abort that follows it.
+static void doom_record_error(const char* text, int length) {
+    if (ctrl.error_len) {
+        return;
     }
-    return name;
-}
-
-static void* platform_malloc(int size) {
-    if (size <= 0) {
-        return 0;
+    unsigned int copy = length < (int)sizeof(ctrl.error_text) - 1 ? (unsigned int)length : (unsigned int)sizeof(ctrl.error_text) - 1;
+    for (unsigned int i = 0; i < copy; ++i) {
+        ctrl.error_text[i] = text[i];
     }
-    void* result = malloc((unsigned long)size);
-    if (!result) {
-        capsule_exit(1);
-    }
-    return result;
+    ctrl.error_text[copy] = 0;
+    ctrl.error_len = copy;
 }
 
-static void* platform_open(const char* path, const char* mode) {
-    if (!mode || mode[0] != 'r' || doom_strcmp(basename(path), "doom1.wad")) {
-        return 0;
-    }
-    wad_file.position = 0;
-    return &wad_file;
-}
-
-static int platform_read(void* handle, void* destination, int count) {
-    if (handle != &wad_file || count <= 0) {
-        return count == 0 ? 0 : -1;
-    }
-    unsigned long left = wad_file.size - wad_file.position;
-    unsigned long length = (unsigned long)count;
-    if (length > left) {
-        length = left;
-    }
-    doom_memcpy(destination, ctrl.wad + wad_file.position, (int)length);
-    wad_file.position += length;
-    return (int)length;
-}
-
-static int platform_seek(void* handle, int offset, doom_seek_t origin) {
-    if (handle != &wad_file) {
-        return -1;
-    }
-    long base = 0;
-    if (origin == DOOM_SEEK_CUR) {
-        base = (long)wad_file.position;
-    } else if (origin == DOOM_SEEK_END) {
-        base = (long)wad_file.size;
-    } else if (origin != DOOM_SEEK_SET) {
-        return -1;
-    }
-    long position = base + offset;
-    if (position < 0 || (unsigned long)position > wad_file.size) {
-        return -1;
-    }
-    wad_file.position = (unsigned long)position;
-    return 0;
-}
-
-static int platform_tell(void* handle) {
-    return handle == &wad_file ? (int)wad_file.position : -1;
-}
-
-static int platform_eof(void* handle) {
-    return handle != &wad_file || wad_file.position >= wad_file.size;
-}
-
-static void platform_gettime(int* seconds, int* microseconds) {
-    *seconds = (int)(frame_clock / 35);
-    *microseconds = (int)(frame_clock % 35) * 1000000 / 35;
-}
-
-static char* platform_getenv(const char* name) {
-    return doom_strcmp(name, "HOME") == 0 ? "." : 0;
-}
-
-static void platform_exit(int code) {
-    capsule_exit(code);
-}
-
-static void platform_print(const char* text) {
-    int len = doom_strlen(text);
-    // PureDOOM reports fatal errors through its print callback immediately
-    // before doom_exit(). Preserve that message in the mmapped control map so
-    // the host can explain the abort.
-    if (!ctrl.error_len && len >= 6 && text[0] == 'E' && text[1] == 'r' && text[2] == 'r' && text[3] == 'o' && text[4] == 'r' && text[5] == ':') {
-        unsigned int copy = len < sizeof(ctrl.error_text) - 1 ? (unsigned int)len : (unsigned int)sizeof(ctrl.error_text) - 1;
-        for (unsigned int i = 0; i < copy; ++i) {
-            ctrl.error_text[i] = text[i];
-        }
-        ctrl.error_text[copy] = 0;
-        ctrl.error_len = copy;
-    }
-}
-
-// ------------------------------------------------------------ entry points
+#define DOOM_ENGINE_EXIT(code) capsule_exit(code)
+#define DOOM_ENGINE_ERROR(text, length) doom_record_error((text), (length))
+#include "doom_engine.h"
 
 // Engine start-up as its own managed body: WAD parsing, zone setup and the
 // initial level load are far heavier than any frame, so they run once behind
 // their own entry instead of hiding inside the first frame.
 static void doom_start_body(void) {
-    wad_file.size = ctrl.wad_size;
-    doom_set_print(platform_print);
-    doom_set_malloc(platform_malloc, free);
-    // Null selects PureDOOM's no-op close and failing write defaults. The
-    // in-memory WAD handle owns no resource, and the guest exposes no files.
-    doom_set_file_io(platform_open, 0, platform_read, 0, platform_seek, platform_tell, platform_eof);
-    doom_set_gettime(platform_gettime);
-    doom_set_exit(platform_exit);
-    doom_set_getenv(platform_getenv);
-
-    char* argv[] = {"bpf-doom", "-warp", "1", "1"};
-    doom_init(ctrl.start_in_e1m1 ? 4 : 1, argv, DOOM_FLAG_HIDE_MOUSE_OPTIONS | DOOM_FLAG_HIDE_SOUND_OPTIONS | DOOM_FLAG_HIDE_MUSIC_OPTIONS);
-    engine_started = 1;
+    doom_engine_start(ctrl.wad, ctrl.wad_size, ctrl.start_in_e1m1);
 }
 
 SEC("syscall")
@@ -162,30 +50,18 @@ int doom_start(void) {
 
 // One frame: advance the game and render it. The whole frame is one managed
 // body: every piece must run in order on the software stack, and only ctrl
-// bookkeeping stays in the entry. The engine must already be started; a frame
-// never initializes.
+// bookkeeping stays in the entry.
 static void doom_frame_body(void) {
-    if (!engine_started) {
-        capsule_exit(1);
+    unsigned count = ctrl.input_count;
+    if (count > DOOM_INPUT_QUEUE_CAPACITY) {
+        count = DOOM_INPUT_QUEUE_CAPACITY;
     }
-    unsigned input_count = ctrl.input_count;
-    if (input_count > DOOM_INPUT_QUEUE_CAPACITY) {
-        input_count = DOOM_INPUT_QUEUE_CAPACITY;
-    }
-    for (unsigned i = 0; i < input_count; i++) {
-        unsigned event = ctrl.input_events[i];
-        int key = (int)(event & DOOM_INPUT_KEY_MASK);
-        if (event & DOOM_INPUT_DOWN) {
-            doom_key_down(key);
-        } else {
-            doom_key_up(key);
-        }
+    unsigned int events[DOOM_INPUT_QUEUE_CAPACITY];
+    for (unsigned i = 0; i < count; i++) {
+        events[i] = ctrl.input_events[i];
     }
     ctrl.input_count = 0;
-    doom_force_update();
-    frame_clock++;
-
-    ctrl.framebuffer = doom_get_framebuffer(4);
+    ctrl.framebuffer = doom_engine_frame(events, count);
 }
 
 SEC("syscall")

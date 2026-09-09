@@ -24,7 +24,8 @@ bpf_capsule_skeleton(sqlite_skeleton OUTPUT sqlite.skel.h OBJECT "${sqlite_bpf}"
 
 add_executable(sqlite sqlite_host.c)
 target_compile_options(sqlite PRIVATE -Wall -Wextra)
-target_link_libraries(sqlite PRIVATE BpfCapsule::host sqlite_skeleton)
+target_link_libraries(sqlite PRIVATE BpfCapsule::host sqlite_skeleton sqlite_native)
 
 install(TARGETS sqlite RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
 install(FILES "${sqlite_bpf}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+install(FILES script.sql DESTINATION "${CMAKE_INSTALL_DATADIR}/bpf-capsule/sqlite")

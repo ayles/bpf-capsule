@@ -15,3 +15,10 @@ bpf_capsule_library(capsule_sqlite SOURCES "${sqlite_SOURCE_DIR}/sqlite3.c")
 target_include_directories(capsule_sqlite PUBLIC "${sqlite_SOURCE_DIR}")
 target_compile_definitions(capsule_sqlite PRIVATE SQLITE_OS_OTHER=1 SQLITE_THREADSAFE=0 SQLITE_OMIT_LOAD_EXTENSION)
 target_compile_options(capsule_sqlite PRIVATE -g)
+
+# The same amalgamation compiled natively, for the examples' --native comparison.
+add_library(sqlite_native STATIC "${sqlite_SOURCE_DIR}/sqlite3.c")
+target_include_directories(sqlite_native PUBLIC "${sqlite_SOURCE_DIR}")
+target_compile_definitions(sqlite_native PRIVATE SQLITE_OS_OTHER=1 SQLITE_THREADSAFE=0 SQLITE_OMIT_LOAD_EXTENSION)
+target_compile_options(sqlite_native PRIVATE -O2 -w)
+target_link_libraries(sqlite_native PUBLIC m)

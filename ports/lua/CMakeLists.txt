@@ -20,4 +20,11 @@ target_compile_definitions(capsule_lua PRIVATE LUA_USE_JUMPTABLE=0)
 # -g crash on declarations with the name in parentheses.
 target_compile_options(capsule_lua PUBLIC -include "${CMAKE_CURRENT_SOURCE_DIR}/lua_capsule_config.h")
 target_compile_options(capsule_lua PRIVATE -g)
+
+# The same sources compiled natively, for the examples' --native comparison.
+add_library(lua_native STATIC ${lua_sources})
+target_include_directories(lua_native PUBLIC "${lua_SOURCE_DIR}/src")
+target_compile_options(lua_native PUBLIC -include "${CMAKE_CURRENT_SOURCE_DIR}/lua_capsule_config.h")
+target_compile_options(lua_native PRIVATE -O2 -w)
+target_link_libraries(lua_native PUBLIC m)
 install(FILES "${lua_SOURCE_DIR}/doc/readme.html" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule/lua")

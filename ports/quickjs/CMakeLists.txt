@@ -39,4 +39,20 @@ target_compile_definitions(
     PRIVATE CONFIG_VERSION="${quickjs_version}" CONFIG_NO_DIRECT_DISPATCH CONFIG_NO_ATOMICS CONFIG_UTC_TIMEZONE
 )
 target_compile_options(capsule_quickjs PRIVATE -g)
+
+# The same sources compiled natively, for the examples' --native comparison:
+# the stock configuration except the UTC time zone the guest also uses.
+add_library(
+    quickjs_native
+    STATIC
+    "${quickjs_patched_SOURCE_DIR}/quickjs.c"
+    "${quickjs_patched_SOURCE_DIR}/cutils.c"
+    "${quickjs_patched_SOURCE_DIR}/libregexp.c"
+    "${quickjs_patched_SOURCE_DIR}/libunicode.c"
+    "${quickjs_patched_SOURCE_DIR}/dtoa.c"
+)
+target_include_directories(quickjs_native PUBLIC "${quickjs_patched_SOURCE_DIR}")
+target_compile_definitions(quickjs_native PRIVATE CONFIG_VERSION="${quickjs_version}" CONFIG_UTC_TIMEZONE _GNU_SOURCE)
+target_compile_options(quickjs_native PRIVATE -O2 -w)
+target_link_libraries(quickjs_native PUBLIC m pthread)
 install(FILES "${quickjs_SOURCE_DIR}/LICENSE" DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/bpf-capsule/quickjs")

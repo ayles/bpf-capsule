@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -20,6 +22,31 @@ struct file_contents {
     unsigned char* data;
     size_t size;
 };
+
+// The kernel's own per-program counters, summed over the object: a wall clock
+// around the syscall would also count the syscall path and this loop, which
+// the native run does not pay. Run-time statistics must be enabled first.
+static int kernel_run_time(struct bpf_object* object, uint64_t* nanoseconds, uint64_t* invocations) {
+    uint64_t total_nanoseconds = 0;
+    uint64_t total_invocations = 0;
+    struct bpf_program* program;
+    bpf_object__for_each_program(program, object) {
+        int fd = bpf_program__fd(program);
+        if (fd < 0) {
+            continue;
+        }
+        struct bpf_prog_info info = {0};
+        unsigned int length = sizeof(info);
+        if (bpf_prog_get_info_by_fd(fd, &info, &length)) {
+            return -1;
+        }
+        total_nanoseconds += info.run_time_ns;
+        total_invocations += info.run_cnt;
+    }
+    *nanoseconds = total_nanoseconds;
+    *invocations = total_invocations;
+    return 0;
+}
 
 static int read_file(const char* path, int terminate, struct file_contents* contents) {
     FILE* file = fopen(path, "rb");
@@ -110,9 +137,11 @@ static int realtime_offset_ns(int64_t* result) {
     return 0;
 }
 
+// The number of continuations a run may use; unlimited unless the environment
+// caps it, so a regression in the drive budget can be turned into a failure.
 static int read_max_drains(unsigned long* result) {
     const char* text = getenv("BPF_CAPSULE_MAX_DRAINS");
-    *result = 0;
+    *result = ULONG_MAX;
     if (!text || !*text) {
         return 0;
     }
@@ -127,10 +156,48 @@ static int read_max_drains(unsigned long* result) {
     return 0;
 }
 
+// The same script under the native interpreter this example was built with,
+// isolated and without site like the guest configuration. The CPU time of the
+// whole process is reported: it includes interpreter start-up, as the kernel
+// time does.
+static int run_native(const char* script_path) {
+    const char* interpreter = getenv("BPF_CAPSULE_NATIVE_PYTHON");
+    if (!interpreter || !*interpreter) {
+        interpreter = PYTHON_NATIVE_INTERPRETER;
+    }
+    pid_t child = fork();
+    if (child < 0) {
+        perror("fork");
+        return 1;
+    }
+    if (child == 0) {
+        execl(interpreter, interpreter, "-I", "-S", script_path, (char*)NULL);
+        perror(interpreter);
+        _exit(127);
+    }
+    int status = 0;
+    struct rusage usage;
+    if (wait4(child, &status, 0, &usage) < 0) {
+        perror("wait");
+        return 1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status)) {
+        fprintf(stderr, "native Python failed\n");
+        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+    }
+    double cpu_ms = (double)(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1e3 + (double)(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e3;
+    fprintf(stderr, "native execution: %.3f ms\n", cpu_ms);
+    return 0;
+}
+
 int main(int argc, char** argv) {
-    if (argc != 2) {
-        fprintf(stderr, "usage: python SCRIPT\n");
+    int native = argc >= 2 && !strcmp(argv[1], "--native");
+    if (argc != 2 + native) {
+        fprintf(stderr, "usage: python [--native] SCRIPT\n");
         return 2;
+    }
+    if (native) {
+        return run_native(argv[2]);
     }
 
     char library_path[PATH_MAX];
@@ -204,7 +271,13 @@ int main(int argc, char** argv) {
     memcpy((void*)control->script, script.data, script.size + 1);
 
     unsigned long max_drains;
-    if (read_max_drains(&max_drains) || run_program(start)) {
+    if (read_max_drains(&max_drains)) {
+        goto cleanup;
+    }
+    int stats_fd = bpf_enable_stats(BPF_STATS_RUN_TIME);
+    uint64_t kernel_before = 0, invocations_before = 0;
+    int stats_failed = stats_fd < 0 || kernel_run_time(skeleton->obj, &kernel_before, &invocations_before);
+    if (run_program(start)) {
         fprintf(stderr, "cannot start Python: %s\n", strerror(errno));
         goto cleanup;
     }
@@ -220,9 +293,18 @@ int main(int argc, char** argv) {
         }
         ++drains;
     }
+    uint64_t kernel_after = 0, invocations_after = 0;
+    stats_failed = stats_failed || kernel_run_time(skeleton->obj, &kernel_after, &invocations_after);
+    if (stats_fd >= 0) {
+        close(stats_fd);
+    }
     size_t output_size = control->output_size < control->output_capacity ? control->output_size : control->output_capacity;
     if (output_size) {
         fwrite((const void*)control->output, 1, output_size, stdout);
+    }
+    if (!stats_failed) {
+        fprintf(stderr, "kernel execution: %.3f ms over %llu invocations\n", (double)(kernel_after - kernel_before) / 1e6,
+            (unsigned long long)(invocations_after - invocations_before));
     }
     fprintf(stderr, "continuation drains: %lu\n", drains);
     if (control->execution.status != CAPSULE_OK) {
