@@ -172,14 +172,42 @@ PreservedAnalyses FiberLocalPass::run(Module& module, ModuleAnalysisManager&) {
         local->eraseFromParent();
     }
 
-    // capsule_reset restores the cancelled fiber's block from the image.
+    // capsule_reset restores the cancelled fiber's block from the image. The
+    // hook is native runtime code, so it copies with its own bounded loops
+    // rather than a memcpy that could be outlined to the C library's, which
+    // managed code shares.
     if (Function* reset = module.getFunction(bpf::sym::FiberLocalReset)) {
         reset->deleteBody();
         BasicBlock* entry = BasicBlock::Create(context, "entry", reset);
         IRBuilder<> builder(entry);
         Value* fiber = reset->getArg(0);
         Value* slot = builder.CreateInBoundsGEP(table, storage, {ConstantInt::get(i64, 0), fiber}, "fiber.locals");
-        builder.CreateMemCpy(slot, blockAlignment, initial, blockAlignment, layout.getTypeAllocSize(block));
+        uint64_t size = layout.getTypeAllocSize(block);
+        uint64_t offset = 0;
+        auto copyRange = [&](Type* element, uint64_t step, uint64_t end, StringRef name) {
+            if (offset >= end) {
+                return;
+            }
+            BasicBlock* head = builder.GetInsertBlock();
+            BasicBlock* body = BasicBlock::Create(context, name, reset);
+            BasicBlock* after = BasicBlock::Create(context, name + ".done", reset);
+            builder.CreateBr(body);
+            builder.SetInsertPoint(body);
+            PHINode* index = builder.CreatePHI(i64, 2, name + ".index");
+            index->addIncoming(ConstantInt::get(i64, offset), head);
+            Align alignment = std::min(blockAlignment, Align(step));
+            Value* value = builder.CreateAlignedLoad(element, builder.CreatePtrAdd(initial, index), alignment);
+            builder.CreateAlignedStore(value, builder.CreatePtrAdd(slot, index), alignment);
+            Value* next = builder.CreateAdd(index, ConstantInt::get(i64, step));
+            index->addIncoming(next, body);
+            builder.CreateCondBr(builder.CreateICmpULT(next, ConstantInt::get(i64, end)), body, after);
+            builder.SetInsertPoint(after);
+            offset = end;
+        };
+        if (blockAlignment >= Align(8)) {
+            copyRange(i64, 8, size - size % 8, "reset.words");
+        }
+        copyRange(Type::getInt8Ty(context), 1, size, "reset.bytes");
         builder.CreateRetVoid();
     }
 

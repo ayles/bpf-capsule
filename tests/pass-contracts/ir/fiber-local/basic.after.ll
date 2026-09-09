@@ -57,15 +57,22 @@ entry:
 define void @__bpf_capsule_fiber_local_reset(i32 %fiber) {
 entry:
   %fiber.locals = getelementptr inbounds [4 x %capsule.fiber_local], ptr @__bpf_capsule_fiber_locals, i64 0, i32 %fiber
-  call void @llvm.memcpy.p0.p0.i64(ptr align 8 %fiber.locals, ptr align 8 @__bpf_capsule_fiber_local_image, i64 24, i1 false)
+  br label %reset.words
+
+reset.words:                                      ; preds = %reset.words, %entry
+  %reset.words.index = phi i64 [ 0, %entry ], [ %3, %reset.words ]
+  %0 = getelementptr i8, ptr @__bpf_capsule_fiber_local_image, i64 %reset.words.index
+  %1 = load i64, ptr %0, align 8
+  %2 = getelementptr i8, ptr %fiber.locals, i64 %reset.words.index
+  store i64 %1, ptr %2, align 8
+  %3 = add i64 %reset.words.index, 8
+  %4 = icmp ult i64 %3, 24
+  br i1 %4, label %reset.words, label %reset.words.done
+
+reset.words.done:                                 ; preds = %reset.words
   ret void
 }
 
 declare i32 @__bpf_capsule_current_fiber_index()
-
-; Function Attrs: nocallback nofree nosync nounwind willreturn memory(argmem: readwrite)
-declare void @llvm.memcpy.p0.p0.i64(ptr noalias writeonly captures(none), ptr noalias readonly captures(none), i64, i1 immarg) #0
-
-attributes #0 = { nocallback nofree nosync nounwind willreturn memory(argmem: readwrite) }
 
 !0 = !{}
