@@ -40,7 +40,7 @@
         # on any supported machine; CPython exists only on arena profiles.
         // matrix.examples
         // matrix.examplesOldest
-        # `<example>-<kernel floor>` selects a profile: lua-71, doom-515.
+        # `<example>-<kernel floor>` selects a profile: lua-69, doom-515.
         // pkgs.lib.concatMapAttrs (
           kernel: examples:
           pkgs.lib.mapAttrs' (name: package: pkgs.lib.nameValuePair "${name}-${kernel}" package) examples

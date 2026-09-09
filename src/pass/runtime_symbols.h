@@ -31,7 +31,8 @@ namespace bpf::sym {
 // probes it to verify the runtime was linked.
 inline constexpr llvm::StringLiteral RuntimeProbe{"__bpf_capsule_fiber_acquire"};
 
-// The bounded two-level continuation drivers. `Trampoline` doubles as the
+// The bounded continuation drivers: the entry loop repeats the L1 level,
+// which repeats the generated step. `Trampoline` doubles as the
 // prefix of the whole driver family for starts_with checks.
 inline constexpr llvm::StringLiteral Trampoline{"__bpf_capsule_trampoline"};
 inline constexpr llvm::StringLiteral TrampolineL1{"__bpf_capsule_trampoline_l1"};

@@ -86,8 +86,9 @@ Rust. `bpf-capsule-ld` links and optimizes the whole program, performs the
 Capsule transformation, and emits the final BPF object.
 
 Generated objects load through ordinary libbpf on unmodified x86-64 and arm64
-kernels. The test matrix starts at Linux 5.15; newer profiles use `bpf_arena`
-and indirect root selection where the kernel and JIT support them.
+kernels. The test matrix starts at Linux 5.15; newer profiles use `bpf_arena`,
+program extensions, and the full atomic set where the kernel and JIT support
+them.
 
 [DESIGN.md](DESIGN.md) is the technical description of the current system: the
 execution model, fibers, software calling convention, memory backends,
@@ -111,8 +112,8 @@ nix run .#benchmarks                     # local in-kernel measurements
 
 The plain example packages are built for the oldest supported kernel, 5.15,
 so they run on any supported machine. A kernel floor suffix selects a faster
-profile where the kernel and JIT support it: `.#lua-71`, `.#doom-69`,
-`.#sqlite-610`. The CPython examples need arena memory and exist only from
+profile where the kernel and JIT support it: `.#lua-69`, `.#doom-610`,
+`.#sqlite-70`. The CPython examples need arena memory and exist only from
 `python-610` on arm64 and `python-69` on x86-64; their plain names build the
 oldest of those.
 

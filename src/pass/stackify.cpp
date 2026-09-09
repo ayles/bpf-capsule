@@ -5162,8 +5162,9 @@ private:
         db.finalize();
     }
 
-    // The runtime supplies a two-level bounded driver. Runtime iterations
-    // multiply while each global loop is verified only once.
+    // The runtime supplies the outer two levels of the bounded driver; the
+    // step built here loops over its own trips. Runtime iterations multiply
+    // while each global loop is verified only once.
     Function* BuildStepDriver(bool borrowed) {
         StringRef driverName = borrowed ? bpf::sym::TrampolineCtx : bpf::sym::Trampoline;
         StringRef levelName = borrowed ? bpf::sym::TrampolineCtxL1 : bpf::sym::TrampolineL1;

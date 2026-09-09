@@ -100,7 +100,7 @@ in
   # The examples for the oldest supported kernel, runnable everywhere; CPython
   # needs arena memory and is absent here.
   examplesOldest = examplesFor "5.15";
-  # Every profile, keyed by its kernel floor without the dot: `lua-71`.
+  # Every profile, keyed by its kernel floor without the dot: `lua-69`.
   examplesByKernel = lib.mapAttrs' (
     kernel: _: lib.nameValuePair (lib.replaceStrings [ "." ] [ "" ] kernel) (examplesFor kernel)
   ) suites;
