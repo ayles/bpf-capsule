@@ -4724,32 +4724,39 @@ private:
             smb.CreateRet(ConstantInt::get(I32_, 1));
             b.SetInsertPoint(stackReady);
         }
-        // The step loops over BPF_CAPSULE_STEP_TRIPS dispatches below; its
-        // counter and the control pointer live in callee-saved registers,
-        // which every trip past the first repays.
+        // The step loops over stepTrips dispatches below; its counter and the
+        // control pointer live in callee-saved registers, which every trip
+        // past the first repays. Instruction-array dispatch takes one trip:
+        // there the loop would re-explore the whole array per trip.
+        const unsigned stepTrips = IndirectDispatch_ ? 1 : BPF_CAPSULE_STEP_TRIPS;
+        // The body (lifecycle test, root switch, root call) is verified once
+        // per trip, so the count answers to the verifier's per-path jump
+        // history, not to its instruction budget; every trip past the first
+        // saves a global call with its prologue and epilogue.
         BasicBlock* iterateEntry = b.GetInsertBlock();
         b.CreateBr(iterate);
         b.SetInsertPoint(iterate);
-        // Up to BPF_CAPSULE_STEP_TRIPS dispatches per step call. The body
-        // (lifecycle test, root switch, root call) is verified once per trip,
-        // so the count answers to the verifier's per-path jump history, not
-        // to its instruction budget; every trip past the first saves a global
-        // call with its prologue and epilogue.
-        PHINode* trip = b.CreatePHI(I32_, 2, "trip");
-        trip->addIncoming(ConstantInt::get(I32_, 0), iterateEntry);
-        auto* latch = BasicBlock::Create(Ctx_, "latch", step);
-        auto* exhausted = BasicBlock::Create(Ctx_, "exhausted", step);
-        {
+        BasicBlock* latch = nullptr;
+        if (stepTrips > 1) {
+            PHINode* trip = b.CreatePHI(I32_, 2, "trip");
+            trip->addIncoming(ConstantInt::get(I32_, 0), iterateEntry);
+            latch = BasicBlock::Create(Ctx_, "latch", step);
+            auto* exhausted = BasicBlock::Create(Ctx_, "exhausted", step);
             IRBuilder<> lb(latch);
             Value* next = lb.CreateAdd(trip, ConstantInt::get(I32_, 1), "trip.next");
-            lb.CreateCondBr(lb.CreateICmpULT(next, ConstantInt::get(I32_, BPF_CAPSULE_STEP_TRIPS)), iterate, exhausted);
+            lb.CreateCondBr(lb.CreateICmpULT(next, ConstantInt::get(I32_, stepTrips)), iterate, exhausted);
             trip->addIncoming(next, latch);
             IRBuilder<> eb(exhausted);
             eb.CreateRet(ConstantInt::get(I32_, ActionContinue));
         }
         // Continue the trip loop only on ActionContinue; every other action
-        // leaves the step immediately, exactly as a one-trip step would.
+        // leaves the step immediately. A single-trip step returns the action
+        // as it stands, which is the shape the driver expects either way.
         auto continueOrStop = [&](IRBuilder<>& rb, Value* action, const Twine& name) {
+            if (!latch) {
+                rb.CreateRet(action);
+                return;
+            }
             auto* stop = BasicBlock::Create(Ctx_, name + ".stop", step, terminal);
             rb.CreateCondBr(rb.CreateICmpNE(action, ConstantInt::get(I32_, ActionContinue)), stop, latch);
             IRBuilder<>(stop).CreateRet(action);

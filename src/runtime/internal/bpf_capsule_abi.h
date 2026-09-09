@@ -33,6 +33,11 @@
 // Dispatches one generated step call performs before returning to its
 // bounded caller: the compiler builds the loop, the runtime sizes the outer
 // levels by it. Bounded by the verifier's per-path jump history (8192).
+// A target that dispatches through an instruction array takes one trip
+// instead: the verifier explores every array target on every trip, so a loop
+// around it multiplies states rather than amortizing a call. That target
+// therefore drives this many fewer dispatches per entry call and returns to
+// the host correspondingly more often.
 #define BPF_CAPSULE_STEP_TRIPS 32u
 #define BPF_CAPSULE_REGION_ID_INDEX_MASK 0x00ffff00u
 #define BPF_CAPSULE_MANAGED_FUNCTION_TOKEN_SPAN 0x01000000u
