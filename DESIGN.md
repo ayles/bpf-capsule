@@ -97,7 +97,6 @@ arm64 in 6.10.
 | 6.9 | `bpf_arena`, signed-load lowering | fixed maps | v4 | compare tree |
 | 6.10 | `bpf_arena`, signed-load lowering | `bpf_arena`, signed-load lowering | v4 | compare tree |
 | 7.0 | `bpf_arena` | `bpf_arena` | v4 | compare tree |
-| 7.1 | `bpf_arena` | `bpf_arena` | v4 | instruction-array `gotox` |
 
 Nix maps these kernel/JIT profiles to explicit linker capabilities in
 [`nix/target-profile.nix`](nix/target-profile.nix); the compiler drivers contain
@@ -409,10 +408,7 @@ balanced tree to enter the exact region.
 MachineFlatten removes the temporary call and merges those blocks into the
 root after register allocation. Runtime dispatch contains only the packed
 region ID; source-function identity is absent. CPU v3 uses branch relays where
-necessary. With `--indirect-jumps`, LLVM may lower the public step's v4 root
-switch to an instruction array and `gotox`. On that profile, root selection
-uses another dense switch over region indexes instead of the explicit range
-tree; the per-unit exact-region tree remains explicit. A context step can
+necessary. A context step can
 select both context and scalar roots directly, while the scalar step selects
 only scalar roots. Managed code reads its hidden argument through
 `capsule_borrowed_ctx()`;
