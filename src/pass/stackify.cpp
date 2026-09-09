@@ -1282,7 +1282,7 @@ private:
 
         unsigned inlined = 0;
         for (Function* function : order) {
-            if (function->getInstructionCount() > bpf::CompactInlineIrLimit) {
+            if (function->getInstructionCount() > bpf::CompactInlineIrLimit()) {
                 continue;
             }
             CallBase* site = nullptr;

@@ -4,6 +4,7 @@
 #include "common.h"
 
 #include <llvm/Analysis/LoopInfo.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Function.h>
@@ -13,6 +14,19 @@
 #include <llvm/IR/PassManager.h>
 
 using namespace llvm;
+
+// Sized against the ~85--90 generated instructions of one managed call and
+// return: a loop-free helper below this many source IR instructions is
+// cheaper inlined than called. The ceiling stays conservative because every
+// inlined copy is verified at its call site and the compiler cannot yet
+// measure how much of the verifier's budget an object uses; once it can,
+// the limit can grow on its own instead of through --inline-limit.
+static cl::opt<unsigned> CompactInlineIrLimitOption(
+    "bpf-compact-inline-limit", cl::init(100), cl::desc("Source IR instructions a loop-free helper may have and still be inlined"));
+
+unsigned bpf::CompactInlineIrLimit() {
+    return CompactInlineIrLimitOption;
+}
 
 namespace {
 
@@ -80,7 +94,7 @@ public:
                 allocaBytes += count ? layout.getTypeAllocSize(alloca->getAllocatedType()) * count->getZExtValue() : 512;
             }
         }
-        bool multiplies = !loops.empty() || function.getInstructionCount() > bpf::CompactInlineIrLimit || allocaBytes > 256;
+        bool multiplies = !loops.empty() || function.getInstructionCount() > bpf::CompactInlineIrLimit() || allocaBytes > 256;
         if (!multiplies) {
             return PreservedAnalyses::none();
         }

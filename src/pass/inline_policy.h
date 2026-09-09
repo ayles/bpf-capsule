@@ -11,10 +11,10 @@ namespace bpf {
 // after optimization has made a function compact and single-use.
 inline constexpr llvm::StringLiteral InlinePolicyVetoAttr = "bpf.capsule.inline-policy-veto";
 
-// One managed call/return executes roughly 85--90 generated instructions.
+// The source-IR ceiling below which a loop-free helper counts as compact.
 // Both the pre-O2 inlining veto and Stackify's size-neutral single-use pass
-// use this nearby source-IR ceiling to define a compact helper consistently.
-inline constexpr unsigned CompactInlineIrLimit = 100;
+// use it consistently; bpf-capsule-ld sets it from --inline-limit.
+unsigned CompactInlineIrLimit();
 
 } // namespace bpf
 

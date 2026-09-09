@@ -213,7 +213,8 @@ world replaces all of it:
   This handoff is the machine's fundamental call cost and the reason the
   inline policy matters. Stackify also inlines a compact non-recursive helper
   with exactly one direct managed caller, removing the handoff without
-  duplicating source IR.
+  duplicating source IR. The linker's `--inline-limit` sets how large a
+  loop-free helper may be for either form of inlining.
 - **Exit is not a return**: `exit(code)`, traps and unreachables publish
   `{status, code}` and surface as `EXITED`; they never unwind.
 
