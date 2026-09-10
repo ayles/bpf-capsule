@@ -106,6 +106,8 @@ cl::opt<AllocatorLockMode> AllocatorLock("allocator-lock", cl::desc("Allocator l
     cl::init(AllocatorLockMode::Map), cl::cat(LinkerCategory));
 cl::opt<bool> NativeArenaSignedLoads(
     "native-arena-signed-loads", cl::desc("Target JIT accepts sign-extending arena loads"), cl::init(false), cl::cat(LinkerCategory));
+cl::opt<bool> AvoidArenaStoreImmediate("avoid-arena-store-immediate",
+    cl::desc("Never store an immediate into arena memory with an offset that needs a register"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<bool> IndirectJumps("indirect-jumps", cl::desc("Target supports instruction-array dispatch through gotox"), cl::init(false), cl::cat(LinkerCategory));
 cl::opt<bool> NativeShift63("native-shift63", cl::desc("Target JIT accepts native 64-bit shifts by 63"), cl::init(false), cl::cat(LinkerCategory));
 cl::list<std::string> RunPasses(
@@ -325,6 +327,7 @@ int main(int argc, char** argv) {
         setCodegenOption<bool>("bpf-unified-spill-pipeline", true);
     }
     setCodegenOption<bool>("bpf-machine-arena-sext", Memory == MemoryMode::Arena && !NativeArenaSignedLoads);
+    setCodegenOption<bool>("bpf-machine-arena-store-imm", Memory == MemoryMode::Arena && AvoidArenaStoreImmediate);
 
     if (stopCodegen && (EmitLlvm || EmitAssembly)) {
         fail("-stop-before/-stop-after cannot be combined with --emit-llvm or --emit-asm");
@@ -341,6 +344,9 @@ int main(int argc, char** argv) {
         }
         if (Memory == MemoryMode::Fixed && NativeArenaSignedLoads) {
             fail("--native-arena-signed-loads requires --memory=arena");
+        }
+        if (Memory == MemoryMode::Fixed && AvoidArenaStoreImmediate) {
+            fail("--avoid-arena-store-immediate requires --memory=arena");
         }
         if (Memory == MemoryMode::Fixed && IndirectJumps) {
             fail("--indirect-jumps requires --memory=arena");

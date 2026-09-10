@@ -25,6 +25,12 @@ let
   # had them before Capsule's kernel floor, arm64 gained them in Linux 6.0.
   freplace = atLeast (if arch == "aarch64" then "6.0" else "5.6");
   nativeArenaSignedLoads = arena && atLeast "7.0";
+  # Linux 6.10 through 6.17 built an arena store's address in the same scratch
+  # register the arm64 JIT then used for an offset that needs one, so the store
+  # landed on garbage and the arena's fixup swallowed it. 6.18 gave the address
+  # a register of its own, and the fix was not backported, so every kernel a
+  # lower floor admits still needs the compiler to avoid the shape.
+  avoidArenaStoreImmediate = arena && arch == "aarch64" && !atLeast "6.18";
   # Instruction-array dispatch is available from 7.1 and no profile selects
   # it: measured against the compare trees it replaces it runs the Lua
   # benchmark in 1561 ms instead of 524 ms, and QuickJS and SQLite stop
@@ -45,6 +51,7 @@ assert lib.assertMsg (atLeast "5.15") "BPF Capsule requires Linux 5.15 or newer"
   ++ lib.optional managedAtomics "--managed-atomics"
   ++ lib.optional fullAtomics "--allocator-lock=atomic"
   ++ lib.optional nativeArenaSignedLoads "--native-arena-signed-loads"
+  ++ lib.optional avoidArenaStoreImmediate "--avoid-arena-store-immediate"
   ++ lib.optional indirectJumps "--indirect-jumps"
   ++ lib.optional (arch != "aarch64") "--native-shift63";
 }

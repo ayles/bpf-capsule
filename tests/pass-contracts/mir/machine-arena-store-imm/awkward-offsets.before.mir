@@ -1,0 +1,42 @@
+--- |
+  ; ModuleID = 'tests/pass-contracts/mir/machine-arena-store-imm/awkward-offsets.before.mir'
+  source_filename = "machine-arena-store-imm-contract.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define void @store_immediates(ptr %p) #0 {
+  entry:
+    ret void
+  }
+  
+  attributes #0 = { "target-cpu"="v4" }
+...
+---
+name:            store_immediates
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           true
+noVRegs:         false
+hasFakeUses:     false
+registers:
+  - { id: 0, class: gpr }
+liveins:
+  - { reg: '$r1', virtual-reg: '%0' }
+frameInfo:
+  maxAlignment:    1
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1
+  
+    %0:gpr = COPY $r1
+    STW_imm 1792, %0, 16
+    STW_imm 1792, %0, -40
+    STD_imm 1, %0, -48
+    STH_imm 3, %0, 3
+    STB_imm 5, %0, 8192
+    STW_imm 4294967295, %0, -8
+    RET
+...

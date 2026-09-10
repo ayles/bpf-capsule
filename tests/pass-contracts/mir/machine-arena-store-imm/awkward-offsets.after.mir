@@ -1,0 +1,52 @@
+--- |
+  ; ModuleID = '/tmp/claude-1000/-home-ayles-Projects-bpf-capsule/a6d099d6-0661-4f8e-9839-547f368634e6/scratchpad/after.raw.mir'
+  source_filename = "machine-arena-store-imm-contract.ll"
+  target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
+  target triple = "bpfel"
+  
+  define void @store_immediates(ptr %p) #0 {
+  entry:
+    ret void
+  }
+  
+  attributes #0 = { "target-cpu"="v4" }
+...
+---
+name:            store_immediates
+alignment:       8
+tracksRegLiveness: true
+noPhis:          true
+isSSA:           true
+noVRegs:         false
+hasFakeUses:     false
+registers:
+  - { id: 0, class: gpr }
+  - { id: 1, class: gpr }
+  - { id: 2, class: gpr }
+  - { id: 3, class: gpr }
+  - { id: 4, class: gpr }
+  - { id: 5, class: gpr }
+liveins:
+  - { reg: '$r1', virtual-reg: '%0' }
+frameInfo:
+  maxAlignment:    1
+  framePointerPolicy: none
+machineFunctionInfo: {}
+body:             |
+  bb.0.entry:
+    liveins: $r1
+  
+    %0:gpr = COPY $r1
+    STW_imm 1792, %0, 16
+    %1:gpr = MOV_ri 1792
+    STW killed %1, %0, -40
+    %2:gpr = MOV_ri 1
+    STD killed %2, %0, -48
+    %3:gpr = MOV_ri 3
+    STH killed %3, %0, 3
+    %4:gpr = MOV_ri 5
+    STB killed %4, %0, 8192
+    %5:gpr = LD_imm64 4294967295
+    STW killed %5, %0, -8
+    RET
+...

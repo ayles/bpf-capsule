@@ -248,6 +248,7 @@ capsule_ir_pass_contract(stackify-native-runtime-btf "bpf-stackify" stackify/nat
 capsule_ir_pass_contract(stackify-indirect "bpf-stackify-indirect" stackify-indirect/borrowed-context)
 capsule_ir_pass_contract(stackify-fixed "bpf-stackify-fixed" stackify-fixed/two-region)
 capsule_mir_pass_contract(machine-arena-sext bpf-machine-arena-sext machine-arena-sext/narrow-signed-loads)
+capsule_mir_pass_contract(machine-arena-store-imm bpf-machine-arena-store-imm machine-arena-store-imm/awkward-offsets)
 capsule_mir_pass_contract(
     unified-spills-scalar
     "bpf-unified-spills"
