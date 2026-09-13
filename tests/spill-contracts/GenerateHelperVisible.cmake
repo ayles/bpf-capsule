@@ -23,9 +23,6 @@ string(
 )
 
 math(EXPR last_word "${WORD_COUNT} - 1")
-foreach(index RANGE 0 ${last_word})
-    string(APPEND ir "  %slot${index} = alloca i64, align 8\n")
-endforeach()
 string(
     APPEND ir
     "  %stack = getelementptr inbounds [1 x [262144 x i8]], ptr @bpf_call_stack, i64 0, i64 0, i64 0\n"
@@ -42,24 +39,27 @@ foreach(index RANGE 0 ${last_word})
         APPEND ir
         "  %input${index} = load volatile i64, ptr @helper_visible_noise, align 8\n"
         "  %value${index} = add i64 %input${index}, ${index}\n"
-        "  store volatile i64 %value${index}, ptr %slot${index}, align 8\n"
     )
 endforeach()
+# Keep the values live across a real call so LLVM, not this fixture, creates
+# their spill slots. Source allocas such as the buffer must remain native.
+string(APPEND ir "  %timestamp = call i64 inttoptr (i64 5 to ptr)()\n")
 foreach(index RANGE 0 ${last_word})
-    string(APPEND ir "  %load${index} = load volatile i64, ptr %slot${index}, align 8\n")
+    string(APPEND ir "  %mixed${index} = mul i64 %value${index}, %timestamp\n")
 endforeach()
-string(APPEND ir "  %sum0 = xor i64 %load0, %load1\n")
+string(APPEND ir "  %sum0 = xor i64 %mixed0, %mixed1\n")
 foreach(index RANGE 2 ${last_word})
     math(EXPR current_sum "${index} - 1")
     math(EXPR previous_sum "${index} - 2")
-    string(APPEND ir "  %sum${current_sum} = xor i64 %sum${previous_sum}, %load${index}\n")
+    string(APPEND ir "  %sum${current_sum} = xor i64 %sum${previous_sum}, %mixed${index}\n")
 endforeach()
 math(EXPR last_sum "${last_word} - 1")
 string(
     APPEND ir
     "  %guard.value = load volatile i64, ptr %guard.first, align 8\n"
     "  %combined = xor i64 %sum${last_sum}, %helper.result\n"
-    "  %result = xor i64 %combined, %guard.value\n"
+    "  %with.guard = xor i64 %combined, %guard.value\n"
+    "  %result = xor i64 %with.guard, %timestamp\n"
     "  ret i64 %result\n"
     "}\n\n"
     "define dso_local i32 @helper_visible_run() section \"syscall\" {\n"

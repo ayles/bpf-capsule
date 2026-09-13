@@ -37,7 +37,7 @@ body:             |
     liveins: $r1
   
     INLINEASM &"# bpf_capsule_stack_anchor", sideeffect attdialect, reguse:GPR, $r1
-    STD_imm 7, $r10, -40
-    $r0 = LDD $r10, -40
+    STD_imm 7, $r10, -40 :: (store (s64) into %stack.0)
+    $r0 = LDD $r10, -40 :: (load (s64) from %stack.0)
     RET implicit $r0
 ...

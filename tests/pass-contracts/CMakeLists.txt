@@ -104,6 +104,10 @@ function(capsule_mir_pass_diagnostic name pass fixture)
 endfunction()
 
 function(capsule_machine_pipeline_contract name fixture)
+    set(extra_arg "")
+    if(ARGC GREATER 2)
+        set(extra_arg "${ARGV2}")
+    endif()
     set(before "${CMAKE_CURRENT_SOURCE_DIR}/machine-pipeline/${fixture}.before.ll")
     set(after "${CMAKE_CURRENT_SOURCE_DIR}/machine-pipeline/${fixture}.after.mir")
     if(NOT EXISTS "${before}" OR NOT EXISTS "${after}")
@@ -114,8 +118,8 @@ function(capsule_machine_pipeline_contract name fixture)
         COMMAND
             "${CMAKE_COMMAND}" "-DBPF_CAPSULE_LD=$<TARGET_FILE:${BPF_CAPSULE_LD_TARGET}>"
             "-DLLVM_AS=${BPF_CAPSULE_LLVM_AS}" "-DLLVM_DIS=${BPF_CAPSULE_LLVM_DIS}" "-DBEFORE=${before}"
-            "-DAFTER=${after}" "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/machine-pipeline-${name}" -P
-            "${CMAKE_CURRENT_SOURCE_DIR}/RunMachinePipelineCase.cmake"
+            "-DAFTER=${after}" "-DEXTRA_ARG=${extra_arg}" "-DWORK=${CMAKE_CURRENT_BINARY_DIR}/machine-pipeline-${name}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/RunMachinePipelineCase.cmake"
     )
     set_tests_properties("PassContract.MachinePipeline.${name}" PROPERTIES LABELS "pass-contract;unprivileged")
 endfunction()
@@ -250,15 +254,21 @@ capsule_ir_pass_contract(stackify-fixed "bpf-stackify-fixed" stackify-fixed/two-
 capsule_mir_pass_contract(machine-arena-sext bpf-machine-arena-sext machine-arena-sext/narrow-signed-loads)
 capsule_mir_pass_contract(machine-arena-store-imm bpf-machine-arena-store-imm machine-arena-store-imm/awkward-offsets)
 capsule_mir_pass_contract(
+    llvm-spill-slot-plan
+    "bpf-spill-slot-plan,bpf-finish-spill-slot-plan"
+    unified-spills/llvm-slot-plan
+)
+capsule_machine_pipeline_contract(llvm-spill-slots spill-slots "-bpf-unified-spill-limit=24")
+capsule_mir_pass_contract(
     unified-spills-scalar
     "bpf-unified-spills"
     unified-spills/scalar
     "-bpf-unified-spill-limit=16"
 )
-capsule_mir_pass_contract(
-    unified-spills-rematerialized-pointer
+capsule_mir_pass_diagnostic(
+    unified-spills-native-global
     "bpf-unified-spills"
-    unified-spills/rematerialized-pointer
+    unified-spills/native-global
     "-bpf-unified-spill-limit=0"
 )
 capsule_mir_pass_contract(
@@ -296,6 +306,24 @@ capsule_mir_pass_contract(
     unified-spills-immediate-store
     "bpf-unified-spills"
     unified-spills/immediate-store
+    "-bpf-unified-spill-limit=16"
+)
+capsule_mir_pass_contract(
+    unified-spills-arena-and-scalar-in-one-word
+    "bpf-unified-spills"
+    unified-spills/arena-and-scalar-in-one-word
+    "-bpf-unified-spill-limit=24"
+)
+capsule_mir_pass_contract(
+    unified-spills-arena-pointer-relocated
+    "bpf-unified-spills"
+    unified-spills/arena-pointer-relocated
+    "-bpf-unified-spill-limit=24"
+)
+capsule_mir_pass_contract(
+    unified-spills-two-widths-in-one-word
+    "bpf-unified-spills"
+    unified-spills/two-widths-in-one-word
     "-bpf-unified-spill-limit=16"
 )
 capsule_mir_pass_diagnostic(

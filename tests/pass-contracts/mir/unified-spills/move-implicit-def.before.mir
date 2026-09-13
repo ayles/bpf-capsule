@@ -3,13 +3,16 @@
   target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
   target triple = "bpfel"
   
-  define i64 @physical(ptr %stack.base) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 {
+  define i64 @physical(ptr %stack.base) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 !bpf.capsule.spill.plan !2 {
   entry:
     ret i64 7
   }
   
   !0 = !{i32 0}
   !1 = !{i64 1024}
+  !2 = !{!3}
+  !3 = !{i32 0, !4}
+  !4 = !{i32 0, i64 7}
 ...
 ---
 name:            physical
@@ -38,7 +41,7 @@ body:             |
     $w2 = MOV_ri_32 0
     $w3 = MOV_ri_32 7
     $w2 = MOV_rr_32 killed $w3, implicit-def $r2
-    STD killed $r2, $r10, -40
-    $r0 = LDD $r10, -40
+    STD killed $r2, $r10, -40 :: (store (s64) into %stack.0)
+    $r0 = LDD $r10, -40 :: (load (s64) from %stack.0)
     RET implicit $r0
 ...

@@ -166,7 +166,15 @@ ClonedBody cloneFunctionBody(MachineFunction& destination, MachineFunction& sour
             if (!instruction.memoperands_empty()) {
                 SmallVector<MachineMemOperand*, 2> memory;
                 for (MachineMemOperand* operand : instruction.memoperands()) {
-                    memory.push_back(destination.getMachineMemOperand(operand, operand->getAAInfo()));
+                    // Spill frame indices belong to the source function and
+                    // have already served coloring and relocation. The root
+                    // shares physical stack storage between its units, not
+                    // their MachineFrameInfo object tables.
+                    if (isa_and_nonnull<FixedStackPseudoSourceValue>(operand->getPseudoValue())) {
+                        memory.push_back(destination.getMachineMemOperand(operand, MachinePointerInfo(), operand->getSize()));
+                    } else {
+                        memory.push_back(destination.getMachineMemOperand(operand, operand->getAAInfo()));
+                    }
                 }
                 clone->setMemRefs(destination, memory);
             }

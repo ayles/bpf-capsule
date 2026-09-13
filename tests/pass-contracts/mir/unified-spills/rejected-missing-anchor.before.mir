@@ -30,7 +30,7 @@ stack:
 machineFunctionInfo: {}
 body:             |
   bb.0.entry:
-    STD_imm 7, $r10, -40
-    $r0 = LDD $r10, -40
+    STD_imm 7, $r10, -40 :: (store (s64) into %stack.0)
+    $r0 = LDD $r10, -40 :: (load (s64) from %stack.0)
     RET implicit $r0
 ...

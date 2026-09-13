@@ -7,7 +7,7 @@
   
   declare i64 @callee()
   
-  define i64 @physical(ptr %stack.base, ptr %pointer) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 {
+  define i64 @physical(ptr %stack.base, ptr %pointer) !bpf.capsule.allocation.unit !0 !bpf.capsule.stack.size !1 !bpf.capsule.spill.plan !2 {
   entry:
     call void asm sideeffect "# bpf_capsule_stack_anchor", "r"(ptr %stack.base)
     %called = call i64 @callee()
@@ -19,6 +19,9 @@
   
   !0 = !{i32 0}
   !1 = !{i64 1024}
+  !2 = !{!3}
+  !3 = !{i32 1, !4}
+  !4 = !{i32 0, i64 7}
 ...
 ---
 name:            physical
@@ -49,11 +52,11 @@ body:             |
   
     INLINEASM &"# bpf_capsule_stack_anchor", sideeffect attdialect, reguse:GPR, killed $r1
     $r6 = MOV_ri 7
-    STD killed $r6, $r10, -32
-    STD killed $r2, $r10, -24
+    STD killed $r6, $r10, -32 :: (store (s64) into %stack.1)
+    STD killed $r2, $r10, -24 :: (store (s64) into %stack.0)
     JAL @callee, csr, implicit $r11, implicit-def $r11, implicit-def $r0
-    $r1 = LDD $r10, -24
-    $r2 = LDD $r10, -32
+    $r1 = LDD $r10, -24 :: (load (s64) from %stack.0)
+    $r2 = LDD $r10, -32 :: (load (s64) from %stack.1)
     $r1 = LDD killed $r1, 0
     $r0 = ADD_rr killed $r0, killed $r1
     $r0 = ADD_rr killed $r0, killed $r2

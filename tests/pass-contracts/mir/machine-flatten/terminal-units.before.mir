@@ -1,5 +1,4 @@
 --- |
-  ; ModuleID = 'build/machine-flatten-min.mir'
   source_filename = "machine-flatten-contract.ll"
   target datalayout = "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128"
   target triple = "bpfel"
@@ -85,12 +84,17 @@ hasFakeUses:     false
 liveins:
   - { reg: '$w1' }
 frameInfo:
-  maxAlignment:    1
+  stackSize:       8
+  maxAlignment:    8
   framePointerPolicy: none
+stack:
+  - { id: 0, type: spill-slot, offset: -8, size: 8, alignment: 8 }
 machineFunctionInfo: {}
 body:             |
   bb.0.unit0.body:
     $w0 = MOV_ri_32 10
+    STW32 $w0, $r10, -8 :: (store (s32) into %stack.0)
+    $w0 = LDW32 $r10, -8 :: (load (s32) from %stack.0)
     RET implicit $w0
 ...
 ---

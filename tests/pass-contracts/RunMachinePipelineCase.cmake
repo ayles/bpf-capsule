@@ -19,6 +19,10 @@ endforeach()
 
 file(REMOVE_RECURSE "${WORK}")
 file(MAKE_DIRECTORY "${WORK}")
+set(extra_args)
+if(DEFINED EXTRA_ARG AND NOT "${EXTRA_ARG}" STREQUAL "")
+    string(REPLACE "|" ";" extra_args "${EXTRA_ARG}")
+endif()
 
 function(run_checked description)
     execute_process(COMMAND ${ARGN} RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
@@ -61,7 +65,7 @@ endif()
 run_checked(
     "running the uninterrupted machine-flatten pipeline"
     "${BPF_CAPSULE_LD}" --passes=no-op-module -mcpu=v4 -bpf-unified-spill-pipeline
-    -stop-after=bpf-machine-flatten-finalize -simplify-mir "${BEFORE}" -o "${WORK}/actual.raw.mir"
+    ${extra_args} -stop-after=bpf-machine-flatten-finalize -simplify-mir "${BEFORE}" -o "${WORK}/actual.raw.mir"
 )
 run_checked(
     "canonicalizing actual machine output"
@@ -88,5 +92,5 @@ endif()
 run_checked(
     "emitting an object from the uninterrupted machine-flatten pipeline"
     "${BPF_CAPSULE_LD}" --passes=no-op-module -mcpu=v4 -bpf-unified-spill-pipeline
-    "${BEFORE}" -o "${WORK}/output.o"
+    ${extra_args} "${BEFORE}" -o "${WORK}/output.o"
 )

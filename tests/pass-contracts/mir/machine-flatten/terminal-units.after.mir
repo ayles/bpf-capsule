@@ -47,7 +47,8 @@ hasFakeUses:     false
 liveins:
   - { reg: '$w1' }
 frameInfo:
-  maxAlignment:    1
+  stackSize:       8
+  maxAlignment:    8
   adjustsStack:    true
   hasCalls:        true
   framePointerPolicy: none
@@ -74,6 +75,8 @@ body:             |
   
   bb.3.unit0.body:
     $w0 = MOV_ri_32 10
+    STW32 $w0, $r10, -8 :: (store (s32))
+    $w0 = LDW32 $r10, -8 :: (load (s32))
     RET implicit $w0
   
   bb.4.unit1.body:

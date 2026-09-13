@@ -330,8 +330,12 @@ compiler-rt and Picolibc archive members, then performs six logical phases:
    target passes handle signed loads, atomic markers, shifts, jump tables, and
    BTF according to the selected capabilities.
 6. **Generate BPF machine code.** A machine-level budget pass proves every
-   native BPF call chain, post-register-allocation spill relocation moves
-   eligible scalar overflow into the fiber stack, and MachineFlatten joins
+   native BPF call chain. Before stack-slot coloring, spill representations
+   are recorded on LLVM's frame objects; LLVM reuses storage only between
+   compatible lifetimes and representations. Post-register-allocation
+   relocation moves eligible scalar and arena-pointer overflow into the fiber
+   stack using those identities, without reconstructing values from physical
+   stack words. Verifier-owned pointers stay native. MachineFlatten joins
    temporary allocation units into their output roots before final assembly
    and BTF.
 
