@@ -9,6 +9,7 @@
 // sugar, records no parameters, and the BPF extern-declaration path then
 // indexes past the empty list. Declaring the three plainly first sidesteps
 // it; drop these once the SDK's clang carries the fix.
+// https://github.com/llvm/llvm-project/issues/213714
 struct lua_State;
 extern const char* lua_pushfstring(struct lua_State* L, const char* fmt, ...);
 extern int lua_gc(struct lua_State* L, int what, ...);
