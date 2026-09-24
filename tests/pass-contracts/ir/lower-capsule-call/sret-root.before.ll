@@ -24,3 +24,23 @@ entry:
   %status = call i32 (i32, ptr, ptr, i64, i64, ptr, ...) @__bpf_capsule_call(i32 0, ptr null, ptr %output, i64 16, i64 8, ptr @aggregate_root, i32 %value)
   ret i32 %status
 }
+
+define void @bytes_root(ptr sret([40 x i8]) align 8 %output) {
+entry:
+  store [40 x i8] zeroinitializer, ptr %output, align 8
+  ret void
+}
+
+define i32 @call_bytes() section "xdp" {
+entry:
+  %output = alloca [40 x i8], align 8
+  %status = call i32 (i32, ptr, ptr, i64, i64, ptr, ...) @__bpf_capsule_call(i32 0, ptr null, ptr %output, i64 40, i64 8, ptr @bytes_root)
+  ret i32 %status
+}
+
+define i32 @call_bytes_overaligned() section "xdp" {
+entry:
+  %output = alloca [40 x i8], align 16
+  %status = call i32 (i32, ptr, ptr, i64, i64, ptr, ...) @__bpf_capsule_call(i32 0, ptr null, ptr %output, i64 40, i64 16, ptr @bytes_root)
+  ret i32 %status
+}

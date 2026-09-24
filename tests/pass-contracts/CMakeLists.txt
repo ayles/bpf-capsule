@@ -218,6 +218,12 @@ capsule_ir_pass_contract(
 capsule_ir_pass_contract(stackify "bpf-stackify" stackify/two-region)
 capsule_ir_pass_contract(stackify-managed-calls "bpf-stackify" stackify/managed-calls)
 capsule_ir_pass_contract(stackify-varargs "bpf-stackify" stackify/varargs)
+capsule_ir_pass_contract(stackify-native-verifier-varargs "bpf-stackify" stackify/native-verifier-varargs)
+capsule_ir_pass_diagnostic(
+    lower-capsule-call-sret-alignment
+    "bpf-lower-capsule-call"
+    lower-capsule-call/rejected-sret-alignment
+)
 capsule_ir_pass_contract(stackify-setjmp "bpf-stackify" stackify/setjmp)
 capsule_ir_pass_contract(stackify-single-use-inline "bpf-stackify" stackify/single-use-inline)
 capsule_ir_pass_contract(stackify-aligned-frame "bpf-stackify" stackify/aligned-frame)

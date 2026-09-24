@@ -457,6 +457,11 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     // no text relocations in data sections.
     void VirtualizeFunctionAddressesInCode(Module& module) {
         for (auto&& func : module) {
+            // Native-only code keeps real function symbols: weak-ksym
+            // existence checks and kfunc callbacks need relocations, not ids.
+            if (!func.isDeclaration() && bpf::IsNativeFunction(func) && !bpf::IsCapsuleFunction(func)) {
+                continue;
+            }
             for (auto&& inst : instructions(func)) {
                 auto* call = dyn_cast<CallBase>(&inst);
                 // A helper taking a callback (bpf_for_each_map_elem and
@@ -478,6 +483,64 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
                 }
             }
         }
+    }
+
+    // Native-only code (entry programs and their native call tree) keeps
+    // verifier addressing for everything except Capsule memory it reaches on
+    // purpose: fiber stacks and heap words addressed from the memory view
+    // base, arena-typed values, or the program's own image globals. A pointer
+    // derives from Capsule memory when a walk back through casts, address
+    // arithmetic, PHIs and selects reaches one of those roots.
+    bool DerivesFromCapsuleMemory(Value* pointer) {
+        SmallVector<Value*, 16> work{pointer};
+        SmallPtrSet<Value*, 32> seen;
+        while (!work.empty()) {
+            Value* value = work.pop_back_val();
+            if (!seen.insert(value).second) {
+                continue;
+            }
+            if (auto* pointerType = dyn_cast<PointerType>(value->getType()); pointerType && pointerType->getAddressSpace() == ArenaAS) {
+                return true;
+            }
+            if (auto* load = dyn_cast<LoadInst>(value)) {
+                // Runtime control blocks and the program's data sections
+                // hold serialized Capsule addresses, including the configured
+                // memory-view base. Loads through kernel pointers, helper
+                // results and ksyms keep their native addressing instead.
+                auto* origin = dyn_cast<GlobalVariable>(getUnderlyingObject(load->getPointerOperand()));
+                if (origin && origin->hasSection() && origin->getSection() != ".ksyms") {
+                    return true;
+                }
+                continue;
+            }
+            if (auto* global = dyn_cast<GlobalVariable>(value)) {
+                if (global->getName() == bpf::sym::ArenaMap || (!global->hasSection() && bpf::IsCapsuleGlobal(*global))) {
+                    return true;
+                }
+                continue;
+            }
+            if (auto* expression = dyn_cast<ConstantExpr>(value)) {
+                for (Value* operand : expression->operands()) {
+                    work.push_back(operand);
+                }
+                continue;
+            }
+            auto* inst = dyn_cast<Instruction>(value);
+            if (!inst) {
+                continue;
+            }
+            if (auto* gep = dyn_cast<GetElementPtrInst>(inst)) {
+                work.push_back(gep->getPointerOperand());
+            } else if (auto* select = dyn_cast<SelectInst>(inst)) {
+                work.push_back(select->getTrueValue());
+                work.push_back(select->getFalseValue());
+            } else if (isa<CastInst>(inst) || isa<PHINode>(inst) || isa<BinaryOperator>(inst) || isa<FreezeInst>(inst)) {
+                for (Value* operand : inst->operands()) {
+                    work.push_back(operand);
+                }
+            }
+        }
+        return false;
     }
 
     // The displacement span holding managed function tokens and native
@@ -2712,9 +2775,10 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
         bpf::stats() << "bpf-memory: " << installed << " of " << Regions_.size() << " regions carry initialized data\n";
     }
 
-    // Every access that is not provably a local stack slot goes through the
-    // program's masked accessor.
+    // Capsule accesses go through masked accessors; native code retains
+    // verifier addressing except when it explicitly reaches Capsule memory.
     void RouteAccessesThroughHeap(Function& func) {
+        const bool nativeOnly = bpf::IsNativeFunction(func) && !bpf::IsCapsuleFunction(func);
         Module& module = *func.getParent();
         LLVMContext& ctx = func.getContext();
         auto* i64 = Type::getInt64Ty(ctx);
@@ -2751,6 +2815,12 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             // and selects whose native base is no longer recoverable by
             // getUnderlyingObject().
             if (verifierNative.contains(ptr)) {
+                continue;
+            }
+            // Native-only code addresses kernel memory, contexts and maps
+            // with verifier semantics; only what it derives from Capsule
+            // memory on purpose goes through the accessor.
+            if (nativeOnly && !DerivesFromCapsuleMemory(ptr)) {
                 continue;
             }
             if (!ManagedRmw_ && (isa<AtomicRMWInst>(inst) || isa<AtomicCmpXchgInst>(inst))) {
@@ -3568,6 +3638,7 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
     }
 
     void CastUnsafeAccesses(Function& func) {
+        const bool nativeOnly = bpf::IsNativeFunction(func) && !bpf::IsCapsuleFunction(func);
         LLVMContext& ctx = func.getContext();
         auto* ptrAs1 = PointerType::get(ctx, ArenaAS);
         DominatorTree dt(func);
@@ -3582,6 +3653,9 @@ struct MemoryPass : public PassInfoMixin<MemoryPass> {
             }
             if (verifierNative.contains(ptr)) {
                 return false; // borrowed ctx/packet pointer keeps provenance
+            }
+            if (nativeOnly && !DerivesFromCapsuleMemory(ptr)) {
+                return false; // kernel memory in native-only code
             }
             Value* base = getUnderlyingObject(ptr);
             if (isa<AllocaInst>(base)) {

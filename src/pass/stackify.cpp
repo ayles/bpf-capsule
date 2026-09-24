@@ -1711,6 +1711,11 @@ private:
                 if (!call->getFunctionType()->isVarArg() || boundary) {
                     continue;
                 }
+                // Native helpers and kfuncs retain their verifier ABI, even
+                // when their declarations are variadic (e.g. trace_printk).
+                if (bpf::IsNativeFunction(function) && !bpf::IsCapsuleFunction(function) && bpf::IsVerifierCall(*call)) {
+                    continue;
+                }
                 if (managed) {
                     if (!isa<CallInst>(call)) {
                         call->getContext().emitError(call, "stackify: invoke of a managed variadic function is unsupported");

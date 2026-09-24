@@ -7,6 +7,9 @@ target triple = "bpfel"
 
 @bpf_capsule_config = constant %config { i32 4096, i32 4096, i32 8388608, i32 8392704, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 2, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_heap_array = global %map zeroinitializer, section ".maps", align 8, !dbg !0
+@llvm.native_field_offset = external global i64
+@native_capsule_address = global i64 0, section ".data.native", align 8
+@native_kernel_pointer = external global ptr, section ".ksyms"
 @heap0 = global [4194304 x i8] zeroinitializer, section ".bss.heap0", align 8, !dbg !5
 @heap1 = global [4194304 x i8] zeroinitializer, section ".bss.heap1", align 8, !dbg !11
 
@@ -136,10 +139,61 @@ entry:
   ret void
 }
 
-; Function Attrs: noinline
-define i64 @bpf_heap_load8(i64 %offset) #0 !dbg !23 {
+declare extern_weak i64 @optional_kfunc() section ".ksyms"
+
+declare void @register_callback(ptr) section ".ksyms"
+
+define void @native_callback() !bpf.native !23 {
 entry:
-  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !29, !bpf.native.alloca !34
+  ret void
+}
+
+define i1 @native_symbols() !bpf.native !23 {
+entry:
+  call void @register_callback(ptr @native_callback)
+  %available = icmp ne ptr @optional_kfunc, null
+  ret i1 %available
+}
+
+define i32 @native_kernel_fields(ptr %context) !bpf.native !23 {
+entry:
+  %bits = load i64, ptr %context, align 8
+  %task = inttoptr i64 %bits to ptr
+  %offset = load i64, ptr @llvm.native_field_offset, align 8
+  %field = getelementptr i8, ptr %task, i64 %offset
+  %member = load ptr, ptr %field, align 8
+  %value = load i32, ptr %member, align 4
+  %kernel = load ptr, ptr @native_kernel_pointer, align 8
+  %other = load i32, ptr %kernel, align 4
+  %sum = add i32 %value, %other
+  ret i32 %sum
+}
+
+define i32 @native_capsule_access(i1 %choose) !bpf.native !23 {
+entry:
+  %bpf.view.base = load volatile i64, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 12), align 8
+  %bpf.stack.base.offset32 = load volatile i32, ptr getelementptr inbounds nuw (%config, ptr @bpf_capsule_config, i32 0, i32 2), align 4
+  %bpf.stack.base.offset = zext i32 %bpf.stack.base.offset32 to i64
+  %bpf.stack.address = add i64 %bpf.view.base, %bpf.stack.base.offset
+  %bpf.stack.base.pointer = inttoptr i64 %bpf.stack.address to ptr
+  %bits = load i64, ptr @native_capsule_address, align 8
+  %pointer = inttoptr i64 %bits to ptr
+  %next = getelementptr i8, ptr %pointer, i64 4
+  %selected = select i1 %choose, ptr %pointer, ptr %next
+  %0 = ptrtoint ptr %selected to i64
+  %1 = call i64 @bpf_heap_load32(i64 %0)
+  %2 = trunc i64 %1 to i32
+  %3 = ptrtoint ptr %bpf.stack.base.pointer to i64
+  %4 = call i64 @bpf_heap_load32(i64 %3)
+  %5 = trunc i64 %4 to i32
+  %sum = add i32 %2, %5
+  ret i32 %sum
+}
+
+; Function Attrs: noinline
+define i64 @bpf_heap_load8(i64 %offset) #0 !dbg !24 {
+entry:
+  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !30, !bpf.native.alloca !23
   %0 = and i64 %offset, 4194303, !dbg !35
   %bpf.heap.offset.visible = call i64 asm sideeffect "", "=r,0"(i64 %0), !dbg !35
   %1 = trunc i64 %offset to i32, !dbg !35
@@ -148,31 +202,31 @@ entry:
   br i1 %3, label %region.0, label %region.route, !dbg !35
 
 array:                                            ; preds = %region.route
-  call void @llvm.lifetime.start.p0(ptr %bpf.heap.array.key.i), !dbg !29
-  %4 = and i64 %offset, 4194303, !dbg !29
-  %bpf.heap.offset.visible.i = call i64 asm sideeffect "", "=r,0"(i64 %4), !dbg !29
-  %5 = trunc i64 %offset to i32, !dbg !29
-  %6 = lshr i32 %5, 22, !dbg !29
-  %7 = icmp uge i32 %6, 2, !dbg !29
-  br i1 %7, label %lookup.i, label %invalid.i, !dbg !29
+  call void @llvm.lifetime.start.p0(ptr %bpf.heap.array.key.i), !dbg !30
+  %4 = and i64 %offset, 4194303, !dbg !30
+  %bpf.heap.offset.visible.i = call i64 asm sideeffect "", "=r,0"(i64 %4), !dbg !30
+  %5 = trunc i64 %offset to i32, !dbg !30
+  %6 = lshr i32 %5, 22, !dbg !30
+  %7 = icmp uge i32 %6, 2, !dbg !30
+  br i1 %7, label %lookup.i, label %invalid.i, !dbg !30
 
 lookup.i:                                         ; preds = %array
-  %8 = sub i32 %6, 2, !dbg !29
-  store i32 %8, ptr %bpf.heap.array.key.i, align 4, !dbg !29
-  %bpf.heap.array.value.i = call ptr inttoptr (i64 1 to ptr)(ptr @bpf_heap_array, ptr %bpf.heap.array.key.i), !dbg !29
-  %9 = icmp ne ptr %bpf.heap.array.value.i, null, !dbg !29
-  br i1 %9, label %access.i, label %invalid.i, !dbg !29
+  %8 = sub i32 %6, 2, !dbg !30
+  store i32 %8, ptr %bpf.heap.array.key.i, align 4, !dbg !30
+  %bpf.heap.array.value.i = call ptr inttoptr (i64 1 to ptr)(ptr @bpf_heap_array, ptr %bpf.heap.array.key.i), !dbg !30
+  %9 = icmp ne ptr %bpf.heap.array.value.i, null, !dbg !30
+  br i1 %9, label %access.i, label %invalid.i, !dbg !30
 
 access.i:                                         ; preds = %lookup.i
-  %10 = getelementptr i8, ptr %bpf.heap.array.value.i, i64 %bpf.heap.offset.visible.i, !dbg !29
-  %11 = load i8, ptr %10, align 1, !dbg !29
-  %12 = zext i8 %11 to i64, !dbg !29
-  call void @llvm.lifetime.end.p0(ptr %bpf.heap.array.key.i), !dbg !29
-  br label %bpf_heap_array_load8.exit, !dbg !29
+  %10 = getelementptr i8, ptr %bpf.heap.array.value.i, i64 %bpf.heap.offset.visible.i, !dbg !30
+  %11 = load i8, ptr %10, align 1, !dbg !30
+  %12 = zext i8 %11 to i64, !dbg !30
+  call void @llvm.lifetime.end.p0(ptr %bpf.heap.array.key.i), !dbg !30
+  br label %bpf_heap_array_load8.exit, !dbg !30
 
 invalid.i:                                        ; preds = %lookup.i, %array
-  call void @llvm.lifetime.end.p0(ptr %bpf.heap.array.key.i), !dbg !29
-  br label %bpf_heap_array_load8.exit, !dbg !29
+  call void @llvm.lifetime.end.p0(ptr %bpf.heap.array.key.i), !dbg !30
+  br label %bpf_heap_array_load8.exit, !dbg !30
 
 bpf_heap_array_load8.exit:                        ; preds = %invalid.i, %access.i
   %13 = phi i64 [ %12, %access.i ], [ 0, %invalid.i ]
@@ -208,7 +262,7 @@ declare void @llvm.lifetime.end.p0(ptr captures(none)) #1
 ; Function Attrs: noinline
 define i64 @bpf_heap_load16(i64 %offset) #0 !dbg !36 {
 entry:
-  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !39, !bpf.native.alloca !34
+  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !39, !bpf.native.alloca !23
   %0 = and i64 %offset, 4194302, !dbg !44
   %bpf.heap.offset.visible = call i64 asm sideeffect "", "=r,0"(i64 %0), !dbg !44
   %1 = trunc i64 %offset to i32, !dbg !44
@@ -271,7 +325,7 @@ invalid:                                          ; No predecessors!
 ; Function Attrs: noinline
 define i64 @bpf_heap_load32(i64 %offset) #0 !dbg !45 {
 entry:
-  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !48, !bpf.native.alloca !34
+  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !48, !bpf.native.alloca !23
   %0 = and i64 %offset, 4194300, !dbg !53
   %bpf.heap.offset.visible = call i64 asm sideeffect "", "=r,0"(i64 %0), !dbg !53
   %1 = trunc i64 %offset to i32, !dbg !53
@@ -334,7 +388,7 @@ invalid:                                          ; No predecessors!
 ; Function Attrs: noinline
 define i32 @bpf_heap_store32(i64 %offset, i64 %value) #0 !dbg !54 {
 entry:
-  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !60, !bpf.native.alloca !34
+  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !60, !bpf.native.alloca !23
   %0 = and i64 %offset, 4194300, !dbg !66
   %bpf.heap.offset.visible = call i64 asm sideeffect "", "=r,0"(i64 %0), !dbg !66
   %1 = trunc i64 %offset to i32, !dbg !66
@@ -396,7 +450,7 @@ invalid:                                          ; No predecessors!
 ; Function Attrs: noinline
 define i32 @bpf_heap_store64(i64 %offset, i64 %value) #0 !dbg !67 {
 entry:
-  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !71, !bpf.native.alloca !34
+  %bpf.heap.array.key.i = alloca i32, align 4, !dbg !71, !bpf.native.alloca !23
   %0 = and i64 %offset, 4194296, !dbg !77
   %bpf.heap.offset.visible = call i64 asm sideeffect "", "=r,0"(i64 %0), !dbg !77
   %1 = trunc i64 %offset to i32, !dbg !77
@@ -481,58 +535,58 @@ attributes #1 = { nocallback nofree nosync nounwind willreturn memory(argmem: re
 !20 = !DISubrange(count: 1, lowerBound: 0)
 !21 = !{i32 2, !"Dwarf Version", i32 4}
 !22 = !{i32 2, !"Debug Info Version", i32 3}
-!23 = distinct !DISubprogram(name: "bpf_heap_load8", linkageName: "bpf_heap_load8", scope: null, file: !3, type: !24, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !27)
-!24 = !DISubroutineType(types: !25)
-!25 = !{!26, !26}
-!26 = !DIBasicType(name: "unsigned long long", size: 64, encoding: DW_ATE_unsigned)
-!27 = !{!28}
-!28 = !DILocalVariable(name: "offset", arg: 1, scope: !23, file: !3, type: !26)
-!29 = !DILocation(line: 0, scope: !30, inlinedAt: !33)
-!30 = distinct !DISubprogram(name: "bpf_heap_array_load8", linkageName: "bpf_heap_array_load8", scope: null, file: !3, type: !24, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !31)
-!31 = !{!32}
-!32 = !DILocalVariable(name: "offset", arg: 1, scope: !30, file: !3, type: !26)
-!33 = distinct !DILocation(line: 0, scope: !23)
-!34 = !{}
-!35 = !DILocation(line: 0, scope: !23)
-!36 = distinct !DISubprogram(name: "bpf_heap_load16", linkageName: "bpf_heap_load16", scope: null, file: !3, type: !24, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !37)
+!23 = !{}
+!24 = distinct !DISubprogram(name: "bpf_heap_load8", linkageName: "bpf_heap_load8", scope: null, file: !3, type: !25, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !28)
+!25 = !DISubroutineType(types: !26)
+!26 = !{!27, !27}
+!27 = !DIBasicType(name: "unsigned long long", size: 64, encoding: DW_ATE_unsigned)
+!28 = !{!29}
+!29 = !DILocalVariable(name: "offset", arg: 1, scope: !24, file: !3, type: !27)
+!30 = !DILocation(line: 0, scope: !31, inlinedAt: !34)
+!31 = distinct !DISubprogram(name: "bpf_heap_array_load8", linkageName: "bpf_heap_array_load8", scope: null, file: !3, type: !25, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !32)
+!32 = !{!33}
+!33 = !DILocalVariable(name: "offset", arg: 1, scope: !31, file: !3, type: !27)
+!34 = distinct !DILocation(line: 0, scope: !24)
+!35 = !DILocation(line: 0, scope: !24)
+!36 = distinct !DISubprogram(name: "bpf_heap_load16", linkageName: "bpf_heap_load16", scope: null, file: !3, type: !25, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !37)
 !37 = !{!38}
-!38 = !DILocalVariable(name: "offset", arg: 1, scope: !36, file: !3, type: !26)
+!38 = !DILocalVariable(name: "offset", arg: 1, scope: !36, file: !3, type: !27)
 !39 = !DILocation(line: 0, scope: !40, inlinedAt: !43)
-!40 = distinct !DISubprogram(name: "bpf_heap_array_load16", linkageName: "bpf_heap_array_load16", scope: null, file: !3, type: !24, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !41)
+!40 = distinct !DISubprogram(name: "bpf_heap_array_load16", linkageName: "bpf_heap_array_load16", scope: null, file: !3, type: !25, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !41)
 !41 = !{!42}
-!42 = !DILocalVariable(name: "offset", arg: 1, scope: !40, file: !3, type: !26)
+!42 = !DILocalVariable(name: "offset", arg: 1, scope: !40, file: !3, type: !27)
 !43 = distinct !DILocation(line: 0, scope: !36)
 !44 = !DILocation(line: 0, scope: !36)
-!45 = distinct !DISubprogram(name: "bpf_heap_load32", linkageName: "bpf_heap_load32", scope: null, file: !3, type: !24, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !46)
+!45 = distinct !DISubprogram(name: "bpf_heap_load32", linkageName: "bpf_heap_load32", scope: null, file: !3, type: !25, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !46)
 !46 = !{!47}
-!47 = !DILocalVariable(name: "offset", arg: 1, scope: !45, file: !3, type: !26)
+!47 = !DILocalVariable(name: "offset", arg: 1, scope: !45, file: !3, type: !27)
 !48 = !DILocation(line: 0, scope: !49, inlinedAt: !52)
-!49 = distinct !DISubprogram(name: "bpf_heap_array_load32", linkageName: "bpf_heap_array_load32", scope: null, file: !3, type: !24, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !50)
+!49 = distinct !DISubprogram(name: "bpf_heap_array_load32", linkageName: "bpf_heap_array_load32", scope: null, file: !3, type: !25, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !50)
 !50 = !{!51}
-!51 = !DILocalVariable(name: "offset", arg: 1, scope: !49, file: !3, type: !26)
+!51 = !DILocalVariable(name: "offset", arg: 1, scope: !49, file: !3, type: !27)
 !52 = distinct !DILocation(line: 0, scope: !45)
 !53 = !DILocation(line: 0, scope: !45)
 !54 = distinct !DISubprogram(name: "bpf_heap_store32", linkageName: "bpf_heap_store32", scope: null, file: !3, type: !55, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !57)
 !55 = !DISubroutineType(types: !56)
-!56 = !{!18, !26, !26}
+!56 = !{!18, !27, !27}
 !57 = !{!58, !59}
-!58 = !DILocalVariable(name: "offset", arg: 1, scope: !54, file: !3, type: !26)
-!59 = !DILocalVariable(name: "value", arg: 2, scope: !54, file: !3, type: !26)
+!58 = !DILocalVariable(name: "offset", arg: 1, scope: !54, file: !3, type: !27)
+!59 = !DILocalVariable(name: "value", arg: 2, scope: !54, file: !3, type: !27)
 !60 = !DILocation(line: 0, scope: !61, inlinedAt: !65)
 !61 = distinct !DISubprogram(name: "bpf_heap_array_store32", linkageName: "bpf_heap_array_store32", scope: null, file: !3, type: !55, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !62)
 !62 = !{!63, !64}
-!63 = !DILocalVariable(name: "offset", arg: 1, scope: !61, file: !3, type: !26)
-!64 = !DILocalVariable(name: "value", arg: 2, scope: !61, file: !3, type: !26)
+!63 = !DILocalVariable(name: "offset", arg: 1, scope: !61, file: !3, type: !27)
+!64 = !DILocalVariable(name: "value", arg: 2, scope: !61, file: !3, type: !27)
 !65 = distinct !DILocation(line: 0, scope: !54)
 !66 = !DILocation(line: 0, scope: !54)
 !67 = distinct !DISubprogram(name: "bpf_heap_store64", linkageName: "bpf_heap_store64", scope: null, file: !3, type: !55, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !68)
 !68 = !{!69, !70}
-!69 = !DILocalVariable(name: "offset", arg: 1, scope: !67, file: !3, type: !26)
-!70 = !DILocalVariable(name: "value", arg: 2, scope: !67, file: !3, type: !26)
+!69 = !DILocalVariable(name: "offset", arg: 1, scope: !67, file: !3, type: !27)
+!70 = !DILocalVariable(name: "value", arg: 2, scope: !67, file: !3, type: !27)
 !71 = !DILocation(line: 0, scope: !72, inlinedAt: !76)
 !72 = distinct !DISubprogram(name: "bpf_heap_array_store64", linkageName: "bpf_heap_array_store64", scope: null, file: !3, type: !55, spFlags: DISPFlagDefinition, unit: !2, retainedNodes: !73)
 !73 = !{!74, !75}
-!74 = !DILocalVariable(name: "offset", arg: 1, scope: !72, file: !3, type: !26)
-!75 = !DILocalVariable(name: "value", arg: 2, scope: !72, file: !3, type: !26)
+!74 = !DILocalVariable(name: "offset", arg: 1, scope: !72, file: !3, type: !27)
+!75 = !DILocalVariable(name: "value", arg: 2, scope: !72, file: !3, type: !27)
 !76 = distinct !DILocation(line: 0, scope: !67)
 !77 = !DILocation(line: 0, scope: !67)

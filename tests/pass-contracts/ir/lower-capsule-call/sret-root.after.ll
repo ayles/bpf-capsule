@@ -39,6 +39,66 @@ entry:
   ret i32 %8
 }
 
+define void @bytes_root(ptr sret([40 x i8]) align 8 %output) {
+entry:
+  store [40 x i8] zeroinitializer, ptr %output, align 8
+  ret void
+}
+
+define i32 @call_bytes() section "xdp" {
+entry:
+  %output = alloca [40 x i8], align 8
+  %0 = call [40 x i8] @bytes_root.capsule.result() [ "bpf.capsule.call"(i32 0) ]
+  %1 = load i32, ptr @bpf_capsule_fibers, align 4
+  %2 = icmp eq i32 %1, 3
+  %3 = icmp eq i32 %1, 2
+  %4 = load i32, ptr getelementptr inbounds nuw (%fiber, ptr @bpf_capsule_fibers, i32 0, i32 5), align 4
+  %5 = icmp ne i32 %4, 0
+  %6 = select i1 %5, i32 1, i32 0
+  %7 = select i1 %3, i32 2, i32 %6
+  %8 = select i1 %2, i32 3, i32 %7
+  %9 = icmp eq i32 %8, 0
+  br i1 %9, label %10, label %11
+
+10:                                               ; preds = %entry
+  store [40 x i8] %0, ptr %output, align 8
+  br label %11
+
+11:                                               ; preds = %10, %entry
+  ret i32 %8
+}
+
+define i32 @call_bytes_overaligned() section "xdp" {
+entry:
+  %output = alloca [40 x i8], align 16
+  %0 = call [40 x i8] @bytes_root.capsule.result() [ "bpf.capsule.call"(i32 0) ]
+  %1 = load i32, ptr @bpf_capsule_fibers, align 4
+  %2 = icmp eq i32 %1, 3
+  %3 = icmp eq i32 %1, 2
+  %4 = load i32, ptr getelementptr inbounds nuw (%fiber, ptr @bpf_capsule_fibers, i32 0, i32 5), align 4
+  %5 = icmp ne i32 %4, 0
+  %6 = select i1 %5, i32 1, i32 0
+  %7 = select i1 %3, i32 2, i32 %6
+  %8 = select i1 %2, i32 3, i32 %7
+  %9 = icmp eq i32 %8, 0
+  br i1 %9, label %10, label %11
+
+10:                                               ; preds = %entry
+  store [40 x i8] %0, ptr %output, align 8
+  br label %11
+
+11:                                               ; preds = %10, %entry
+  ret i32 %8
+}
+
+define internal [40 x i8] @bytes_root.capsule.result() {
+entry:
+  %result = alloca [40 x i8], align 8
+  call void @bytes_root(ptr sret([40 x i8]) align 8 %result)
+  %0 = load [40 x i8], ptr %result, align 1
+  ret [40 x i8] %0
+}
+
 define internal %result @aggregate_root.capsule.result(i32 %0) {
 entry:
   %result = alloca %result, align 8

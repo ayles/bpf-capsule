@@ -8,6 +8,9 @@ target triple = "bpfel"
 @bpf_capsule_config = constant %config { i32 0, i32 4096, i32 0, i32 0, i32 1, i32 4096, i32 1, i32 0, i32 0, i32 0, i32 1112556353, i32 8, i64 0 }, section ".rodata.bpfconfig", align 4
 @bpf_heap_array = global %map zeroinitializer, section ".maps", align 8, !dbg !0
 @bpf_call_stack = internal global [4096 x i8] zeroinitializer, align 8, !bpf.fiber.stack.size !13
+@llvm.native_field_offset = external global i64
+@native_capsule_address = global i64 0, section ".data.native", align 8
+@native_kernel_pointer = external global ptr, section ".ksyms"
 
 define i32 @read_any(ptr %address) {
 entry:
@@ -39,6 +42,48 @@ entry:
   ret void
 }
 
+declare extern_weak i64 @optional_kfunc() section ".ksyms"
+
+declare void @register_callback(ptr) section ".ksyms"
+
+define void @native_callback() !bpf.native !16 {
+entry:
+  ret void
+}
+
+define i1 @native_symbols() !bpf.native !16 {
+entry:
+  call void @register_callback(ptr @native_callback)
+  %available = icmp ne ptr @optional_kfunc, null
+  ret i1 %available
+}
+
+define i32 @native_kernel_fields(ptr %context) !bpf.native !16 {
+entry:
+  %bits = load i64, ptr %context, align 8
+  %task = inttoptr i64 %bits to ptr
+  %offset = load i64, ptr @llvm.native_field_offset, align 8
+  %field = getelementptr i8, ptr %task, i64 %offset
+  %member = load ptr, ptr %field, align 8
+  %value = load i32, ptr %member, align 4
+  %kernel = load ptr, ptr @native_kernel_pointer, align 8
+  %other = load i32, ptr %kernel, align 4
+  %sum = add i32 %value, %other
+  ret i32 %sum
+}
+
+define i32 @native_capsule_access(i1 %choose) !bpf.native !16 {
+entry:
+  %bits = load i64, ptr @native_capsule_address, align 8
+  %pointer = inttoptr i64 %bits to ptr
+  %next = getelementptr i8, ptr %pointer, i64 4
+  %selected = select i1 %choose, ptr %pointer, ptr %next
+  %value = load i32, ptr %selected, align 4
+  %image = load i32, ptr @bpf_call_stack, align 4
+  %sum = add i32 %value, %image
+  ret i32 %sum
+}
+
 !llvm.dbg.cu = !{!2}
 !llvm.module.flags = !{!14, !15}
 
@@ -58,3 +103,4 @@ entry:
 !13 = !{i64 4096}
 !14 = !{i32 2, !"Dwarf Version", i32 4}
 !15 = !{i32 2, !"Debug Info Version", i32 3}
+!16 = !{}

@@ -142,6 +142,13 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
                     "defined, statically visible function");
                 return PreservedAnalyses::all();
             }
+            // Rust can spell an aggregate as sret([N x i8]) with an explicit
+            // alignment stronger than the array type's ABI alignment. Keep
+            // that requirement even when reusing an existing value adapter.
+            MaybeAlign sretAlignment;
+            if (root->arg_size() && root->getArg(0)->hasStructRetAttr()) {
+                sretAlignment = root->getParamAlign(0);
+            }
             auto [adapted, inserted] = adaptedRoots.try_emplace(root, nullptr);
             if (inserted) {
                 adapted->second = AdaptSretRoot(module, *root);
@@ -150,7 +157,10 @@ struct LowerCapsuleCallPass : public PassInfoMixin<LowerCapsuleCallPass> {
             Type* returnType = root->getReturnType();
             uint64_t returnSize = returnType->isVoidTy() ? 0 : module.getDataLayout().getTypeAllocSize(returnType).getFixedValue();
             uint64_t returnAlignment = returnType->isVoidTy() ? 1 : module.getDataLayout().getABITypeAlign(returnType).value();
-            if (outputSize->getZExtValue() != returnSize || outputAlignment->getZExtValue() != returnAlignment) {
+            if (sretAlignment) {
+                returnAlignment = std::max(returnAlignment, sretAlignment->value());
+            }
+            if (outputSize->getZExtValue() != returnSize || outputAlignment->getZExtValue() < returnAlignment) {
                 ctx.emitError(markerCall, Twine("bpf-lower-capsule-call: capsule return storage does not match ") + root->getName());
                 return PreservedAnalyses::all();
             }
